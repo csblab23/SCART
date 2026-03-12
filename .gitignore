@@ -1,0 +1,23 @@
+
+*.h5ad
+geo_data/
+GSE_data/
+preprocessed_input/
+popv_reference/
+popv_results/
+
+# temp
+tmp/
+tmp_test/
+__pycache__/
+
+# notebooks
+*.ipynb
+.ipynb_checkpoints/
+
+# outputs
+final_test_output/
+cell_type_annotation_out/
+tumor_h5ad_out/
+
+
