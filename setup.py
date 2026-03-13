@@ -1,15 +1,19 @@
 from setuptools import setup, find_packages
 
+# read requirements from requirements.txt
+with open("requirements.txt") as f:
+    requirements = f.read().splitlines()
+
 setup(
-    name="scT-CAR_Designer",
+    name="SCART",
     version="0.1.0",
-    description="Single-cell tumor CAR target design pipeline",
-    author="Your Name",
+    description="Single-cell Antigen Ranking Tool",
+    author="Vinaya S",
     packages=find_packages(),
-    install_requires=[
-        "GEOparse>=1.34.0",
-        "pandas>=1.3.0"
-    ],
+    install_requires=requirements,
     python_requires=">=3.8",
+    include_package_data=True,
+    zip_safe=False,
 )
+
 
