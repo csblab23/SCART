@@ -1,0 +1,17 @@
+recursive-include SCART *.json
+recursive-include SCART *.csv
+recursive-include SCART *.txt
+recursive-include SCART *.pkl
+recursive-include SCART *.h5ad
+recursive-include SCART *.yaml
+recursive-include SCART *.yml
+recursive-include SCART *.tsv
+recursive-include SCART *.gz
+recursive-include SCART *.npz
+recursive-include SCART *.pt
+recursive-include SCART *.ckpt
+recursive-include SCART *.model
+recursive-include SCART *.bin
+recursive-include SCART *.pickle
+
+recursive-include SCART/PopV/resources *
