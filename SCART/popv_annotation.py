@@ -258,7 +258,6 @@ def run_popv_annotation(
     force_float32_X(adata_query)
     force_float32_X(adata_ref)
 
-    # package ontology path (FIXED)
     ontology_file = pkg_resources.files(
         "SCART.PopV.resources.ontology"
     ).joinpath("cl_popv.json")
@@ -271,12 +270,22 @@ def run_popv_annotation(
             ref_labels_key="cell_ontology_class",
             ref_batch_key=None,
             cl_obo_folder=str(ontology_json_path.parent) + "/",
+            n_samples_per_label=n_samples_per_label
         )
 
         adata_processed = pq.adata
 
     if input_type == "raw":
-        methods = ["CELLTYPIST", "scanvi", "rf", "svm"]
+        methods = [
+            "CELLTYPIST",
+            "KNN_BBKNN",
+            "KNN_HARMONY",
+            "KNN_SCVI",
+            "ONCLASS",
+            "SCANVI_POPV",
+            "Support_Vector",
+            "XGboost"
+        ]
     else:
         methods = ["CELLTYPIST"]
     
