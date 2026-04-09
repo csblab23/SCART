@@ -1,9 +1,0 @@
-setup.py
-scT-CAR_Designer/__init__.py
-scT-CAR_Designer/cell_type_annotation.py
-scT-CAR_Designer/geo_fetcher.py
-scT_CAR_Designer.egg-info/PKG-INFO
-scT_CAR_Designer.egg-info/SOURCES.txt
-scT_CAR_Designer.egg-info/dependency_links.txt
-scT_CAR_Designer.egg-info/requires.txt
-scT_CAR_Designer.egg-info/top_level.txt
