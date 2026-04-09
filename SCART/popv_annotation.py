@@ -275,6 +275,8 @@ def run_popv_annotation(
 
         adata_processed = pq.adata
 
+    # ---------------- method selection ----------------
+
     if input_type == "raw":
         methods = [
             "CELLTYPIST",
@@ -288,17 +290,43 @@ def run_popv_annotation(
         ]
     else:
         methods = ["CELLTYPIST"]
-    
+
+    # ---------------- safe execution ----------------
+
+    successful_methods = []
+
     for m in methods:
-        annotate_data(adata_processed, methods=[m])
+
+        try:
+            annotate_data(adata_processed, methods=[m])
+            successful_methods.append(m)
+
+        except Exception as e:
+
+            print(f"Skipping {m} due to error: {e}")
+
+    # ---------------- fallback prediction ----------------
+
+    if "popv_majority_vote_prediction" not in adata_processed.obs:
+
+        if len(successful_methods) > 0:
+
+            first_key = f"popv_{successful_methods[0].lower()}_prediction"
+
+            if first_key in adata_processed.obs:
+
+                adata_processed.obs["popv_majority_vote_prediction"] = adata_processed.obs[first_key]
 
     sanitize_prediction_columns(adata_processed)
+
     clean_obs_for_h5ad(adata_processed)
 
     out = os.path.join(output_dir, "final_popv_annotated.h5ad")
+
     adata_processed.write(out)
 
     return adata_processed
+
 
 # ------------------------------------------------------------------------------
 # Detect cancer type
@@ -309,12 +337,17 @@ def detect_cancer_type_from_h5ad(h5ad_file):
     adata = sc.read_h5ad(h5ad_file)
 
     if "cancer_type" in adata.uns:
+
         print(f"Detected cancer type: {adata.uns['cancer_type']}")
+
         return adata.uns["cancer_type"]
 
     raise ValueError(
+
         "Could not detect cancer type from h5ad.\n"
+
         "Provide user_reference manually."
+
     )
 
 # ------------------------------------------------------------------------------
@@ -338,6 +371,7 @@ def auto_run_popv(
     )
 
     adata_query = sc.read_h5ad(tumor_file)
+
     adata_ref = sc.read_h5ad(reference)
 
     return run_popv_annotation(
