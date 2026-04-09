@@ -259,22 +259,21 @@ def run_popv_annotation(
     force_float32_X(adata_ref)
 
     # package ontology path (FIXED)
-ontology_file = pkg_resources.files(
-    "SCART.PopV.resources.ontology"
-).joinpath("cl_popv.json")
+    ontology_file = pkg_resources.files(
+        "SCART.PopV.resources.ontology"
+    ).joinpath("cl_popv.json")
 
-with pkg_resources.as_file(ontology_file) as ontology_json_path:
+    with pkg_resources.as_file(ontology_file) as ontology_json_path:
 
-    pq = Process_Query(
-        query_adata=adata_query,
-        ref_adata=adata_ref,
-        ref_labels_key="cell_ontology_class",
-        ref_batch_key=None,
-        cl_obo_folder=str(ontology_json_path.parent) + "/",
-    )
+        pq = Process_Query(
+            query_adata=adata_query,
+            ref_adata=adata_ref,
+            ref_labels_key="cell_ontology_class",
+            ref_batch_key=None,
+            cl_obo_folder=str(ontology_json_path.parent) + "/",
+        )
 
-    
-    adata_processed = pq.adata
+        adata_processed = pq.adata
 
     if input_type == "raw":
         methods = ["celltypist", "scvi", "scanvi", "rf", "svm"]
