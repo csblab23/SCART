@@ -259,10 +259,10 @@ def run_popv_annotation(
     force_float32_X(adata_ref)
 
     # package ontology path
-    ontology_path = pkg_resources.files(
-        "SCART.PopV.resources.ontology"
+    ontology_path = str(
+    pkg_resources.files("SCART.PopV.resources.ontology")
     )
-
+    
     pq = Process_Query(
         query_adata=adata_query,
         ref_adata=adata_ref,
