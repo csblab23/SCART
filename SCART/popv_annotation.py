@@ -276,9 +276,9 @@ def run_popv_annotation(
         adata_processed = pq.adata
 
     if input_type == "raw":
-        methods = ["celltypist_on_scvi", "scanvi", "rf", "svm"]
+        methods = ["CELLTYPIST", "scanvi", "rf", "svm"]
     else:
-        methods = ["celltypist_on_scvi"]
+        methods = ["CELLTYPIST"]
     
     for m in methods:
         annotate_data(adata_processed, methods=[m])
