@@ -236,10 +236,10 @@ def set_popv_input_matrix(adata, input_type):
         raise ValueError("input_type must be raw/log1p")
 
 # ------------------------------------------------------------------------------
-# FIX ONTOLOGY LABELS
+# FIX REFERENCE LABELS TO MATCH ONTOLOGY
 # ------------------------------------------------------------------------------
 
-def normalize_cell_ontology_labels(adata):
+def normalize_reference_labels_to_ontology(adata):
 
     ontology_file = pkg_resources.files(
         "SCART.PopV.resources.ontology"
@@ -254,16 +254,39 @@ def normalize_cell_ontology_labels(adata):
         if "lbl" in node:
             valid_terms.add(node["lbl"].lower())
 
-    for col in adata.obs.columns:
+    replacements = {
 
-        if col.endswith("_prediction"):
+        "b cell": "B cell",
 
-            adata.obs[col] = (
-                adata.obs[col]
-                .astype(str)
-                .str.lower()
-                .str.strip()
-            )
+        "t cell": "T cell",
+
+        "cd8-positive, alpha-beta t cell":
+        "CD8-positive, alpha-beta T cell",
+
+        "cd4-positive, alpha-beta t cell":
+        "CD4-positive, alpha-beta T cell",
+
+        "plasma cell": "plasma cell",
+
+    }
+
+    def fix_label(label):
+
+        label_lower = str(label).lower().strip()
+
+        if label_lower in replacements:
+            return replacements[label_lower]
+
+        if label_lower in valid_terms:
+            return label_lower
+
+        return label
+
+    adata.obs["cell_ontology_class"] = (
+        adata.obs["cell_ontology_class"]
+        .astype(str)
+        .apply(fix_label)
+    )
 
 # ------------------------------------------------------------------------------
 # CORE POPV
@@ -293,7 +316,7 @@ def run_popv_annotation(
         "SCART.PopV.resources.ontology"
     ).joinpath("cl_popv.json")
 
-    with pkg_resources.as_file(ontology_file) as ontology_json_path:
+    with pkg_resources.as_file(ontology_json_path := ontology_file):
 
         pq = Process_Query(
             query_adata=adata_query,
@@ -305,6 +328,8 @@ def run_popv_annotation(
         )
 
         adata_processed = pq.adata
+
+    normalize_reference_labels_to_ontology(adata_processed)
 
     if input_type == "raw":
         methods = [
@@ -323,8 +348,6 @@ def run_popv_annotation(
     for m in methods:
 
         annotate_data(adata_processed, methods=[m])
-
-        normalize_cell_ontology_labels(adata_processed)
 
     sanitize_prediction_columns(adata_processed)
 
