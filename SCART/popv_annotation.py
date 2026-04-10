@@ -241,17 +241,7 @@ def set_popv_input_matrix(adata, input_type):
 
 def normalize_reference_labels_to_ontology(adata):
 
-    ontology_file = pkg_resources.files(
-        "popv.resources.ontology"
-    ).joinpath("cl_popv.json")
-
-    with pkg_resources.as_file(ontology_file) as f:
-        ontology = json.load(open(f))
-
-    valid_terms = set(
-        x.lower() for x in ontology["cell_types"].keys()
-    )
-
+    # PopV 0.6.0 handles ontology internally
     replacements = {
 
         "b cell": "B cell",
@@ -274,9 +264,6 @@ def normalize_reference_labels_to_ontology(adata):
 
         if label_lower in replacements:
             return replacements[label_lower]
-
-        if label_lower in valid_terms:
-            return label_lower
 
         return label
 
@@ -310,22 +297,16 @@ def run_popv_annotation(
     force_float32_X(adata_query)
     force_float32_X(adata_ref)
 
-    ontology_file = pkg_resources.files(
-        "popv.resources.ontology"
-    ).joinpath("cl_popv.json")
+    pq = Process_Query(
+        query_adata=adata_query,
+        ref_adata=adata_ref,
+        ref_labels_key="cell_ontology_class",
+        ref_batch_key=None,
+        cl_obo_folder=None,
+        n_samples_per_label=n_samples_per_label
+    )
 
-    with pkg_resources.as_file(ontology_json_path := ontology_file):
-
-        pq = Process_Query(
-            query_adata=adata_query,
-            ref_adata=adata_ref,
-            ref_labels_key="cell_ontology_class",
-            ref_batch_key=None,
-            cl_obo_folder=str(ontology_json_path.parent) + "/",
-            n_samples_per_label=n_samples_per_label
-        )
-
-        adata_processed = pq.adata
+    adata_processed = pq.adata
 
     normalize_reference_labels_to_ontology(adata_processed)
 
