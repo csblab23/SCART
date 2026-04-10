@@ -241,7 +241,6 @@ def set_popv_input_matrix(adata, input_type):
 
 def normalize_reference_labels_to_ontology(adata):
 
-    # PopV 0.6.0 handles ontology internally
     replacements = {
 
         "b cell": "B cell",
@@ -297,12 +296,17 @@ def run_popv_annotation(
     force_float32_X(adata_query)
     force_float32_X(adata_ref)
 
+    ontology_dir = os.path.join(
+        os.path.dirname(popv.__file__),
+        "resources"
+    )
+
     pq = Process_Query(
         query_adata=adata_query,
         ref_adata=adata_ref,
         ref_labels_key="cell_ontology_class",
         ref_batch_key=None,
-        cl_obo_folder=None,
+        cl_obo_folder=ontology_dir,
         n_samples_per_label=n_samples_per_label
     )
 
