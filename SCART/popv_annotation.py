@@ -312,9 +312,10 @@ def run_popv_annotation(
     force_float32_X(adata_ref)
 
     ontology_file = pkg_resources.files(
-        "SCART.PopV.resources.ontology"
+        "PopV.resources.ontology"
     ).joinpath("cl_popv.json")
 
+    
     with pkg_resources.as_file(ontology_json_path := ontology_file):
 
         pq = Process_Query(
