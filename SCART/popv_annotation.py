@@ -18,6 +18,7 @@ from popv.preprocessing import Process_Query
 from popv.annotation import annotate_data
 import popv.algorithms as alg
 import urllib.request
+import json
 
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -235,6 +236,36 @@ def set_popv_input_matrix(adata, input_type):
         raise ValueError("input_type must be raw/log1p")
 
 # ------------------------------------------------------------------------------
+# FIX ONTOLOGY LABELS
+# ------------------------------------------------------------------------------
+
+def normalize_cell_ontology_labels(adata):
+
+    ontology_file = pkg_resources.files(
+        "SCART.PopV.resources.ontology"
+    ).joinpath("cl_popv.json")
+
+    with pkg_resources.as_file(ontology_file) as f:
+        ontology = json.load(open(f))
+
+    valid_terms = set()
+
+    for node in ontology["graphs"][0]["nodes"]:
+        if "lbl" in node:
+            valid_terms.add(node["lbl"].lower())
+
+    for col in adata.obs.columns:
+
+        if col.endswith("_prediction"):
+
+            adata.obs[col] = (
+                adata.obs[col]
+                .astype(str)
+                .str.lower()
+                .str.strip()
+            )
+
+# ------------------------------------------------------------------------------
 # CORE POPV
 # ------------------------------------------------------------------------------
 
@@ -275,8 +306,6 @@ def run_popv_annotation(
 
         adata_processed = pq.adata
 
-    # ---------------- method selection ----------------
-
     if input_type == "raw":
         methods = [
             "CELLTYPIST",
@@ -291,31 +320,11 @@ def run_popv_annotation(
     else:
         methods = ["CELLTYPIST"]
 
-    # ---------------- safe execution ----------------
-
-    successful_methods = []
-
     for m in methods:
 
-        try:
-            annotate_data(adata_processed, methods=[m])
-            successful_methods.append(m)
+        annotate_data(adata_processed, methods=[m])
 
-        except Exception as e:
-
-            print(f"Skipping {m} due to error: {e}")
-
-    # ---------------- fallback prediction ----------------
-
-    if "popv_majority_vote_prediction" not in adata_processed.obs:
-
-        if len(successful_methods) > 0:
-
-            first_key = f"popv_{successful_methods[0].lower()}_prediction"
-
-            if first_key in adata_processed.obs:
-
-                adata_processed.obs["popv_majority_vote_prediction"] = adata_processed.obs[first_key]
+        normalize_cell_ontology_labels(adata_processed)
 
     sanitize_prediction_columns(adata_processed)
 
