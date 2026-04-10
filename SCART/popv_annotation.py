@@ -238,7 +238,6 @@ def set_popv_input_matrix(adata, input_type):
 # ------------------------------------------------------------------------------
 # FIX REFERENCE LABELS TO MATCH ONTOLOGY
 # ------------------------------------------------------------------------------
-
 def normalize_reference_labels_to_ontology(adata):
 
     ontology_file = pkg_resources.files(
@@ -248,11 +247,10 @@ def normalize_reference_labels_to_ontology(adata):
     with pkg_resources.as_file(ontology_file) as f:
         ontology = json.load(open(f))
 
-    valid_terms = set()
-
-    for node in ontology["graphs"][0]["nodes"]:
-        if "lbl" in node:
-            valid_terms.add(node["lbl"].lower())
+    # correct structure for popv 0.6.0
+    valid_terms = set(
+        x.lower() for x in ontology["cell_types"].keys()
+    )
 
     replacements = {
 
@@ -287,6 +285,7 @@ def normalize_reference_labels_to_ontology(adata):
         .astype(str)
         .apply(fix_label)
     )
+
 
 # ------------------------------------------------------------------------------
 # CORE POPV
