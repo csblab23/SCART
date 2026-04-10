@@ -238,16 +238,16 @@ def set_popv_input_matrix(adata, input_type):
 # ------------------------------------------------------------------------------
 # FIX REFERENCE LABELS TO MATCH ONTOLOGY
 # ------------------------------------------------------------------------------
+
 def normalize_reference_labels_to_ontology(adata):
 
     ontology_file = pkg_resources.files(
-        "SCART.PopV.resources.ontology"
+        "popv.resources.ontology"
     ).joinpath("cl_popv.json")
 
     with pkg_resources.as_file(ontology_file) as f:
         ontology = json.load(open(f))
 
-    # correct structure for popv 0.6.0
     valid_terms = set(
         x.lower() for x in ontology["cell_types"].keys()
     )
@@ -286,7 +286,6 @@ def normalize_reference_labels_to_ontology(adata):
         .apply(fix_label)
     )
 
-
 # ------------------------------------------------------------------------------
 # CORE POPV
 # ------------------------------------------------------------------------------
@@ -312,10 +311,9 @@ def run_popv_annotation(
     force_float32_X(adata_ref)
 
     ontology_file = pkg_resources.files(
-        "PopV.resources.ontology"
+        "popv.resources.ontology"
     ).joinpath("cl_popv.json")
 
-    
     with pkg_resources.as_file(ontology_json_path := ontology_file):
 
         pq = Process_Query(
