@@ -244,7 +244,6 @@ def normalize_reference_labels_to_ontology(adata):
     replacements = {
 
         "b cell": "B cell",
-
         "t cell": "T cell",
 
         "cd8-positive, alpha-beta t cell":
@@ -254,7 +253,6 @@ def normalize_reference_labels_to_ontology(adata):
         "CD4-positive, alpha-beta T cell",
 
         "plasma cell": "plasma cell",
-
     }
 
     def fix_label(label):
@@ -298,7 +296,8 @@ def run_popv_annotation(
 
     ontology_dir = os.path.join(
         os.path.dirname(popv.__file__),
-        "resources"
+        "resources",
+        "ontology"
     )
 
     pq = Process_Query(
@@ -329,7 +328,6 @@ def run_popv_annotation(
         methods = ["CELLTYPIST"]
 
     for m in methods:
-
         annotate_data(adata_processed, methods=[m])
 
     sanitize_prediction_columns(adata_processed)
@@ -358,11 +356,8 @@ def detect_cancer_type_from_h5ad(h5ad_file):
         return adata.uns["cancer_type"]
 
     raise ValueError(
-
         "Could not detect cancer type from h5ad.\n"
-
         "Provide user_reference manually."
-
     )
 
 # ------------------------------------------------------------------------------
