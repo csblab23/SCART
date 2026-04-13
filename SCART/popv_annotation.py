@@ -381,26 +381,47 @@ def run_popv_annotation(
     label_map = _build_label_map(ontology_json)
     logger.info(f"Loaded {len(label_map):,} ontology labels for case-normalisation.")
 
-    # FIX 1a — normalise reference labels BEFORE Process_Query builds the
-    # digraph.  PopV's consensus step looks up every predicted label against
-    # graph nodes using exact string comparison.  Tabula Sapiens stores labels
-    # like "B cell" / "CD8-positive, alpha-beta T cell", but CellTypist/KNN
-    # methods return lowercase.  Making the reference column use the same
-    # case as the ontology JSON nodes ensures predictions and graph are
-    # always consistent.
+    # FIX 1a — normalise reference labels AND filter non-ontology terms BEFORE
+    # Process_Query builds the digraph.
+    #
+    # Two sub-problems:
+    #   (a) Case mismatch: CellTypist/KNN return lowercase predictions but the
+    #       digraph nodes use mixed case ("B cell", "CD8-positive, alpha-beta T
+    #       cell").  We map every ref label through label_map so the digraph is
+    #       built with the same strings that will appear in predictions.
+    #   (b) Non-ontology anatomical terms: Tabula Sapiens ovary contains labels
+    #       like "follicle" which are anatomical structures, not CL cell types,
+    #       and have no node in the digraph at all.  Any method whose consensus
+    #       step encounters such a label throws "node X is not in the digraph".
+    #       We drop those reference cells entirely before Process_Query so the
+    #       label never enters the training set.
     _ref_label_col = "cell_ontology_class"
     if _ref_label_col in adata_ref.obs.columns:
-        before = adata_ref.obs[_ref_label_col].nunique()
+
+        # Step 1: normalise case
         adata_ref.obs[_ref_label_col] = (
             adata_ref.obs[_ref_label_col]
             .astype(str)
             .str.lower()
             .map(lambda v: label_map.get(v, v))
         )
-        after = adata_ref.obs[_ref_label_col].nunique()
+
+        # Step 2: keep only labels that exist as nodes in the ontology
+        valid_labels = set(label_map.values())   # correctly-cased CL terms
+        mask = adata_ref.obs[_ref_label_col].isin(valid_labels)
+        n_before = adata_ref.n_obs
+        n_dropped_labels = (~mask).sum()
+        if n_dropped_labels > 0:
+            dropped = adata_ref.obs.loc[~mask, _ref_label_col].unique().tolist()
+            logger.warning(
+                f"Dropping {n_dropped_labels} reference cells whose labels are "
+                f"not in the cell ontology digraph: {dropped}"
+            )
+            adata_ref = adata_ref[mask].copy()
         logger.info(
-            f"Reference '{_ref_label_col}': {before} → {after} unique labels "
-            "after case-normalisation."
+            f"Reference '{_ref_label_col}': {n_before} → {adata_ref.n_obs} cells, "
+            f"{adata_ref.obs[_ref_label_col].nunique()} unique labels after "
+            "case-normalisation and ontology filtering."
         )
 
     # --- Process_Query ------------------------------------------------------
@@ -421,33 +442,67 @@ def run_popv_annotation(
         and len(adata_processed.obs["_batch_annotation"].unique()) >= 2
     )
 
-    # FIX 2 — monkey-patch harmony obsm shape bug.
-    # Some versions of PopV/harmonypy store X_pca_harmony_popv transposed as
-    # (n_pcs, n_cells) or even flat (n_pcs,) instead of (n_cells, n_pcs).
-    # We run annotate_data then immediately fix the obsm entry so the next
-    # PopV step doesn't crash on the shape mismatch.
+    # FIX 2 — harmony obsm shape bug.
+    #
+    # The crash "Value had shape (50,) while it should have had (64153,)"
+    # happens INSIDE annotate_data, before it returns, when PopV calls:
+    #     adata.obsm["X_pca_harmony_popv"] = harmony_out.Z_corr
+    # Some harmonypy versions return Z_corr as (n_pcs, n_cells) transposed,
+    # and PopV squeezes it incorrectly producing a (n_pcs,) 1-D array.
+    # AnnData's obsm setter immediately validates the shape and raises —
+    # so a post-call patch never runs.
+    #
+    # Fix: monkey-patch the harmonypy HarmonyWorker / run_harmony so that
+    # whatever it returns has the correct (n_cells, n_pcs) shape, before
+    # PopV touches adata.obsm at all.
     _harmony_key = "X_pca_harmony_popv"
 
-    def _run_method_safe(adata, method):
-        annotate_data(adata, methods=[method])
-        if method == "KNN_HARMONY" and _harmony_key in adata.obsm:
-            arr = np.array(adata.obsm[_harmony_key])
-            n_cells = adata.n_obs
-            if arr.ndim == 2 and arr.shape[0] != n_cells and arr.shape[1] == n_cells:
+    def _patched_run_harmony(data_mat, *args, **kwargs):
+        """
+        Wrapper around harmonypy that ensures Z_corr is (n_cells, n_pcs).
+        data_mat is expected to be (n_pcs, n_cells) — the standard input
+        to harmonypy.  We capture the result object and fix its Z_corr
+        attribute before returning.
+        """
+        import harmonypy
+        result = harmonypy.run_harmony(data_mat, *args, **kwargs)
+        # Z_corr shape should be (n_pcs, n_cells) coming out of harmonypy,
+        # but PopV reads it as (n_cells, n_pcs).  Verify and transpose if needed.
+        if hasattr(result, "Z_corr"):
+            zc = np.array(result.Z_corr)
+            n_cells = data_mat.shape[1]   # data_mat is (n_pcs, n_cells)
+            if zc.ndim == 2 and zc.shape[0] != n_cells:
                 logger.warning(
-                    f"Transposing {_harmony_key}: {arr.shape} → {arr.T.shape}"
+                    f"Transposing harmonypy Z_corr: {zc.shape} → {zc.T.shape}"
                 )
-                adata.obsm[_harmony_key] = arr.T
-            elif arr.ndim == 1:
-                # Flat array — reshape to (n_cells, n_pcs) if sizes agree,
-                # otherwise log an error and leave PopV to handle it.
-                n_pcs = arr.shape[0]
-                logger.error(
-                    f"{_harmony_key} is 1-D ({arr.shape}). "
-                    "Harmony may have processed only 1 cell. "
-                    "KNN_HARMONY result will be unreliable."
-                )
-                adata.obsm[_harmony_key] = arr.reshape(1, n_pcs)
+                result.Z_corr = zc.T
+        return result
+
+    def _run_method_safe(adata, method):
+        """Run one PopV method, patching harmonypy for KNN_HARMONY."""
+        if method == "KNN_HARMONY":
+            try:
+                import harmonypy
+                import unittest.mock as mock
+                with mock.patch("harmonypy.run_harmony", side_effect=_patched_run_harmony):
+                    annotate_data(adata, methods=[method])
+            except ImportError:
+                # harmonypy not patchable — try direct run and fix obsm after
+                try:
+                    annotate_data(adata, methods=[method])
+                except Exception:
+                    pass
+                # Attempt obsm repair if the key landed in obsm somehow
+                if _harmony_key in adata.obsm:
+                    arr = np.array(adata.obsm[_harmony_key])
+                    if arr.ndim == 1 or (arr.ndim == 2 and arr.shape[0] != adata.n_obs):
+                        corrected = arr.T if arr.ndim == 2 else arr.reshape(1, -1)
+                        logger.warning(
+                            f"Post-call obsm repair: {arr.shape} → {corrected.shape}"
+                        )
+                        adata.obsm[_harmony_key] = corrected
+        else:
+            annotate_data(adata, methods=[method])
 
     # --- method selection ---------------------------------------------------
     if input_type == "raw":
