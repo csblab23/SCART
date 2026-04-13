@@ -236,7 +236,7 @@ def set_popv_input_matrix(adata, input_type):
         raise ValueError("input_type must be raw/log1p")
 
 # ------------------------------------------------------------------------------
-# ✅ NEW: Normalize predictions to ontology (FIX)
+# Normalize predictions to ontology
 # ------------------------------------------------------------------------------
 
 def normalize_predictions_to_ontology(adata, ontology_json_path):
@@ -323,14 +323,18 @@ def run_popv_annotation(
 
             try:
                 annotate_data(adata_processed, methods=[m])
+
+                # ✅ FIX: normalize immediately after each method
+                normalize_predictions_to_ontology(
+                    adata_processed,
+                    str(ontology_json_path)
+                )
+
                 successful_methods.append(m)
 
             except Exception as e:
 
                 print(f"Skipping {m} due to error: {e}")
-
-        # ---------------- ✅ FIX APPLIED HERE ----------------
-        normalize_predictions_to_ontology(adata_processed, str(ontology_json_path))
 
     # ---------------- fallback prediction ----------------
 
