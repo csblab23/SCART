@@ -9,6 +9,7 @@ import logging
 import requests
 from typing import Optional
 import importlib.resources as pkg_resources
+import json  # ✅ ADDED
 
 import numpy as np
 import scanpy as sc
@@ -235,6 +236,29 @@ def set_popv_input_matrix(adata, input_type):
         raise ValueError("input_type must be raw/log1p")
 
 # ------------------------------------------------------------------------------
+# ✅ NEW: Normalize predictions to ontology (FIX)
+# ------------------------------------------------------------------------------
+
+def normalize_predictions_to_ontology(adata, ontology_json_path):
+
+    with open(ontology_json_path) as f:
+        cl = json.load(f)
+
+    nodes = cl["nodes"]
+
+    name_lookup = {n["lbl"].lower(): n["lbl"] for n in nodes if "lbl" in n}
+
+    def map_label(label):
+        if not isinstance(label, str):
+            return label
+        key = label.strip().lower()
+        return name_lookup.get(key, label)
+
+    for col in adata.obs.columns:
+        if col.endswith("_prediction"):
+            adata.obs[col] = adata.obs[col].apply(map_label)
+
+# ------------------------------------------------------------------------------
 # CORE POPV
 # ------------------------------------------------------------------------------
 
@@ -275,35 +299,38 @@ def run_popv_annotation(
 
         adata_processed = pq.adata
 
-    # ---------------- method selection ----------------
+        # ---------------- method selection ----------------
 
-    if input_type == "raw":
-        methods = [
-            "CELLTYPIST",
-            "KNN_BBKNN",
-            "KNN_HARMONY",
-            "KNN_SCVI",
-            "ONCLASS",
-            "SCANVI_POPV",
-            "Support_Vector",
-            "XGboost"
-        ]
-    else:
-        methods = ["CELLTYPIST"]
+        if input_type == "raw":
+            methods = [
+                "CELLTYPIST",
+                "KNN_BBKNN",
+                "KNN_HARMONY",
+                "KNN_SCVI",
+                "ONCLASS",
+                "SCANVI_POPV",
+                "Support_Vector",
+                "XGboost"
+            ]
+        else:
+            methods = ["CELLTYPIST"]
 
-    # ---------------- safe execution ----------------
+        # ---------------- safe execution ----------------
 
-    successful_methods = []
+        successful_methods = []
 
-    for m in methods:
+        for m in methods:
 
-        try:
-            annotate_data(adata_processed, methods=[m])
-            successful_methods.append(m)
+            try:
+                annotate_data(adata_processed, methods=[m])
+                successful_methods.append(m)
 
-        except Exception as e:
+            except Exception as e:
 
-            print(f"Skipping {m} due to error: {e}")
+                print(f"Skipping {m} due to error: {e}")
+
+        # ---------------- ✅ FIX APPLIED HERE ----------------
+        normalize_predictions_to_ontology(adata_processed, str(ontology_json_path))
 
     # ---------------- fallback prediction ----------------
 
