@@ -235,24 +235,49 @@ def set_popv_input_matrix(adata, input_type):
     else:
         raise ValueError("input_type must be raw/log1p")
 
+
+
 # ------------------------------------------------------------------------------
-# Normalize predictions to ontology
+# Normalize predictions to ontology (ROBUST FIX)
 # ------------------------------------------------------------------------------
 
 def normalize_predictions_to_ontology(adata, ontology_json_path):
+
+    import difflib
 
     with open(ontology_json_path) as f:
         cl = json.load(f)
 
     nodes = cl["nodes"]
 
-    name_lookup = {n["lbl"].lower(): n["lbl"] for n in nodes if "lbl" in n}
+    # canonical labels
+    labels = [n["lbl"] for n in nodes if "lbl" in n]
+
+    # lowercase lookup
+    name_lookup = {l.lower(): l for l in labels}
+
+    def clean(text):
+        return text.strip().lower()
 
     def map_label(label):
+
         if not isinstance(label, str):
             return label
-        key = label.strip().lower()
-        return name_lookup.get(key, label)
+
+        key = clean(label)
+
+        # ✅ exact match
+        if key in name_lookup:
+            return name_lookup[key]
+
+        # ✅ fuzzy match (VERY IMPORTANT)
+        match = difflib.get_close_matches(key, name_lookup.keys(), n=1, cutoff=0.8)
+
+        if match:
+            return name_lookup[match[0]]
+
+        # fallback (keep original)
+        return label
 
     for col in adata.obs.columns:
         if col.endswith("_prediction"):
