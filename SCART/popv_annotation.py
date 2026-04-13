@@ -196,22 +196,39 @@ def _set_input_matrix(adata, input_type: str):
 # FIX 1 — case normalisation
 # ---------------------------------------------------------------------------
 
-def _build_label_map(ontology_json_path: str) -> dict:
+def _build_label_map(ontology_json_path: str):
     """
-    Build a lowercase→original-case mapping for every node label in the
-    cell-ontology JSON so we can correct prediction strings before they
-    reach PopV's digraph lookup.
+    Build two dicts from cl_popv.json:
+
+    label_map   : lowercase_label → correctly-cased label
+                  e.g. "b cell" → "B cell"
+
+    label_to_id : correctly-cased label → short CL ID
+                  e.g. "B cell" → "CL:0000236"
+
+    ONCLASS internally builds its own label→ID dict from the reference adata.
+    If any label is missing from that dict it throws KeyError(<label>).
+    We return label_to_id so we can sync cell_ontology_id in the reference
+    before Process_Query runs, ensuring ONCLASS can always resolve every label.
     """
     import json
     with open(ontology_json_path) as fh:
         cl = json.load(fh)
 
-    label_map = {}
+    label_map   = {}  # lowercase → correctly-cased
+    label_to_id = {}  # correctly-cased → short CL ID
+
     for node in cl.get("nodes", []):
         lbl = node.get("lbl", "")
+        nid = node.get("id", "")
         if lbl:
-            label_map[lbl.lower()] = lbl  # e.g. "b cell" → "B cell"
-    return label_map
+            label_map[lbl.lower()] = lbl
+            # Full URI e.g. "http://purl.obolibrary.org/obo/CL_0000236"
+            # → short ID "CL:0000236"
+            short_id = nid.split("/")[-1].replace("_", ":")
+            label_to_id[lbl] = short_id
+
+    return label_map, label_to_id
 
 
 def _normalise_predictions(adata, label_map: dict):
@@ -378,7 +395,7 @@ def run_popv_annotation(
     # --- resolve ontology ---------------------------------------------------
     cl_obo_folder = _resolve_ontology_folder()
     ontology_json = _find_ontology_json(cl_obo_folder)
-    label_map = _build_label_map(ontology_json)
+    label_map, label_to_id = _build_label_map(ontology_json)
     logger.info(f"Loaded {len(label_map):,} ontology labels for case-normalisation.")
 
     # FIX 1a — normalise reference labels AND filter non-ontology terms BEFORE
@@ -424,6 +441,39 @@ def run_popv_annotation(
             "case-normalisation and ontology filtering."
         )
 
+    # FIX ONCLASS — sync cell_ontology_id with the normalised labels.
+    #
+    # ONCLASS builds its own internal label→ID dict by pairing
+    # cell_ontology_class with cell_ontology_id from the reference adata.
+    # After our case-normalisation the labels are correctly cased ("B cell")
+    # but if cell_ontology_id is NaN, empty, or mismatched for any row,
+    # ONCLASS's dict has gaps and throws KeyError(<label>) at lookup time.
+    #
+    # We rebuild cell_ontology_id from label_to_id (derived from the same
+    # cl_popv.json) so every label always has a valid CL ID.
+    _ref_id_col = "cell_ontology_id"
+    if _ref_label_col in adata_ref.obs.columns:
+        adata_ref.obs[_ref_id_col] = (
+            adata_ref.obs[_ref_label_col]
+            .map(label_to_id)          # correctly-cased label → "CL:XXXXXXX"
+            .fillna(
+                adata_ref.obs.get(_ref_id_col, "")
+                if _ref_id_col in adata_ref.obs.columns
+                else ""
+            )
+        )
+        missing_ids = (adata_ref.obs[_ref_id_col] == "").sum()
+        if missing_ids > 0:
+            logger.warning(
+                f"{missing_ids} reference cells have no CL ID after sync — "
+                "ONCLASS may still fail for those labels."
+            )
+        else:
+            logger.info(
+                "cell_ontology_id synced with normalised labels — "
+                "ONCLASS label→ID dict will be complete."
+            )
+
     # --- Process_Query ------------------------------------------------------
     pq = Process_Query(
         query_adata=adata_query,
@@ -457,50 +507,33 @@ def run_popv_annotation(
     # PopV touches adata.obsm at all.
     _harmony_key = "X_pca_harmony_popv"
 
-    def _patched_run_harmony(data_mat, *args, **kwargs):
-        """
-        Wrapper around harmonypy that ensures Z_corr is (n_cells, n_pcs).
-        data_mat is expected to be (n_pcs, n_cells) — the standard input
-        to harmonypy.  We capture the result object and fix its Z_corr
-        attribute before returning.
-        """
-        import harmonypy
-        result = harmonypy.run_harmony(data_mat, *args, **kwargs)
-        # Z_corr shape should be (n_pcs, n_cells) coming out of harmonypy,
-        # but PopV reads it as (n_cells, n_pcs).  Verify and transpose if needed.
-        if hasattr(result, "Z_corr"):
-            zc = np.array(result.Z_corr)
-            n_cells = data_mat.shape[1]   # data_mat is (n_pcs, n_cells)
-            if zc.ndim == 2 and zc.shape[0] != n_cells:
-                logger.warning(
-                    f"Transposing harmonypy Z_corr: {zc.shape} → {zc.T.shape}"
-                )
-                result.Z_corr = zc.T
-        return result
-
     def _run_method_safe(adata, method):
         """Run one PopV method, patching harmonypy for KNN_HARMONY."""
         if method == "KNN_HARMONY":
-            try:
-                import harmonypy
-                import unittest.mock as mock
-                with mock.patch("harmonypy.run_harmony", side_effect=_patched_run_harmony):
-                    annotate_data(adata, methods=[method])
-            except ImportError:
-                # harmonypy not patchable — try direct run and fix obsm after
-                try:
-                    annotate_data(adata, methods=[method])
-                except Exception:
-                    pass
-                # Attempt obsm repair if the key landed in obsm somehow
-                if _harmony_key in adata.obsm:
-                    arr = np.array(adata.obsm[_harmony_key])
-                    if arr.ndim == 1 or (arr.ndim == 2 and arr.shape[0] != adata.n_obs):
-                        corrected = arr.T if arr.ndim == 2 else arr.reshape(1, -1)
+            import harmonypy
+            import unittest.mock as mock
+
+            # Capture the REAL function BEFORE patching so the wrapper can
+            # call it without triggering infinite recursion.
+            _real_run_harmony = harmonypy.run_harmony
+
+            def _patched_run_harmony(data_mat, *args, **kwargs):
+                result = _real_run_harmony(data_mat, *args, **kwargs)
+                if hasattr(result, "Z_corr"):
+                    zc = np.array(result.Z_corr)
+                    # harmonypy returns Z_corr as (n_pcs, n_cells);
+                    # PopV needs (n_cells, n_pcs) for adata.obsm assignment.
+                    n_cells = data_mat.shape[1]
+                    if zc.ndim == 2 and zc.shape[0] != n_cells:
                         logger.warning(
-                            f"Post-call obsm repair: {arr.shape} → {corrected.shape}"
+                            f"Transposing harmonypy Z_corr: "
+                            f"{zc.shape} → {zc.T.shape}"
                         )
-                        adata.obsm[_harmony_key] = corrected
+                        result.Z_corr = zc.T
+                return result
+
+            with mock.patch.object(harmonypy, "run_harmony", _patched_run_harmony):
+                annotate_data(adata, methods=[method])
         else:
             annotate_data(adata, methods=[method])
 
@@ -535,6 +568,16 @@ def run_popv_annotation(
 
             successful_methods.append(method)
             logger.info(f"✓ {method} completed.")
+
+        except KeyError as ke:
+            # ONCLASS raises a bare KeyError when a label exists in the Cell
+            # Ontology but is missing from its internal NLP embedding graph
+            # (a separate graph from the PopV consensus digraph).
+            logger.warning(
+                f"✗ Skipping {method}: label {ke!r} not found in "
+                "ONCLASS NLP embedding graph. This is a known ONCLASS "
+                "limitation for some Tabula Sapiens labels."
+            )
 
         except Exception as exc:
             logger.warning(f"✗ Skipping {method}: {exc}")
