@@ -231,20 +231,31 @@ def _normalise_predictions(adata, label_map: dict):
 
 
 # ---------------------------------------------------------------------------
-# FIX 2 — resolve ontology path from popv's own package
+# FIX 2 — resolve ontology path (SCART-vendored copy takes priority)
 # ---------------------------------------------------------------------------
 
 def _resolve_ontology_folder() -> str:
     """
-    Return the directory containing PopV's bundled cl.obo / cl_popv.json.
-    Tries several known sub-paths across different popv versions.
+    Return the directory containing cl_popv.json (or equivalent).
+
+    Search order:
+      1. SCART.PopV.resources.ontology   ← vendored copy inside this package
+      2. popv.resources.ontology         ← upstream popv installation
+      3. popv.resources / popv           ← older upstream layouts
+      4. Filesystem walk of installed SCART package root
+      5. Filesystem walk of installed popv package root
     """
     candidate_packages = [
+        # SCART's own vendored ontology — matches the repo layout visible in
+        # the screenshot: SCART/PopV/resources/ontology/cl_popv.json
+        "SCART.PopV.resources.ontology",
+        "SCART.PopV.resources",
+        # upstream popv layouts
         "popv.resources.ontology",
         "popv.resources",
         "popv",
     ]
-    candidate_files = ["cl.obo.json", "cl_popv.json", "cl.json"]
+    candidate_files = ["cl_popv.json", "cl.obo.json", "cl.json"]
 
     for pkg in candidate_packages:
         for fname in candidate_files:
@@ -252,27 +263,35 @@ def _resolve_ontology_folder() -> str:
                 f = pkg_resources.files(pkg).joinpath(fname)
                 with pkg_resources.as_file(f) as p:
                     if p.exists():
-                        logger.info(f"Ontology found: {p}")
+                        logger.info(f"Ontology found via importlib ({pkg}): {p}")
                         return str(p.parent) + "/"
-            except (ModuleNotFoundError, FileNotFoundError, TypeError):
+            except (ModuleNotFoundError, FileNotFoundError, TypeError, ValueError):
                 continue
 
-    # Last resort: walk the installed popv package directory
+    # Filesystem walk fallback — covers editable / non-standard installs
+    walk_roots = []
+    try:
+        import SCART as _scart_pkg
+        walk_roots.append(os.path.dirname(_scart_pkg.__file__))
+    except ImportError:
+        pass
     try:
         import popv as _popv_pkg
-        pkg_root = os.path.dirname(_popv_pkg.__file__)
-        for root, _, fnames in os.walk(pkg_root):
-            for fname in fnames:
-                if fname in ("cl.obo.json", "cl_popv.json", "cl.json"):
-                    found = os.path.join(root, fname)
-                    logger.info(f"Ontology found via walk: {found}")
-                    return root + "/"
-    except Exception:
+        walk_roots.append(os.path.dirname(_popv_pkg.__file__))
+    except ImportError:
         pass
 
+    for pkg_root in walk_roots:
+        for root, _, fnames in os.walk(pkg_root):
+            for fname in fnames:
+                if fname in ("cl_popv.json", "cl.obo.json", "cl.json"):
+                    logger.info(f"Ontology found via filesystem walk: {os.path.join(root, fname)}")
+                    return root + "/"
+
     raise FileNotFoundError(
-        "Could not locate PopV's cell-ontology JSON.\n"
-        "Install a recent version of popv or set cl_obo_folder manually."
+        "Could not locate the cell-ontology JSON (cl_popv.json).\n"
+        "Expected location: SCART/PopV/resources/ontology/cl_popv.json\n"
+        "Check that the SCART package is installed correctly."
     )
 
 
