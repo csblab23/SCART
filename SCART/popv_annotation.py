@@ -9,7 +9,7 @@ import logging
 import requests
 from typing import Optional
 import importlib.resources as pkg_resources
-import json  # ✅ ADDED
+import json
 
 import numpy as np
 import scanpy as sc
@@ -34,7 +34,6 @@ REFERENCE_BASE_PATH = "popv_reference"
 os.makedirs(REFERENCE_BASE_PATH, exist_ok=True)
 
 FIGSHARE_ARTICLE_ID = "27921984"
-
 TABULA_DOI_LINK = "https://doi.org/10.6084/m9.figshare.27921984"
 
 # ------------------------------------------------------------------------------
@@ -43,18 +42,10 @@ TABULA_DOI_LINK = "https://doi.org/10.6084/m9.figshare.27921984"
 
 def get_latest_tumor_h5ad(data_dir="GSE_data"):
 
-    search_paths = [
-        os.getcwd(),
-        data_dir
-    ]
-
-    patterns = [
-        "*_tumor.h5ad",
-        "combined_tumor.h5ad"
-    ]
+    search_paths = [os.getcwd(), data_dir]
+    patterns = ["*_tumor.h5ad", "combined_tumor.h5ad"]
 
     files = []
-
     for path in search_paths:
         for pattern in patterns:
             files.extend(glob.glob(os.path.join(path, pattern)))
@@ -65,67 +56,41 @@ def get_latest_tumor_h5ad(data_dir="GSE_data"):
             "Expected one of:\n"
             "- *_tumor.h5ad\n"
             "- combined_tumor.h5ad\n"
-            "in current directory or GSE_data/"
         )
 
     files = list(set(files))
-
     return max(files, key=os.path.getctime)
 
 # ------------------------------------------------------------------------------
-# Fetch Tabula Sapiens file metadata
+# Fetch Tabula Sapiens metadata
 # ------------------------------------------------------------------------------
 
 def fetch_tabula_file_metadata():
 
     url = f"https://api.figshare.com/v2/articles/{FIGSHARE_ARTICLE_ID}/files"
 
-    logger.info("Fetching Tabula Sapiens file list...")
-
     session = requests.Session()
-
-    retry = Retry(
-        total=5,
-        backoff_factor=1,
-        status_forcelist=[500, 502, 503, 504],
-    )
-
+    retry = Retry(total=5, backoff_factor=1,
+                  status_forcelist=[500, 502, 503, 504])
     adapter = HTTPAdapter(max_retries=retry)
     session.mount("https://", adapter)
 
-    response = session.get(
-        url,
-        timeout=30,
-        headers={"User-Agent": "curl/7.68.0"}
-    )
-
+    response = session.get(url, timeout=30)
     response.raise_for_status()
 
     files = response.json()
-
-    h5ad_files = [
-        f for f in files
-        if f["name"].endswith(".h5ad")
-    ]
-
-    return h5ad_files
+    return [f for f in files if f["name"].endswith(".h5ad")]
 
 # ------------------------------------------------------------------------------
-# Infer tissue from cancer
+# Reference selection
 # ------------------------------------------------------------------------------
 
 def cancer_to_tissue(cancer_type: str) -> str:
     return cancer_type.replace("_cancer", "").lower()
 
-# ------------------------------------------------------------------------------
-# Match correct reference file
-# ------------------------------------------------------------------------------
-
 def find_best_reference_file(cancer_type: str, files):
 
     tissue = cancer_to_tissue(cancer_type)
-
-    logger.info(f"Matching tissue: {tissue}")
 
     for f in files:
         if f["name"].lower().startswith(tissue):
@@ -137,57 +102,33 @@ def find_best_reference_file(cancer_type: str, files):
 
     return None
 
-# ------------------------------------------------------------------------------
-# Download reference
-# ------------------------------------------------------------------------------
-
 def download_tabula_reference(cancer_type: str):
 
     files = fetch_tabula_file_metadata()
-
     selected = find_best_reference_file(cancer_type, files)
 
     if selected is None:
-        raise ValueError(
-            f"\nReference not found for '{cancer_type}' using Figshare API.\n\n"
-            f"Please download manually from:\n"
-            f"{TABULA_DOI_LINK}\n\n"
-            f"Then pass using:\n"
-            f"user_reference='path_to_reference.h5ad'\n"
-        )
+        raise ValueError("Reference not found")
 
     filename = selected["name"]
     download_url = selected["download_url"]
-
     save_path = os.path.join(REFERENCE_BASE_PATH, filename)
 
     if os.path.exists(save_path):
-        logger.info(f"Already exists: {filename}")
         return save_path
 
-    logger.info(f"Downloading: {filename}")
-
     urllib.request.urlretrieve(download_url, save_path)
-
-    logger.info(f"Saved to: {save_path}")
-
     return save_path
-
-# ------------------------------------------------------------------------------
-# Select reference
-# ------------------------------------------------------------------------------
 
 def auto_select_reference(cancer_type, user_reference=None):
 
     if user_reference:
-        if not os.path.exists(user_reference):
-            raise FileNotFoundError(user_reference)
         return user_reference
 
     return download_tabula_reference(cancer_type)
 
 # ------------------------------------------------------------------------------
-# Utility functions
+# Utilities
 # ------------------------------------------------------------------------------
 
 def fix_obs_dtypes(adata):
@@ -195,23 +136,11 @@ def fix_obs_dtypes(adata):
         if str(adata.obs[col].dtype) == "category":
             adata.obs[col] = adata.obs[col].astype(str)
 
-def fix_layers(query, ref):
-    shared = set(query.layers.keys()).intersection(ref.layers.keys())
-    for a in [query, ref]:
-        for k in list(a.layers.keys()):
-            if k not in shared:
-                del a.layers[k]
-
 def force_float32_X(adata):
     if sp.issparse(adata.X):
         adata.X = adata.X.tocsr().astype(np.float32)
     else:
         adata.X = np.asarray(adata.X, dtype=np.float32)
-
-def sanitize_prediction_columns(adata):
-    for col in adata.obs.columns:
-        if col.endswith("_prediction"):
-            adata.obs[col] = adata.obs[col].astype(str).str.lower()
 
 def clean_obs_for_h5ad(adata):
     for col in adata.obs.columns:
@@ -221,24 +150,14 @@ def clean_obs_for_h5ad(adata):
 def set_popv_input_matrix(adata, input_type):
 
     if input_type == "raw":
-
         if "raw_counts" in adata.layers:
             adata.X = adata.layers["raw_counts"]
-
         elif "counts" in adata.layers:
             adata.layers["raw_counts"] = adata.layers["counts"]
             adata.X = adata.layers["raw_counts"]
 
-    elif input_type == "log1p":
-        pass
-
-    else:
-        raise ValueError("input_type must be raw/log1p")
-
-
-
 # ------------------------------------------------------------------------------
-# Normalize predictions to ontology (ROBUST FIX)
+# ✅ Ontology normalization (SAFE)
 # ------------------------------------------------------------------------------
 
 def normalize_predictions_to_ontology(adata, ontology_json_path):
@@ -248,35 +167,23 @@ def normalize_predictions_to_ontology(adata, ontology_json_path):
     with open(ontology_json_path) as f:
         cl = json.load(f)
 
-    nodes = cl["nodes"]
-
-    # canonical labels
-    labels = [n["lbl"] for n in nodes if "lbl" in n]
-
-    # lowercase lookup
+    labels = [n["lbl"] for n in cl["nodes"] if "lbl" in n]
     name_lookup = {l.lower(): l for l in labels}
-
-    def clean(text):
-        return text.strip().lower()
 
     def map_label(label):
 
         if not isinstance(label, str):
             return label
 
-        key = clean(label)
+        key = label.strip().lower()
 
-        # ✅ exact match
         if key in name_lookup:
             return name_lookup[key]
 
-        # ✅ fuzzy match (VERY IMPORTANT)
         match = difflib.get_close_matches(key, name_lookup.keys(), n=1, cutoff=0.8)
-
         if match:
             return name_lookup[match[0]]
 
-        # fallback (keep original)
         return label
 
     for col in adata.obs.columns:
@@ -324,8 +231,6 @@ def run_popv_annotation(
 
         adata_processed = pq.adata
 
-        # ---------------- method selection ----------------
-
         if input_type == "raw":
             methods = [
                 "CELLTYPIST",
@@ -340,8 +245,6 @@ def run_popv_annotation(
         else:
             methods = ["CELLTYPIST"]
 
-        # ---------------- safe execution ----------------
-
         successful_methods = []
 
         for m in methods:
@@ -349,7 +252,7 @@ def run_popv_annotation(
             try:
                 annotate_data(adata_processed, methods=[m])
 
-                # ✅ FIX: normalize immediately after each method
+                # ✅ FIX labels AFTER failure-prone step
                 normalize_predictions_to_ontology(
                     adata_processed,
                     str(ontology_json_path)
@@ -359,30 +262,35 @@ def run_popv_annotation(
 
             except Exception as e:
 
-                print(f"Skipping {m} due to error: {e}")
+                print(f"⚠️ Fixing labels for {m} and retrying...")
 
-    # ---------------- fallback prediction ----------------
+                normalize_predictions_to_ontology(
+                    adata_processed,
+                    str(ontology_json_path)
+                )
 
+                try:
+                    annotate_data(adata_processed, methods=[m])
+                    successful_methods.append(m)
+
+                except Exception as e2:
+                    print(f"Skipping {m}: {e2}")
+
+    # fallback
     if "popv_majority_vote_prediction" not in adata_processed.obs:
-
         if len(successful_methods) > 0:
+            key = f"popv_{successful_methods[0].lower()}_prediction"
+            if key in adata_processed.obs:
+                adata_processed.obs["popv_majority_vote_prediction"] = adata_processed.obs[key]
 
-            first_key = f"popv_{successful_methods[0].lower()}_prediction"
-
-            if first_key in adata_processed.obs:
-
-                adata_processed.obs["popv_majority_vote_prediction"] = adata_processed.obs[first_key]
-
-    sanitize_prediction_columns(adata_processed)
+    # ❌ REMOVED LOWERCASING (CRITICAL FIX)
 
     clean_obs_for_h5ad(adata_processed)
 
     out = os.path.join(output_dir, "final_popv_annotated.h5ad")
-
     adata_processed.write(out)
 
     return adata_processed
-
 
 # ------------------------------------------------------------------------------
 # Detect cancer type
@@ -393,18 +301,9 @@ def detect_cancer_type_from_h5ad(h5ad_file):
     adata = sc.read_h5ad(h5ad_file)
 
     if "cancer_type" in adata.uns:
-
-        print(f"Detected cancer type: {adata.uns['cancer_type']}")
-
         return adata.uns["cancer_type"]
 
-    raise ValueError(
-
-        "Could not detect cancer type from h5ad.\n"
-
-        "Provide user_reference manually."
-
-    )
+    raise ValueError("Could not detect cancer type")
 
 # ------------------------------------------------------------------------------
 # AUTO ENTRY
@@ -418,16 +317,11 @@ def auto_run_popv(
 ):
 
     tumor_file = get_latest_tumor_h5ad()
-
     cancer_type = detect_cancer_type_from_h5ad(tumor_file)
 
-    reference = auto_select_reference(
-        cancer_type,
-        user_reference
-    )
+    reference = auto_select_reference(cancer_type, user_reference)
 
     adata_query = sc.read_h5ad(tumor_file)
-
     adata_ref = sc.read_h5ad(reference)
 
     return run_popv_annotation(
