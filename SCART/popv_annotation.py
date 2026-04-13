@@ -381,6 +381,28 @@ def run_popv_annotation(
     label_map = _build_label_map(ontology_json)
     logger.info(f"Loaded {len(label_map):,} ontology labels for case-normalisation.")
 
+    # FIX 1a — normalise reference labels BEFORE Process_Query builds the
+    # digraph.  PopV's consensus step looks up every predicted label against
+    # graph nodes using exact string comparison.  Tabula Sapiens stores labels
+    # like "B cell" / "CD8-positive, alpha-beta T cell", but CellTypist/KNN
+    # methods return lowercase.  Making the reference column use the same
+    # case as the ontology JSON nodes ensures predictions and graph are
+    # always consistent.
+    _ref_label_col = "cell_ontology_class"
+    if _ref_label_col in adata_ref.obs.columns:
+        before = adata_ref.obs[_ref_label_col].nunique()
+        adata_ref.obs[_ref_label_col] = (
+            adata_ref.obs[_ref_label_col]
+            .astype(str)
+            .str.lower()
+            .map(lambda v: label_map.get(v, v))
+        )
+        after = adata_ref.obs[_ref_label_col].nunique()
+        logger.info(
+            f"Reference '{_ref_label_col}': {before} → {after} unique labels "
+            "after case-normalisation."
+        )
+
     # --- Process_Query ------------------------------------------------------
     pq = Process_Query(
         query_adata=adata_query,
@@ -399,6 +421,34 @@ def run_popv_annotation(
         and len(adata_processed.obs["_batch_annotation"].unique()) >= 2
     )
 
+    # FIX 2 — monkey-patch harmony obsm shape bug.
+    # Some versions of PopV/harmonypy store X_pca_harmony_popv transposed as
+    # (n_pcs, n_cells) or even flat (n_pcs,) instead of (n_cells, n_pcs).
+    # We run annotate_data then immediately fix the obsm entry so the next
+    # PopV step doesn't crash on the shape mismatch.
+    _harmony_key = "X_pca_harmony_popv"
+
+    def _run_method_safe(adata, method):
+        annotate_data(adata, methods=[method])
+        if method == "KNN_HARMONY" and _harmony_key in adata.obsm:
+            arr = np.array(adata.obsm[_harmony_key])
+            n_cells = adata.n_obs
+            if arr.ndim == 2 and arr.shape[0] != n_cells and arr.shape[1] == n_cells:
+                logger.warning(
+                    f"Transposing {_harmony_key}: {arr.shape} → {arr.T.shape}"
+                )
+                adata.obsm[_harmony_key] = arr.T
+            elif arr.ndim == 1:
+                # Flat array — reshape to (n_cells, n_pcs) if sizes agree,
+                # otherwise log an error and leave PopV to handle it.
+                n_pcs = arr.shape[0]
+                logger.error(
+                    f"{_harmony_key} is 1-D ({arr.shape}). "
+                    "Harmony may have processed only 1 cell. "
+                    "KNN_HARMONY result will be unreliable."
+                )
+                adata.obsm[_harmony_key] = arr.reshape(1, n_pcs)
+
     # --- method selection ---------------------------------------------------
     if input_type == "raw":
         methods = [
@@ -411,7 +461,7 @@ def run_popv_annotation(
             "XGboost",
         ]
         if has_two_batches:
-            methods.insert(2, "KNN_HARMONY")  # only add when harmony can run safely
+            methods.insert(2, "KNN_HARMONY")
         else:
             logger.warning("Skipping KNN_HARMONY: fewer than 2 batch values detected.")
     else:
@@ -422,10 +472,10 @@ def run_popv_annotation(
 
     for method in methods:
         try:
-            annotate_data(adata_processed, methods=[method])
+            _run_method_safe(adata_processed, method)
 
-            # FIX 1: normalise case immediately after each method so that the
-            # next method and the consensus step see correctly-cased labels.
+            # FIX 1b — normalise prediction column case after every method so
+            # the PopV consensus step always sees correctly-cased labels.
             _normalise_predictions(adata_processed, label_map)
 
             successful_methods.append(method)
