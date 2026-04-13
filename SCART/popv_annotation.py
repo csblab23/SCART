@@ -18,7 +18,6 @@ from popv.preprocessing import Process_Query
 from popv.annotation import annotate_data
 import popv.algorithms as alg
 import urllib.request
-import json
 
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -236,41 +235,6 @@ def set_popv_input_matrix(adata, input_type):
         raise ValueError("input_type must be raw/log1p")
 
 # ------------------------------------------------------------------------------
-# FIX REFERENCE LABELS TO MATCH ONTOLOGY
-# ------------------------------------------------------------------------------
-
-def normalize_reference_labels_to_ontology(adata):
-
-    replacements = {
-
-        "b cell": "B cell",
-        "t cell": "T cell",
-
-        "cd8-positive, alpha-beta t cell":
-        "CD8-positive, alpha-beta T cell",
-
-        "cd4-positive, alpha-beta t cell":
-        "CD4-positive, alpha-beta T cell",
-
-        "plasma cell": "plasma cell",
-    }
-
-    def fix_label(label):
-
-        label_lower = str(label).lower().strip()
-
-        if label_lower in replacements:
-            return replacements[label_lower]
-
-        return label
-
-    adata.obs["cell_ontology_class"] = (
-        adata.obs["cell_ontology_class"]
-        .astype(str)
-        .apply(fix_label)
-    )
-
-# ------------------------------------------------------------------------------
 # CORE POPV
 # ------------------------------------------------------------------------------
 
@@ -294,24 +258,24 @@ def run_popv_annotation(
     force_float32_X(adata_query)
     force_float32_X(adata_ref)
 
-    ontology_dir = os.path.join(
-        os.path.dirname(popv.__file__),
-        "resources",
-        "ontology"
-    )
+    ontology_file = pkg_resources.files(
+        "SCART.PopV.resources.ontology"
+    ).joinpath("cl_popv.json")
 
-    pq = Process_Query(
-        query_adata=adata_query,
-        ref_adata=adata_ref,
-        ref_labels_key="cell_ontology_class",
-        ref_batch_key=None,
-        cl_obo_folder=ontology_dir,
-        n_samples_per_label=n_samples_per_label
-    )
+    with pkg_resources.as_file(ontology_file) as ontology_json_path:
 
-    adata_processed = pq.adata
+        pq = Process_Query(
+            query_adata=adata_query,
+            ref_adata=adata_ref,
+            ref_labels_key="cell_ontology_class",
+            ref_batch_key=None,
+            cl_obo_folder=str(ontology_json_path.parent) + "/",
+            n_samples_per_label=n_samples_per_label
+        )
 
-    normalize_reference_labels_to_ontology(adata_processed)
+        adata_processed = pq.adata
+
+    # ---------------- method selection ----------------
 
     if input_type == "raw":
         methods = [
@@ -327,8 +291,31 @@ def run_popv_annotation(
     else:
         methods = ["CELLTYPIST"]
 
+    # ---------------- safe execution ----------------
+
+    successful_methods = []
+
     for m in methods:
-        annotate_data(adata_processed, methods=[m])
+
+        try:
+            annotate_data(adata_processed, methods=[m])
+            successful_methods.append(m)
+
+        except Exception as e:
+
+            print(f"Skipping {m} due to error: {e}")
+
+    # ---------------- fallback prediction ----------------
+
+    if "popv_majority_vote_prediction" not in adata_processed.obs:
+
+        if len(successful_methods) > 0:
+
+            first_key = f"popv_{successful_methods[0].lower()}_prediction"
+
+            if first_key in adata_processed.obs:
+
+                adata_processed.obs["popv_majority_vote_prediction"] = adata_processed.obs[first_key]
 
     sanitize_prediction_columns(adata_processed)
 
@@ -356,8 +343,11 @@ def detect_cancer_type_from_h5ad(h5ad_file):
         return adata.uns["cancer_type"]
 
     raise ValueError(
+
         "Could not detect cancer type from h5ad.\n"
+
         "Provide user_reference manually."
+
     )
 
 # ------------------------------------------------------------------------------
