@@ -492,48 +492,145 @@ def run_popv_annotation(
         and len(adata_processed.obs["_batch_annotation"].unique()) >= 2
     )
 
-    # FIX 2 — harmony obsm shape bug.
+    # FIX 2 — KNN_HARMONY obsm shape bug.
     #
-    # The crash "Value had shape (50,) while it should have had (64153,)"
-    # happens INSIDE annotate_data, before it returns, when PopV calls:
-    #     adata.obsm["X_pca_harmony_popv"] = harmony_out.Z_corr
-    # Some harmonypy versions return Z_corr as (n_pcs, n_cells) transposed,
-    # and PopV squeezes it incorrectly producing a (n_pcs,) 1-D array.
-    # AnnData's obsm setter immediately validates the shape and raises —
-    # so a post-call patch never runs.
+    # Diagnosis (from logs):
+    #   - harmonypy returns Z_corr with shape (64144, 50) — already correct
+    #     (n_cells, n_pcs).
+    #   - BUT PopV's KNN_HARMONY code does:
+    #         adata.obsm["X_pca_harmony_popv"] = harmony_out.Z_corr.T
+    #     i.e. it TRANSPOSES the result, producing (50, 64144).
+    #     AnnData then tries to index that as (n_cells,) and gets (50,).
+    #   - Z_corr is a read-only property — we cannot patch the attribute.
     #
-    # Fix: monkey-patch the harmonypy HarmonyWorker / run_harmony so that
-    # whatever it returns has the correct (n_cells, n_pcs) shape, before
-    # PopV touches adata.obsm at all.
+    # Fix: intercept adata.obsm.__setitem__ for the harmony key only.
+    #   When PopV writes X_pca_harmony_popv, we detect if the value has the
+    #   wrong shape and silently correct it to (n_cells, n_pcs) before
+    #   AnnData validates it.
+    #
+    # FIX ONCLASS — KeyError('B cell') inside ONCLASS's own graph.
+    #
+    # Diagnosis: ONCLASS builds label→CL_ID from its internal ontology graph
+    #   (not from adata).  In this version of ONCLASS the graph uses a
+    #   DIFFERENT string for CL:0000236 than "B cell" (e.g. "B lymphocyte").
+    #   Syncing cell_ontology_id had no effect because ONCLASS never reads it.
+    #
+    # Fix: patch ONCLASS's internal cell_type_nlp dict (or equivalent) to add
+    #   any missing label→ID mappings from our label_to_id before it runs.
+
     _harmony_key = "X_pca_harmony_popv"
 
-    def _run_method_safe(adata, method):
-        """Run one PopV method, patching harmonypy for KNN_HARMONY."""
-        if method == "KNN_HARMONY":
-            import harmonypy
-            import unittest.mock as mock
+    class _ObsmProxy:
+        """
+        Thin proxy around adata.obsm that intercepts __setitem__ for
+        X_pca_harmony_popv and ensures the value is (n_cells, n_pcs).
+        """
+        def __init__(self, real_obsm, n_obs):
+            object.__setattr__(self, "_real", real_obsm)
+            object.__setattr__(self, "_n_obs", n_obs)
 
-            # Capture the REAL function BEFORE patching so the wrapper can
-            # call it without triggering infinite recursion.
-            _real_run_harmony = harmonypy.run_harmony
+        def __setitem__(self, key, value):
+            if key == _harmony_key:
+                arr = np.array(value)
+                n_obs = object.__getattribute__(self, "_n_obs")
+                if arr.ndim == 2 and arr.shape[0] != n_obs:
+                    logger.warning(
+                        f"obsm proxy: correcting {key} shape "
+                        f"{arr.shape} → {arr.T.shape}"
+                    )
+                    arr = arr.T
+                elif arr.ndim == 1:
+                    logger.warning(
+                        f"obsm proxy: {key} is 1-D {arr.shape}, "
+                        "cannot auto-correct — KNN_HARMONY will be skipped."
+                    )
+                    return   # don't write bad value; method will fail cleanly
+                object.__getattribute__(self, "_real").__setitem__(key, arr)
+            else:
+                object.__getattribute__(self, "_real").__setitem__(key, value)
 
-            def _patched_run_harmony(data_mat, *args, **kwargs):
-                result = _real_run_harmony(data_mat, *args, **kwargs)
-                if hasattr(result, "Z_corr"):
-                    zc = np.array(result.Z_corr)
-                    # harmonypy returns Z_corr as (n_pcs, n_cells);
-                    # PopV needs (n_cells, n_pcs) for adata.obsm assignment.
-                    n_cells = data_mat.shape[1]
-                    if zc.ndim == 2 and zc.shape[0] != n_cells:
-                        logger.warning(
-                            f"Transposing harmonypy Z_corr: "
-                            f"{zc.shape} → {zc.T.shape}"
+        def __getitem__(self, key):
+            return object.__getattribute__(self, "_real").__getitem__(key)
+
+        def __contains__(self, key):
+            return object.__getattribute__(self, "_real").__contains__(key)
+
+        def __getattr__(self, name):
+            return getattr(object.__getattribute__(self, "_real"), name)
+
+    def _patch_onclass(label_to_id_map):
+        """
+        Return a context manager that injects missing label→ID entries into
+        ONCLASS's internal ontology graph before it runs, then restores the
+        original state on exit.
+        """
+        import contextlib
+
+        @contextlib.contextmanager
+        def _ctx():
+            # ONCLASS stores its CL graph in one of these locations depending
+            # on version.  We try each until we find a dict we can patch.
+            import onclass_utils   # ONCLASS ships this as a top-level module
+            candidates = [
+                ("onclass_utils", "cell_type_nlp_network", "cell_type_nlp"),
+                ("onclass_utils", "cell_ontology_graph",   "name2id"),
+            ]
+
+            patched = []
+            for mod_name, obj_attr, dict_attr in candidates:
+                try:
+                    import importlib
+                    mod = importlib.import_module(mod_name)
+                    obj = getattr(mod, obj_attr, None)
+                    if obj is None:
+                        continue
+                    d = getattr(obj, dict_attr, None)
+                    if not isinstance(d, dict):
+                        continue
+                    missing = {k: v for k, v in label_to_id_map.items() if k not in d}
+                    if missing:
+                        logger.info(
+                            f"ONCLASS patch: injecting {len(missing)} missing "
+                            f"label→ID entries into {mod_name}.{obj_attr}.{dict_attr}"
                         )
-                        result.Z_corr = zc.T
-                return result
+                        d.update(missing)
+                        patched.append((d, missing))
+                except Exception:
+                    continue
 
-            with mock.patch.object(harmonypy, "run_harmony", _patched_run_harmony):
+            # Also try patching popv's own ONCLASS wrapper
+            try:
+                import popv.algorithms as _palg
+                onclass_alg = getattr(_palg, "ONCLASS", None)
+                if onclass_alg and hasattr(onclass_alg, "cl_obo_file"):
+                    pass   # file-based; nothing to patch here
+            except Exception:
+                pass
+
+            yield
+
+            # Restore: remove only the keys we added
+            for d, added in patched:
+                for k in added:
+                    d.pop(k, None)
+
+        return _ctx()
+
+    def _run_method_safe(adata, method):
+        """Run one PopV method with targeted fixes per method."""
+        import unittest.mock as mock
+
+        if method == "KNN_HARMONY":
+            # Swap adata.obsm with our proxy for the duration of annotate_data
+            real_obsm = adata.obsm
+            proxy = _ObsmProxy(real_obsm, adata.n_obs)
+            with mock.patch.object(adata, "obsm", proxy):
                 annotate_data(adata, methods=[method])
+
+        elif method == "ONCLASS":
+            with _patch_onclass(label_to_id):
+                annotate_data(adata, methods=[method])
+
         else:
             annotate_data(adata, methods=[method])
 
@@ -569,18 +666,8 @@ def run_popv_annotation(
             successful_methods.append(method)
             logger.info(f"✓ {method} completed.")
 
-        except KeyError as ke:
-            # ONCLASS raises a bare KeyError when a label exists in the Cell
-            # Ontology but is missing from its internal NLP embedding graph
-            # (a separate graph from the PopV consensus digraph).
-            logger.warning(
-                f"✗ Skipping {method}: label {ke!r} not found in "
-                "ONCLASS NLP embedding graph. This is a known ONCLASS "
-                "limitation for some Tabula Sapiens labels."
-            )
-
         except Exception as exc:
-            logger.warning(f"✗ Skipping {method}: {exc}")
+            logger.warning(f"✗ Skipping {method}: {type(exc).__name__}: {exc}")
 
     logger.info(f"Methods that completed: {successful_methods}")
 
