@@ -25,27 +25,39 @@ setup(
 
     zip_safe=False,
 
-install_requires=[
-    "scanpy==1.9.3",
-    "scvi-tools==1.2.1",
-    "scmalignantfinder==1.0.1",
+    install_requires=[
+        # Core single-cell stack
+        "scanpy==1.9.3",
+        "scvi-tools==1.2.1",
+        "scmalignantfinder==1.0.1",
+        "popv>=0.5",
 
-    "numpy==1.23.4",
-    "pandas>=1.5",
-    "scikit-learn>=1.2",
-    "scipy>=1.9",
+        # 🔴 CRITICAL: Compatible JAX ecosystem (fixes your error)
+        "jax==0.4.23",
+        "jaxlib==0.4.23",
+        "flax==0.7.5",
+        "optax==0.1.7",
+        "chex==0.1.7",
 
-    "tensorflow==2.12.0",
-    "torch>=2.0",
+        # Numerical stack
+        "numpy==1.23.4",
+        "scipy>=1.9",
+        "pandas>=1.5",
+        "scikit-learn>=1.2",
 
-    "geofetch==0.12.10",
-    "GEOparse==2.0.4",
-    "popv>=0.5",
+        # ML frameworks
+        "tensorflow==2.12.0",
+        "torch>=2.0",
 
-    "deap>=1.4",
-    "rpy2==3.5.16",
-    "typer",
-    "rich",
-    "ipywidgets"
-]
+        # Data utilities
+        "geofetch==0.12.10",
+        "GEOparse==2.0.4",
+
+        # Others
+        "deap>=1.4",
+        "rpy2==3.5.16",
+        "typer",
+        "rich",
+        "ipywidgets"
+    ]
 )
