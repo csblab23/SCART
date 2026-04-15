@@ -26,32 +26,20 @@ setup(
     zip_safe=False,
 
     install_requires=[
-        # Core single-cell stack
-        "scanpy==1.9.3",
-        "scvi-tools==1.2.1",
-        "scmalignantfinder==1.0.1",
-        "popv>=0.5",
-
-       
-
-        # Numerical stack
-        "numpy==1.23.4",
-        "scipy==1.13.1",
-        "scikit-learn>=1.2",
-
-        # ML frameworks
-        "tensorflow==2.12.0",
-        "torch>=2.0",
-
-        # Data utilities
+        "scanpy>=1.9",
         "geofetch==0.12.10",
         "GEOparse==2.0.4",
-
-        # Others
+        "popv>=0.5",
+        "scvi-tools>=1.1",
+        "numpy>=1.23,<2",
+        "pandas>=1.5",
+        "scikit-learn>=1.2",
+        "torch>=2.0",
+        "tensorflow>=2.12",
         "deap>=1.4",
         "rpy2==3.5.16",
+        "scmalignantfinder==1.0.1",
         "typer",
-        "rich",
-        "ipywidgets"
+        "rich"
     ]
 )
