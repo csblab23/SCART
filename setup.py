@@ -37,6 +37,7 @@ setup(
         "torch>=2.0",
         "tensorflow>=2.12",
         "deap>=1.4",
+        "rpy2==3.5.16",
         "typer",
         "rich"
     ]
