@@ -25,21 +25,26 @@ setup(
 
     zip_safe=False,
 
-    install_requires=[
-        "scanpy>=1.9",
-        "geofetch==0.12.10",
-        "GEOparse==2.0.4",
-        "popv>=0.5",
-        "scvi-tools>=1.1",
-        "numpy>=1.23,<2",
-        "pandas>=1.5",
-        "scikit-learn>=1.2",
-        "torch>=2.0",
-        "tensorflow>=2.12",
-        "deap>=1.4",
-        "rpy2==3.5.16",
-        "scmalignantfinder==1.0.1",
-        "typer",
-        "rich"
-    ]
+install_requires=[
+    "scanpy==1.9.3",
+    "scvi-tools==1.2.1",  
+    "scmalignantfinder==1.0.1",
+
+    "numpy==1.23.4",      
+    "pandas>=1.5",
+    "scikit-learn>=1.2",
+
+    "tensorflow==2.12.0", 
+    "torch>=2.0",
+
+    "geofetch==0.12.10",
+    "GEOparse==2.0.4",
+    "popv>=0.5",
+
+    "deap>=1.4",
+    "rpy2==3.5.16",
+
+    "typer",
+    "rich"
+]
 )
