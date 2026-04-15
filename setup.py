@@ -26,20 +26,38 @@ setup(
     zip_safe=False,
 
     install_requires=[
-        "scanpy>=1.9",
-        "geofetch==0.12.10",
-        "GEOparse==2.0.4",
-        "popv>=0.5",
-        "scvi-tools>=1.1",
-        "numpy>=1.23,<2",
-        "pandas>=1.5",
-        "scikit-learn>=1.2",
-        "torch>=2.0",
-        "tensorflow>=2.12",
-        "deap>=1.4",
-        "rpy2==3.5.16",
-        "scmalignantfinder==1.0.1",
-        "typer",
-        "rich"
-    ]
+    # core single-cell
+    "scanpy==1.9.3",
+    "anndata==0.9.1",
+
+    # 🔴 scvi ecosystem (STRICT pinning)
+    "scvi-tools==1.1.6.post2",
+    "jax==0.4.23",
+    "jaxlib==0.4.23",
+    "numpyro==0.13.2",
+    "chex==0.1.7",
+    "optax==0.1.7",
+    "flax==0.7.5",
+
+    # data + utils
+    "numpy>=1.23,<2",
+    "pandas>=1.5",
+    "scikit-learn>=1.2",
+
+    # ML frameworks
+    "torch==2.2.2",
+    "tensorflow==2.12",
+
+    # bio tools
+    "popv>=0.5",
+    "geofetch==0.12.10",
+    "GEOparse==2.0.4",
+    "scmalignantfinder==1.0.1",
+
+    # misc
+    "deap>=1.4",
+    "rpy2==3.5.16",
+    "typer",
+    "rich"
+]
 )
