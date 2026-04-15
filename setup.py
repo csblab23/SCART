@@ -41,8 +41,7 @@ setup(
 
         # Numerical stack
         "numpy==1.23.4",
-        "scipy>=1.9",
-        "pandas>=1.5",
+        "scipy==1.10.1",
         "scikit-learn>=1.2",
 
         # ML frameworks
