@@ -17,6 +17,7 @@ gseapy==1.1.11
 umap-learn==0.5.7
 harmonypy==0.0.10
 harmony-pytorch==0.1.8
+rpy2==3.5.16
 
 # ML / DL
 torch==2.6.0
