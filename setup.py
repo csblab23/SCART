@@ -38,6 +38,7 @@ setup(
         "tensorflow>=2.12",
         "deap>=1.4",
         "rpy2==3.5.16",
+        "scmalignantfinder==1.0.1",
         "typer",
         "rich"
     ]
