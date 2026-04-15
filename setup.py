@@ -25,41 +25,39 @@ setup(
 
     zip_safe=False,
 
-    install_requires=[
-        # Core single-cell stack
-        "scanpy==1.9.3",
-        "scvi-tools==1.2.1",
-        "scmalignantfinder==1.0.1",
+install_requires=[
+    # Core
+    "scanpy==1.9.3",
+    "scvi-tools==1.2.1",
+    "scmalignantfinder==1.0.1",
 
-        # 🔒 CRITICAL: JAX ecosystem (FIXED)
-        "jax==0.4.23",
-        "jaxlib==0.4.23",
-        "flax==0.10.2",
-        "optax==0.2.1",
-        "chex==0.1.7",
+    #  FIXED JAX stack (compatible)
+    "jax==0.4.28",
+    "jaxlib==0.4.28",
+    "flax==0.10.2",
+    "optax==0.2.1",
+    "chex==0.1.7",
 
-        # Numerical stack
-        "numpy==1.23.4",
-        "pandas>=1.5",
-        "scikit-learn>=1.2",
-        "scipy>=1.9",
+    # Numerical
+    "numpy==1.23.4",
+    "pandas>=1.5",
+    "scikit-learn>=1.2",
+    "scipy>=1.9",
 
-        # ML frameworks
-        "tensorflow==2.12.0",
-        "torch>=2.0",
+    # ML
+    "tensorflow==2.12.0",
+    "torch>=2.0",
 
-        # Bio + GEO tools
-        "geofetch==0.12.10",
-        "GEOparse==2.0.4",
-        "popv>=0.5",
+    # Bio
+    "geofetch==0.12.10",
+    "GEOparse==2.0.4",
+    "popv>=0.5",
 
-        # Utilities
-        "deap>=1.4",
-        "rpy2==3.5.16",
-        "typer",
-        "rich",
-
-        # Optional but prevents notebook warning
-        "ipywidgets"
-    ]
+    # Utils
+    "deap>=1.4",
+    "rpy2==3.5.16",
+    "typer",
+    "rich",
+    "ipywidgets"
+]
 )
