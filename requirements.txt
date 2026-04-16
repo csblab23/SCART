@@ -10,6 +10,7 @@ protobuf==3.20.3
 
 # single-cell ecosystem
 scanpy==1.9.3
+ml-dtypes==0.2.0
 scanorama==1.7.4
 bbknn==1.6.0
 scgen==2.1.1
