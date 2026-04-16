@@ -1,16 +1,21 @@
-# single-cell ecosystem
-anndata==0.9.1
-deap==1.4.3
-geofetch==0.12.10
-GEOparse==2.0.4
-scanpy==1.9.3
+# core strict (CRITICAL)
 numpy==1.23.4
+scipy==1.13.1
+pandas==2.1.4
+anndata==0.9.1
+h5py==3.7.0
+joblib==1.4.2
+scikit-learn==1.2.2
+protobuf==3.20.3
+
+# single-cell ecosystem
+scanpy==1.9.3
 scanorama==1.7.4
 bbknn==1.6.0
 scgen==2.1.1
 scvi-tools==1.1.6.post2
 scrublet==0.2.3
-popv>=0.5
+popv==0.5.3              # 🔥 pin this
 scmalignantfinder==1.0.1
 celltypist==1.7.1
 gseapy==1.1.11
@@ -31,12 +36,14 @@ igraph==0.11.9
 leidenalg==0.10.2
 louvain==0.8.2
 
-# transformers / embeddings
+# transformers
 transformers==4.53.2
 sentence-transformers==5.0.0
 
-# misc utilities
-joblib
+# misc
+deap==1.4.3
+geofetch==0.12.10
+GEOparse==2.0.4
 rich
 typer
 pydantic
