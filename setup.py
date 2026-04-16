@@ -17,6 +17,7 @@ setup(
     "GEOparse==2.0.4",
 
     "popv>=0.5,<0.6",
+    "ml-dtypes==0.2.0",
 
     "scvi-tools==1.1.6.post2",   # 🔥 fixed
     "anndata==0.9.1",            # 🔥 lock
