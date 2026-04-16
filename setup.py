@@ -26,43 +26,49 @@ setup(
     zip_safe=False,
 
     install_requires=[
-        # core single-cell
-        "scanpy>=1.9",
-        "anndata>=0.9",
+        # single-cell ecosystem (STRICT PINNING)
+        "anndata==0.9.1",
+        "scanpy==1.9.3",
+        "numpy==1.23.4",
+        "scanorama==1.7.4",
+        "bbknn==1.6.0",
+        "scgen==2.1.1",
+        "scvi-tools==1.1.6.post2",
+        "scrublet==0.2.3",
+        "popv>=0.5",
+        "scmalignantfinder==1.0.1",
+        "celltypist==1.7.1",
+        "gseapy==1.1.11",
+        "umap-learn==0.5.7",
+        "harmonypy==0.0.10",
+        "harmony-pytorch==0.1.8",
 
-        # scvi ecosystem (loose like old env)
-        "scvi-tools>=1.1",
-        "jax>=0.4.23",
-        "jaxlib>=0.4.23",
-        "numpyro>=0.13",
-        "chex>=0.1",
-        "optax>=0.1",
-        "flax>=0.7",
+        # ML / DL
+        "torch==2.6.0",
+        "pytorch-lightning==2.5.2",
+        "tensorflow==2.12",
 
-        # IMPORTANT: remove scipy pin (this restores old resolver behavior)
-        "scipy>=1.9",
+        # analysis utilities
+        "statsmodels==0.14.5",
+        "scikit-image==0.24.0",
+        "networkx==3.2.1",
+        "igraph==0.11.9",
+        "leidenalg==0.10.2",
+        "louvain==0.8.2",
 
-        # data + utils
-        "numpy>=1.23,<2",
-        "pandas>=1.5",
-        "scikit-learn>=1.2",
-
-        # ML frameworks
-        "torch>=2.0",
-        "tensorflow>=2.12",
+        # transformers / embeddings
+        "transformers==4.53.2",
+        "sentence-transformers==5.0.0",
 
         # bio tools
-        "popv>=0.5",
         "geofetch==0.12.10",
         "GEOparse==2.0.4",
 
-        # malignant tool (keep exact like old working state)
-        "scmalignantfinder==1.0.1",
-
         # misc
-        "deap>=1.4",
-        "rpy2==3.5.16",
+        "deap==1.4.3",
+        "joblib",
+        "rich",
         "typer",
-        "rich"
+        "pydantic"
     ]
 )
