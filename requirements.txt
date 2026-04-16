@@ -1,6 +1,6 @@
 # === Numerical stack ===
 numpy==1.23.4
-scipy>=1.9
+scipy==1.13.1
 
 
 
