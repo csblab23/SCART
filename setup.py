@@ -23,7 +23,7 @@ setup(
     install_requires=[
         # Loose ranges — real pins live in requirements.txt
         "numpy>=1.23,<1.25",
-        "scipy>=1.9,<1.13",
+        "scipy>=1.9",
         "anndata==0.9.1",
         "scanpy>=1.9",
         "scanorama>=1.7",
