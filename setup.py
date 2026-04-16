@@ -32,8 +32,6 @@ setup(
     "typer",
     "rich",
 
-    # 🚫 block jax ecosystem
-    "jax==0.0.0",
-    "jaxlib==0.0.0",
+    
 ]
 )
