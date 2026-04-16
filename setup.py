@@ -20,7 +20,7 @@ setup(
 
     "scvi-tools==1.1.6.post2",   # 🔥 fixed
     "anndata==0.9.1",            # 🔥 lock
-    "numpy>=1.23,<1.24",         # 🔥 lock
+    "numpy==1.23.4",         # 🔥 lock
 
     "scikit-learn>=1.2,<1.3",
     "pandas>=1.5,<2.2",
