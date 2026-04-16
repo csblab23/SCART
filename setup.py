@@ -34,7 +34,7 @@ setup(
         "scanpy==1.9.3",
         "scanorama==1.7.4",
         "bbknn==1.6.0",
-        "scgen==2.1.1",           # matches your working requirements.txt (was 2.1.0 in broken setup)
+        "scgen==2.1.0",           # matches your working requirements.txt (was 2.1.0 in broken setup)
         "scvi-tools==1.1.6.post2",
         "scrublet==0.2.3",
         "popv==0.6.0",
