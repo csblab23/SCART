@@ -39,6 +39,6 @@ setup(
         "deap>=1.4",
         "typer",
         "rich",
-        "onclass_utils @ git+https://github.com/wangshenguiuc/OnClass.git"
+        "onclass @ git+https://github.com/wangshenguiuc/OnClass.git"
     ]
 )
