@@ -55,6 +55,7 @@ setup(
         "igraph==0.11.9",
         "leidenalg==0.10.2",
         "louvain==0.8.2",
+        "jax==0.4.23",
 
         # transformers / embeddings
         "transformers==4.53.2",
