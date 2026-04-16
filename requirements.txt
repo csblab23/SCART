@@ -1,50 +1,152 @@
-# core strict (CRITICAL)
+# ═══════════════════════════════════════════════════════════════════════════
+# SCART requirements.txt
+# Python 3.8 – 3.10 ONLY  (tensorflow 2.12 does not support Python 3.11+)
+#
+# Install order matters for large GPU environments:
+#   1. pip install torch  (pick CUDA wheel separately if needed)
+#   2. pip install tensorflow==2.12.*
+#   3. pip install -r requirements.txt
+#
+# rpy2 is NOT listed here — it requires a working R ≥4.1 installation.
+# Install separately after R is available:
+#   pip install rpy2>=3.5,<3.6
+#   # then inside R:
+#   # devtools::install_github("navinlabcode/copykat")
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+# ── core scientific stack ────────────────────────────────────────────────────
+# numpy 1.23.4: ceiling imposed by tensorflow 2.12 (fails on >=1.24)
+#               also keeps C-ABI stable for scipy, scikit-learn, scanpy
 numpy==1.23.4
-scipy==1.13.1
-pandas==2.1.4
-anndata==0.9.1
-h5py==3.7.0
-joblib==1.4.2
-scikit-learn==1.2.2
+
+# scipy <1.12: compatible with numpy 1.23 ABI
+scipy==1.11.4
+
+# pandas <2.0: GEOparse 2.0.4 uses deprecated APIs that were removed in 2.x
+pandas==1.5.3
+
+# h5py: AnnData h5ad I/O
+h5py==3.8.0
+
+# joblib: shared by scikit-learn and parallel utilities
+joblib==1.3.2
+
+
+# ── AnnData / single-cell core ───────────────────────────────────────────────
+# anndata 0.9.x: pinned upper bound for both popv 0.5 and scvi-tools 0.20
+anndata==0.9.2
+
+# scanpy 1.9.x: 1.10 dropped some internal APIs used by popv preprocessing
+scanpy==1.9.8
+
+
+# ── deep-learning backends ───────────────────────────────────────────────────
+# torch: scvi-tools 0.20 upper-bounds at <2.1; 2.0.1 is safest LTS release
+torch==2.0.1
+
+# pytorch-lightning: scvi-tools 0.20 requires <2.0
+pytorch-lightning==1.9.5
+
+# tensorflow 2.12: required by ONCLASS (keras sub-module) inside popv
+# NOTE: tensorflow ships keras bundled; do NOT install standalone keras
+tensorflow==2.12.0
+
+# protobuf: tensorflow 2.12 hard incompatibility with >=4.0
 protobuf==3.20.3
 
-# single-cell ecosystem
-scanpy==1.9.3
+# ml-dtypes: shared dtype library for jax/tf; must be locked
 ml-dtypes==0.2.0
-scanorama==1.7.4
-bbknn==1.6.0
-scgen==2.1.1
-scvi-tools==1.1.6.post2
-scrublet==0.2.3
-popv==0.5.3              # 🔥 pin this
-scmalignantfinder==1.0.1
-celltypist==1.7.1
-gseapy==1.1.11
-umap-learn==0.5.7
+
+
+# ── scVI / PopV ecosystem ────────────────────────────────────────────────────
+# CRITICAL: scvi-tools 1.x completely broke popv 0.5 (renamed modules,
+#           removed scvi.model.SCANVI entry points that popv calls directly).
+#           Pin to 0.20.3, the last stable 0.20 release.
+scvi-tools==0.20.3
+
+# popv 0.5.x: Module 2 core; do not upgrade to 0.6 without testing
+popv==0.5.3
+
+
+# ── PopV annotation method backends ─────────────────────────────────────────
+# Each corresponds to one method string in Module 2's methods list
+
+# CELLTYPIST method
+celltypist==1.6.3
+
+# KNN_HARMONY method
 harmonypy==0.0.10
-harmony-pytorch==0.1.8
 
-# ML / DL
-torch==2.6.0
-pytorch-lightning==2.5.2
-tensorflow==2.12
+# KNN_BBKNN method
+bbknn==1.6.0
 
-# analysis utilities
-statsmodels==0.14.5
-scikit-image==0.24.0
+# SCGEN method (optional popv backend)
+scgen==2.1.1
+
+# XGboost method
+xgboost==1.7.6
+
+# scanorama: optional integration backend used by some popv preprocessing paths
+scanorama==1.7.4
+
+
+# ── GEO data ingestion (Module 1) ────────────────────────────────────────────
+GEOparse==2.0.4
+geofetch==0.12.10
+requests==2.31.0
+
+# urllib3 <2.0: urllib3 2.x changed Retry/HTTPAdapter internals used in Module 2
+urllib3==1.26.18
+
+
+# ── graph / clustering (ONCLASS ontology + Leiden/Louvain) ──────────────────
+# networkx <3.3: 3.3 introduced numpy 2.x dependency
 networkx==3.2.1
-igraph==0.11.9
+igraph==0.11.6
 leidenalg==0.10.2
 louvain==0.8.2
+umap-learn==0.5.6
 
-# transformers
-transformers==4.53.2
-sentence-transformers==5.0.0
 
-# misc
-deap==1.4.3
-geofetch==0.12.10
-GEOparse==2.0.4
-rich
-typer
-pydantic
+# ── ML utilities ─────────────────────────────────────────────────────────────
+# scikit-learn <1.3: 1.3 bumped minimum numpy to >=1.17.3 but more importantly
+#                    some internal APIs changed; 1.2.x is stable with numpy 1.23
+scikit-learn==1.2.2
+scikit-image==0.21.0
+statsmodels==0.14.1
+
+
+# ── doublet detection (used in scanpy QC pipelines) ──────────────────────────
+scrublet==0.2.3
+
+
+# ── malignancy classification (Module 3) ─────────────────────────────────────
+# scMalignantFinder model is auto-downloaded from GitHub in Module 3;
+# only the pip package is needed here
+scmalignantfinder==1.0.1
+
+
+# ── genetic algorithm (Module 4) ─────────────────────────────────────────────
+deap==1.4.1
+
+
+# ── NLP / transformers (ONCLASS cell-type text embeddings) ───────────────────
+# transformers <4.36: 4.36 requires torch >=2.1 which breaks scvi-tools 0.20
+transformers==4.35.2
+sentence-transformers==2.7.0
+
+
+# ── CLI / display ─────────────────────────────────────────────────────────────
+typer==0.9.0
+rich==13.7.1
+
+# pydantic v1: scvi-tools 0.20 uses pydantic v1 model syntax (BaseModel,
+#              validators).  pydantic 2.x changed the API entirely.
+pydantic==1.10.13
+
+
+# ── NOT INCLUDED (install separately) ────────────────────────────────────────
+# rpy2>=3.5,<3.6   — requires R >=4.1 to be installed first
+#                    then: pip install rpy2>=3.5,<3.6
+# copykat (R)      — devtools::install_github("navinlabcode/copykat")
