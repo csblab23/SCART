@@ -30,7 +30,7 @@ setup(
         "scanpy==1.9.3",
         "anndata==0.9.1",
 
-        # 🔴 scvi ecosystem (STRICT pinning)
+        # scvi ecosystem
         "scvi-tools==1.1.6.post2",
         "jax==0.4.23",
         "jaxlib==0.4.23",
@@ -39,7 +39,7 @@ setup(
         "optax==0.1.7",
         "flax==0.7.5",
 
-        # 🔴 REQUIRED: scipy compatibility with jax
+        # scipy pinned for jax compatibility
         "scipy==1.11.4",
 
         # data + utils
@@ -47,7 +47,7 @@ setup(
         "pandas>=1.5",
         "scikit-learn>=1.2",
 
-        # ML frameworks (FIXED torch version)
+        # ML frameworks
         "torch==2.4.1",
         "tensorflow==2.12",
 
@@ -55,7 +55,9 @@ setup(
         "popv>=0.5",
         "geofetch==0.12.10",
         "GEOparse==2.0.4",
-        "scmalignantfinder==1.0.1",
+
+        # 🔴 FIXED HERE
+        "scmalignantfinder>=0.9,<1.0.1",
 
         # misc
         "deap>=1.4",
