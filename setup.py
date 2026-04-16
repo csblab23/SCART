@@ -32,7 +32,7 @@ setup(
         "numpy==1.23.4",
         "scanorama==1.7.4",
         "bbknn==1.6.0",
-        "scgen==2.1.1",
+        "scgen==2.1.0",
         "scvi-tools==1.1.6.post2",
         "scrublet==0.2.3",
         "popv>=0.5",
