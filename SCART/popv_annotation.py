@@ -28,6 +28,10 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+import OnClass
+import sys
+sys.modules["onclass_utils"] = OnClass
+
 import popv
 from popv.preprocessing import Process_Query
 from popv.annotation import annotate_data
