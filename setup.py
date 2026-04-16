@@ -24,7 +24,7 @@ setup(
         # Loose ranges — real pins live in requirements.txt
         "numpy>=1.23,<1.25",
         "scipy>=1.9,<1.13",
-        "anndata>=0.9,<0.10",
+        "anndata==0.9.1",
         "scanpy>=1.9",
         "scanorama>=1.7",
         "bbknn>=1.6",
