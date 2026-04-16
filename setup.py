@@ -11,33 +11,19 @@ setup(
 
     include_package_data=True,
 
-    package_data={
-        "SCART": [
-            "**/*.json",
-            "**/*.csv",
-            "**/*.txt",
-            "**/*.pkl",
-            "**/*.h5ad",
-            "**/*.yaml",
-            "**/*.yml"
-        ]
-    },
-
-    zip_safe=False,
-
-    install_requires=[
-        "scanpy>=1.9",
-        "geofetch==0.12.10",
-        "GEOparse==2.0.4",
-        "popv>=0.5",
-        "scvi-tools>=1.1",
-        "numpy>=1.23,<2",
-        "pandas>=1.5",
-        "scikit-learn>=1.2",
-        "torch>=2.0",
-        "tensorflow>=2.12",
-        "deap>=1.4",
-        "typer",
-        "rich"
-    ]
+  install_requires=[
+    "scanpy>=1.9",
+    "geofetch==0.12.10",
+    "GEOparse==2.0.4",
+    "popv>=0.5,<0.6",          # 🔥 prevent JAX version
+    "scvi-tools>=1.1,<1.2",    # 🔥 prevent JAX ecosystem
+    "numpy>=1.23,<1.25",       # 🔥 block numpy 1.26+
+    "pandas>=1.5,<2.2",
+    "scikit-learn>=1.2,<1.3",
+    "torch>=2.0",
+    "tensorflow>=2.12,<2.13",
+    "deap>=1.4",
+    "typer",
+    "rich"
+]
 )
