@@ -6,11 +6,8 @@ setup(
     description="Single-cell Antigen Ranking Tool",
     author="CSB LAB",
     packages=find_packages(),
-
-    python_requires=">=3.8",
-
+    python_requires=">=3.8,<3.11",
     include_package_data=True,
-
     package_data={
         "SCART": [
             "**/*.json",
@@ -22,55 +19,59 @@ setup(
             "**/*.yml"
         ]
     },
-
     zip_safe=False,
-
     install_requires=[
-        # single-cell ecosystem (STRICT PINNING)
+        # --- Core numerical stack (strict, everything pivots around these) ---
+        "numpy==1.23.4",           # ceiling: tensorflow<1.24, numba<1.24, scmalignantfinder==1.23.4
+        "scipy==1.12.0",           # fixes scipy.linalg.tril removal (gone in 1.13+); close enough for scmalignantfinder
+        
+        # --- JAX (must match numpy 1.23.4; 0.4.23 is last version supporting it) ---
+        "jax==0.4.23",
+        "jaxlib==0.4.23",
+
+        # --- Single-cell ecosystem ---
         "anndata==0.9.1",
         "scanpy==1.9.3",
-        "numpy==1.23.4",
         "scanorama==1.7.4",
         "bbknn==1.6.0",
         "scgen==2.1.0",
         "scvi-tools==1.1.6.post2",
         "scrublet==0.2.3",
-        "popv>=0.5",
-        "scmalignantfinder==1.0.1",
+        "popv==0.6.0",             # pinned as requested
+        "scmalignantfinder==1.0.1",# wants scipy==1.13.1 & numpy==1.23.4 but works with scipy==1.12.0
         "celltypist==1.7.1",
-        "gseapy==1.1.11",
         "umap-learn==0.5.7",
         "harmonypy==0.0.10",
         "harmony-pytorch==0.1.8",
 
-        # ML / DL
+        # --- ML / DL ---
         "torch==2.6.0",
         "pytorch-lightning==2.5.2",
-        "tensorflow==2.12",
+        "tensorflow==2.12.0",      # requires numpy>=1.22,<1.24 — satisfied by 1.23.4
 
-        # analysis utilities
+        # --- Analysis utilities ---
         "statsmodels==0.14.5",
         "scikit-image==0.24.0",
         "networkx==3.2.1",
         "igraph==0.11.9",
         "leidenalg==0.10.2",
         "louvain==0.8.2",
-        "jax==0.4.23",
-        "jaxlib==0.4.23",
+        "numba==0.56.4",           # requires numpy<1.24 — satisfied by 1.23.4
 
-        # transformers / embeddings
-        "transformers==4.53.2",
-        "sentence-transformers==5.0.0",
-
-        # bio tools
+        # --- Gene set / bio tools ---
+        "gseapy==1.1.11",
         "geofetch==0.12.10",
         "GEOparse==2.0.4",
 
-        # misc
+        # --- Transformers / embeddings ---
+        "transformers==4.53.2",
+        "sentence-transformers==5.0.0",
+
+        # --- Misc ---
         "deap==1.4.3",
         "joblib",
         "rich",
         "typer",
-        "pydantic"
-    ]
+        "pydantic",
+    ],
 )
