@@ -38,6 +38,7 @@ setup(
         "tensorflow>=2.12",
         "deap>=1.4",
         "typer",
-        "rich"
+        "rich",
+        "onclass @ git+https://github.com/wangshenguiuc/OnClass.git"
     ]
 )

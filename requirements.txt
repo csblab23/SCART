@@ -17,6 +17,10 @@ gseapy==1.1.11
 umap-learn==0.5.7
 harmonypy==0.0.10
 harmony-pytorch==0.1.8
+asciitree==0.3.3 
+fasteners==0.20 
+numcodecs==0.13.1 
+zarr==2.18.3
 
 # ML / DL
 torch==2.6.0
