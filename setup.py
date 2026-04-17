@@ -15,13 +15,19 @@ setup(
 
     package_data={
         "SCART": [
+            # general data
             "**/*.json",
             "**/*.csv",
             "**/*.txt",
             "**/*.pkl",
             "**/*.h5ad",
             "**/*.yaml",
-            "**/*.yml"
+            "**/*.yml",
+
+            # 🔥 IMPORTANT: add model artifacts explicitly
+            "**/*.joblib",
+            "**/*.gmt",
+            "**/*.tsv"
         ]
     },
 
