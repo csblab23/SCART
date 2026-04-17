@@ -39,9 +39,9 @@ setup(
         "deap>=1.4",
         "typer",
         "rich",
-        "onclass @ git+https://github.com/wangshenguiuc/OnClass.git"
+        "onclass @ git+https://github.com/wangshenguiuc/OnClass.git",
 
         # other deps
-        "scMalignantFinder @ file://localhost/absolute/path/to/external/scMalignantFinder",
+        "scMalignantFinder @ file://localhost/absolute/path/to/external/scMalignantFinder"
     ]
 )
