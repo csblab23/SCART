@@ -13,6 +13,10 @@ Fixes applied:
      does not re-download at annotation time.
   6. Minor: bare excepts replaced with specific Exception catches; unused
      obo_file argument removed from public API.
+  7. [NEW] Query-cell extraction: after PopV annotation the combined
+     query+reference AnnData is filtered back to query cells only using
+     the '_dataset' column written by Process_Query.  Only the query
+     portion (original Module 1 shape) is saved to disk.
 """
 
 import os
@@ -95,7 +99,6 @@ def fetch_tabula_file_metadata():
 
 def find_best_reference_file(cancer_type: str, files):
     """Match a Figshare file record to the cancer_type string."""
-    # cancer_type may be "ovary_cancer" → tissue = "ovary"
     tissue = cancer_type.replace("_cancer", "").lower().replace("_", " ")
     logger.info(f"Matching tissue keyword: '{tissue}'")
 
@@ -209,26 +212,19 @@ def _build_label_map(ontology_json_path: str):
 
     label_to_id : correctly-cased label → short CL ID
                   e.g. "B cell" → "CL:0000236"
-
-    ONCLASS internally builds its own label→ID dict from the reference adata.
-    If any label is missing from that dict it throws KeyError(<label>).
-    We return label_to_id so we can sync cell_ontology_id in the reference
-    before Process_Query runs, ensuring ONCLASS can always resolve every label.
     """
     import json
     with open(ontology_json_path) as fh:
         cl = json.load(fh)
 
-    label_map   = {}  # lowercase → correctly-cased
-    label_to_id = {}  # correctly-cased → short CL ID
+    label_map   = {}
+    label_to_id = {}
 
     for node in cl.get("nodes", []):
         lbl = node.get("lbl", "")
         nid = node.get("id", "")
         if lbl:
             label_map[lbl.lower()] = lbl
-            # Full URI e.g. "http://purl.obolibrary.org/obo/CL_0000236"
-            # → short ID "CL:0000236"
             short_id = nid.split("/")[-1].replace("_", ":")
             label_to_id[lbl] = short_id
 
@@ -238,8 +234,7 @@ def _build_label_map(ontology_json_path: str):
 def _normalise_predictions(adata, label_map: dict):
     """
     For every *_prediction column in adata.obs, replace lowercase labels
-    with the correctly-cased ontology label.  This is the core fix for the
-    "node X is not in the digraph" error.
+    with the correctly-cased ontology label.
     """
     pred_cols = [c for c in adata.obs.columns if c.endswith("_prediction")]
     for col in pred_cols:
@@ -247,31 +242,19 @@ def _normalise_predictions(adata, label_map: dict):
             adata.obs[col]
             .astype(str)
             .str.lower()
-            .map(lambda v: label_map.get(v, v))   # fall back to original if not found
+            .map(lambda v: label_map.get(v, v))
         )
 
 
 # ---------------------------------------------------------------------------
-# FIX 2 — resolve ontology path (SCART-vendored copy takes priority)
+# FIX 2 — resolve ontology path
 # ---------------------------------------------------------------------------
 
 def _resolve_ontology_folder() -> str:
-    """
-    Return the directory containing cl_popv.json (or equivalent).
-
-    Search order:
-      1. SCART.PopV.resources.ontology   ← vendored copy inside this package
-      2. popv.resources.ontology         ← upstream popv installation
-      3. popv.resources / popv           ← older upstream layouts
-      4. Filesystem walk of installed SCART package root
-      5. Filesystem walk of installed popv package root
-    """
+    """Return the directory containing cl_popv.json (or equivalent)."""
     candidate_packages = [
-        # SCART's own vendored ontology — matches the repo layout visible in
-        # the screenshot: SCART/PopV/resources/ontology/cl_popv.json
         "SCART.PopV.resources.ontology",
         "SCART.PopV.resources",
-        # upstream popv layouts
         "popv.resources.ontology",
         "popv.resources",
         "popv",
@@ -289,7 +272,6 @@ def _resolve_ontology_folder() -> str:
             except (ModuleNotFoundError, FileNotFoundError, TypeError, ValueError):
                 continue
 
-    # Filesystem walk fallback — covers editable / non-standard installs
     walk_roots = []
     try:
         import SCART as _scart_pkg
@@ -334,8 +316,7 @@ def _find_ontology_json(cl_obo_folder: str) -> str:
 
 def _check_batch_annotation(adata):
     """
-    Warn if _batch_annotation has fewer than 2 unique values; harmony
-    integration will collapse in that case and cause the shape-mismatch error.
+    Warn if _batch_annotation has fewer than 2 unique values.
     """
     col = "_batch_annotation"
     if col not in adata.obs.columns:
@@ -357,6 +338,109 @@ def _check_batch_annotation(adata):
 
 
 # ---------------------------------------------------------------------------
+# NEW FIX 7 — extract query cells from the combined AnnData after PopV
+# ---------------------------------------------------------------------------
+
+def _extract_query_cells(adata_processed, adata_query_original):
+    """
+    After Process_Query + annotate_data, the AnnData contains both query
+    and reference cells concatenated together.  This function returns a new
+    AnnData containing ONLY the original query cells, with all PopV
+    prediction columns preserved.
+
+    Strategy (in order of preference):
+      1. Use adata.obs['_dataset'] == 'query'  ← written by Process_Query
+      2. Match obs_names against the original query obs_names
+      3. Use adata.obs['_reference_labels_annotation'].isna() as a proxy
+         (reference cells always have a label; query cells start as NaN)
+
+    The returned object keeps original Module 1 obs columns (gsm_id, gse_id)
+    plus all new popv_* prediction columns.  Reference-only columns
+    (donor, tissue, cdna_plate, …) are dropped to keep the file clean.
+    """
+    # --- Strategy 1: _dataset column ----------------------------------------
+    if "_dataset" in adata_processed.obs.columns:
+        query_mask = adata_processed.obs["_dataset"] == "query"
+        n_query = query_mask.sum()
+        logger.info(
+            f"_extract_query_cells: '_dataset' column found. "
+            f"Extracting {n_query} query cells out of {adata_processed.n_obs} total."
+        )
+        if n_query > 0:
+            return adata_processed[query_mask].copy()
+        logger.warning("'_dataset' == 'query' matched 0 cells; trying fallback.")
+
+    # --- Strategy 2: match original obs_names --------------------------------
+    original_names = set(adata_query_original.obs_names)
+    mask_by_name = adata_processed.obs_names.isin(original_names)
+    n_matched = mask_by_name.sum()
+    if n_matched > 0:
+        logger.info(
+            f"_extract_query_cells: matched {n_matched} query cells by obs_names."
+        )
+        return adata_processed[mask_by_name].copy()
+
+    # --- Strategy 3: _reference_labels_annotation NaN proxy -----------------
+    if "_reference_labels_annotation" in adata_processed.obs.columns:
+        mask_nan = adata_processed.obs["_reference_labels_annotation"].isna()
+        n_nan = mask_nan.sum()
+        logger.warning(
+            f"_extract_query_cells: using NaN proxy — {n_nan} cells with no "
+            "reference label (assumed to be query cells)."
+        )
+        if n_nan > 0:
+            return adata_processed[mask_nan].copy()
+
+    # --- Fallback: return as-is with a loud warning --------------------------
+    logger.error(
+        "Could not identify query cells within the combined AnnData. "
+        "Returning the full combined object. "
+        "Output will contain reference cells too — inspect '_dataset' column."
+    )
+    return adata_processed
+
+
+def _drop_reference_only_columns(adata, keep_prefixes=("popv_", "gsm_id", "gse_id")):
+    """
+    Drop obs columns that belong to the Tabula Sapiens reference metadata
+    and are not relevant to the query dataset.  Keeps:
+      - any column whose name starts with a prefix in keep_prefixes
+      - any column that was present in the original query adata
+      - PopV internal columns (_batch_annotation, over_clustering, etc.)
+        are kept as they may be useful for QC.
+    
+    This is optional/cosmetic — it just makes the saved file tidier.
+    Call it only if you want a lean output; skip it to keep all columns.
+    """
+    tabula_ref_cols = {
+        "donor", "tissue", "anatomical_position", "method", "cdna_plate",
+        "library_plate", "notes", "cdna_well", "old_index", "assay",
+        "sample_id", "replicate", "10X_run", "10X_barcode", "ambient_removal",
+        "donor_method", "donor_assay", "donor_tissue", "donor_tissue_assay",
+        "cell_ontology_class", "cell_ontology_id", "compartment",
+        "broad_cell_class", "free_annotation", "manually_annotated",
+        "published_2022", "n_genes_by_counts", "total_counts", "total_counts_mt",
+        "pct_counts_mt", "total_counts_ercc", "pct_counts_ercc",
+        "_scvi_batch", "_scvi_labels", "scvi_leiden_donorassay_full",
+        "age", "sex", "ethnicity", "scvi_leiden_res05_tissue", "sample_number",
+    }
+
+    cols_to_drop = [
+        col for col in adata.obs.columns
+        if col in tabula_ref_cols
+    ]
+
+    if cols_to_drop:
+        logger.info(
+            f"Dropping {len(cols_to_drop)} Tabula Sapiens reference columns "
+            f"from query output: {cols_to_drop}"
+        )
+        adata.obs = adata.obs.drop(columns=cols_to_drop)
+
+    return adata
+
+
+# ---------------------------------------------------------------------------
 # Core annotation runner
 # ---------------------------------------------------------------------------
 
@@ -366,6 +450,7 @@ def run_popv_annotation(
     output_dir: str,
     input_type: str = "raw",
     n_samples_per_label: int = 300,
+    drop_reference_columns: bool = True,
 ):
     """
     Run PopV cell-type annotation and write results to output_dir.
@@ -383,8 +468,16 @@ def run_popv_annotation(
         'log1p' — .X is already log-normalised; only CELLTYPIST will run.
     n_samples_per_label : int
         Cells sampled per label during reference subsampling.
+    drop_reference_columns : bool
+        If True (default), Tabula Sapiens metadata columns are removed from
+        the saved query AnnData to keep the output file clean.
     """
     os.makedirs(output_dir, exist_ok=True)
+
+    # Keep a copy of original query obs_names for query-cell extraction later
+    original_query_obs_names = adata_query.obs_names.copy()
+    # Lightweight copy (just obs) so we can use strategy-2 name matching
+    adata_query_snapshot = adata_query.copy()
 
     # --- pre-process dtypes -------------------------------------------------
     _fix_obs_dtypes(adata_query)
@@ -402,24 +495,10 @@ def run_popv_annotation(
     label_map, label_to_id = _build_label_map(ontology_json)
     logger.info(f"Loaded {len(label_map):,} ontology labels for case-normalisation.")
 
-    # FIX 1a — normalise reference labels AND filter non-ontology terms BEFORE
-    # Process_Query builds the digraph.
-    #
-    # Two sub-problems:
-    #   (a) Case mismatch: CellTypist/KNN return lowercase predictions but the
-    #       digraph nodes use mixed case ("B cell", "CD8-positive, alpha-beta T
-    #       cell").  We map every ref label through label_map so the digraph is
-    #       built with the same strings that will appear in predictions.
-    #   (b) Non-ontology anatomical terms: Tabula Sapiens ovary contains labels
-    #       like "follicle" which are anatomical structures, not CL cell types,
-    #       and have no node in the digraph at all.  Any method whose consensus
-    #       step encounters such a label throws "node X is not in the digraph".
-    #       We drop those reference cells entirely before Process_Query so the
-    #       label never enters the training set.
+    # FIX 1a — normalise reference labels and filter non-ontology terms
     _ref_label_col = "cell_ontology_class"
     if _ref_label_col in adata_ref.obs.columns:
 
-        # Step 1: normalise case
         adata_ref.obs[_ref_label_col] = (
             adata_ref.obs[_ref_label_col]
             .astype(str)
@@ -427,8 +506,7 @@ def run_popv_annotation(
             .map(lambda v: label_map.get(v, v))
         )
 
-        # Step 2: keep only labels that exist as nodes in the ontology
-        valid_labels = set(label_map.values())   # correctly-cased CL terms
+        valid_labels = set(label_map.values())
         mask = adata_ref.obs[_ref_label_col].isin(valid_labels)
         n_before = adata_ref.n_obs
         n_dropped_labels = (~mask).sum()
@@ -445,21 +523,12 @@ def run_popv_annotation(
             "case-normalisation and ontology filtering."
         )
 
-    # FIX ONCLASS — sync cell_ontology_id with the normalised labels.
-    #
-    # ONCLASS builds its own internal label→ID dict by pairing
-    # cell_ontology_class with cell_ontology_id from the reference adata.
-    # After our case-normalisation the labels are correctly cased ("B cell")
-    # but if cell_ontology_id is NaN, empty, or mismatched for any row,
-    # ONCLASS's dict has gaps and throws KeyError(<label>) at lookup time.
-    #
-    # We rebuild cell_ontology_id from label_to_id (derived from the same
-    # cl_popv.json) so every label always has a valid CL ID.
+    # Sync cell_ontology_id
     _ref_id_col = "cell_ontology_id"
     if _ref_label_col in adata_ref.obs.columns:
         adata_ref.obs[_ref_id_col] = (
             adata_ref.obs[_ref_label_col]
-            .map(label_to_id)          # correctly-cased label → "CL:XXXXXXX"
+            .map(label_to_id)
             .fillna(
                 adata_ref.obs.get(_ref_id_col, "")
                 if _ref_id_col in adata_ref.obs.columns
@@ -496,39 +565,9 @@ def run_popv_annotation(
         and len(adata_processed.obs["_batch_annotation"].unique()) >= 2
     )
 
-    # FIX 2 — KNN_HARMONY obsm shape bug.
-    #
-    # Diagnosis (from logs):
-    #   - harmonypy returns Z_corr with shape (64144, 50) — already correct
-    #     (n_cells, n_pcs).
-    #   - BUT PopV's KNN_HARMONY code does:
-    #         adata.obsm["X_pca_harmony_popv"] = harmony_out.Z_corr.T
-    #     i.e. it TRANSPOSES the result, producing (50, 64144).
-    #     AnnData then tries to index that as (n_cells,) and gets (50,).
-    #   - Z_corr is a read-only property — we cannot patch the attribute.
-    #
-    # Fix: intercept adata.obsm.__setitem__ for the harmony key only.
-    #   When PopV writes X_pca_harmony_popv, we detect if the value has the
-    #   wrong shape and silently correct it to (n_cells, n_pcs) before
-    #   AnnData validates it.
-    #
-    # FIX ONCLASS — KeyError('B cell') inside ONCLASS's own graph.
-    #
-    # Diagnosis: ONCLASS builds label→CL_ID from its internal ontology graph
-    #   (not from adata).  In this version of ONCLASS the graph uses a
-    #   DIFFERENT string for CL:0000236 than "B cell" (e.g. "B lymphocyte").
-    #   Syncing cell_ontology_id had no effect because ONCLASS never reads it.
-    #
-    # Fix: patch ONCLASS's internal cell_type_nlp dict (or equivalent) to add
-    #   any missing label→ID mappings from our label_to_id before it runs.
-
     _harmony_key = "X_pca_harmony_popv"
 
     class _ObsmProxy:
-        """
-        Thin proxy around adata.obsm that intercepts __setitem__ for
-        X_pca_harmony_popv and ensures the value is (n_cells, n_pcs).
-        """
         def __init__(self, real_obsm, n_obs):
             object.__setattr__(self, "_real", real_obsm)
             object.__setattr__(self, "_n_obs", n_obs)
@@ -548,7 +587,7 @@ def run_popv_annotation(
                         f"obsm proxy: {key} is 1-D {arr.shape}, "
                         "cannot auto-correct — KNN_HARMONY will be skipped."
                     )
-                    return   # don't write bad value; method will fail cleanly
+                    return
                 object.__getattribute__(self, "_real").__setitem__(key, arr)
             else:
                 object.__getattribute__(self, "_real").__setitem__(key, value)
@@ -563,18 +602,10 @@ def run_popv_annotation(
             return getattr(object.__getattribute__(self, "_real"), name)
 
     def _patch_onclass(label_to_id_map):
-        """
-        Return a context manager that injects missing label→ID entries into
-        ONCLASS's internal ontology graph before it runs, then restores the
-        original state on exit.
-        """
         import contextlib
 
         @contextlib.contextmanager
         def _ctx():
-            # ONCLASS stores its CL graph in one of these locations depending
-            # on version.  We try each until we find a dict we can patch.
-            import onclass_utils   # ONCLASS ships this as a top-level module
             candidates = [
                 ("onclass_utils", "cell_type_nlp_network", "cell_type_nlp"),
                 ("onclass_utils", "cell_ontology_graph",   "name2id"),
@@ -602,18 +633,8 @@ def run_popv_annotation(
                 except Exception:
                     continue
 
-            # Also try patching popv's own ONCLASS wrapper
-            try:
-                import popv.algorithms as _palg
-                onclass_alg = getattr(_palg, "ONCLASS", None)
-                if onclass_alg and hasattr(onclass_alg, "cl_obo_file"):
-                    pass   # file-based; nothing to patch here
-            except Exception:
-                pass
-
             yield
 
-            # Restore: remove only the keys we added
             for d, added in patched:
                 for k in added:
                     d.pop(k, None)
@@ -621,11 +642,9 @@ def run_popv_annotation(
         return _ctx()
 
     def _run_method_safe(adata, method):
-        """Run one PopV method with targeted fixes per method."""
         import unittest.mock as mock
 
         if method == "KNN_HARMONY":
-            # Swap adata.obsm with our proxy for the duration of annotate_data
             real_obsm = adata.obsm
             proxy = _ObsmProxy(real_obsm, adata.n_obs)
             with mock.patch.object(adata, "obsm", proxy):
@@ -662,11 +681,7 @@ def run_popv_annotation(
     for method in methods:
         try:
             _run_method_safe(adata_processed, method)
-
-            # FIX 1b — normalise prediction column case after every method so
-            # the PopV consensus step always sees correctly-cased labels.
             _normalise_predictions(adata_processed, label_map)
-
             successful_methods.append(method)
             logger.info(f"✓ {method} completed.")
 
@@ -677,7 +692,6 @@ def run_popv_annotation(
 
     # --- FIX 4: robust fallback for majority-vote ---------------------------
     if "popv_majority_vote_prediction" not in adata_processed.obs.columns:
-        # Collect columns that exist and have actual predictions
         pred_cols = [
             c for c in adata_processed.obs.columns
             if c.endswith("_prediction")
@@ -695,14 +709,36 @@ def run_popv_annotation(
         else:
             logger.error("No prediction columns found at all. Annotation failed.")
 
+    # --- FIX 7: extract query cells only ------------------------------------
+    # Process_Query concatenates query + (subsampled) reference cells into
+    # adata_processed.  We must peel off the reference rows before saving so
+    # the output matches the original Module 1 shape (n_obs = query cells).
+    logger.info(
+        f"Combined AnnData shape after annotation: {adata_processed.shape}  "
+        f"(query {adata_query_snapshot.n_obs} + reference cells)"
+    )
+    adata_query_out = _extract_query_cells(adata_processed, adata_query_snapshot)
+    logger.info(
+        f"Query-only AnnData shape: {adata_query_out.shape}  "
+        f"(expected n_obs ≈ {adata_query_snapshot.n_obs})"
+    )
+
+    # Optionally remove Tabula Sapiens reference metadata columns
+    if drop_reference_columns:
+        adata_query_out = _drop_reference_only_columns(adata_query_out)
+
     # --- final clean-up & save ----------------------------------------------
-    _clean_obs_for_h5ad(adata_processed)
+    _clean_obs_for_h5ad(adata_query_out)
 
     out_path = os.path.join(output_dir, "final_popv_annotated.h5ad")
-    adata_processed.write(out_path)
-    logger.info(f"Saved annotated data to: {out_path}")
+    adata_query_out.write(out_path)
+    logger.info(f"Saved annotated query data to: {out_path}")
+    logger.info(
+        f"Final saved shape: {adata_query_out.shape}  "
+        f"obs columns: {list(adata_query_out.obs.columns)}"
+    )
 
-    return adata_processed
+    return adata_query_out
 
 
 # ---------------------------------------------------------------------------
@@ -714,6 +750,7 @@ def auto_run_popv(
     nsamples: int = 300,
     output_dir: str = "popv_results",
     user_reference: str = None,
+    drop_reference_columns: bool = True,
 ):
     """
     Fully automatic entry-point.
@@ -733,13 +770,16 @@ def auto_run_popv(
     user_reference : str or None
         Path to a custom reference h5ad.  If None, Tabula Sapiens is
         auto-downloaded based on the cancer_type stored in the query h5ad.
+    drop_reference_columns : bool
+        If True (default), Tabula Sapiens metadata columns are dropped from
+        the saved output to keep it clean (same as Module 1 output columns
+        plus popv_* predictions).
     """
     tumor_file = get_latest_tumor_h5ad()
     logger.info(f"Query file: {tumor_file}")
 
     cancer_type = detect_cancer_type_from_h5ad(tumor_file)
 
-    # cancer_type may be a comma-separated list; use the first one for reference matching
     primary_cancer = cancer_type.split(",")[0].strip()
     reference_path = auto_select_reference(primary_cancer, user_reference)
 
@@ -755,4 +795,5 @@ def auto_run_popv(
         output_dir=output_dir,
         input_type=input_type,
         n_samples_per_label=nsamples,
+        drop_reference_columns=drop_reference_columns,
     )
