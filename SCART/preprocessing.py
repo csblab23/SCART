@@ -22,7 +22,12 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(os.path.join(BASE_DIR, "external"))
 
 SURFACEOME_PATH = os.path.join(BASE_DIR, "GESP", "GESP_surfaceome_gene.csv")
-SCMALIGNANT_MODEL = os.path.join(BASE_DIR, "external", "scMalignantFinder", "model")
+
+
+# ✅ FIX 1: FORCE ABSOLUTE MODEL PATH (CRITICAL FIX)
+SCMALIGNANT_MODEL = os.path.abspath(
+    os.path.join(BASE_DIR, "external", "scMalignantFinder", "model")
+)
 
 SAVE_DIR = os.path.join(BASE_DIR, "preprocessed_input")
 os.makedirs(SAVE_DIR, exist_ok=True)
@@ -60,7 +65,6 @@ def run_copykat(adata, ref_path, n_cores=4, copykat_params=None):
 
     print("\nRunning CopyKAT...\n")
 
-    # --- default CopyKAT params ---
     default_params = {
         "id_type": "S",
         "ngene_chr": 5,
@@ -76,7 +80,6 @@ def run_copykat(adata, ref_path, n_cores=4, copykat_params=None):
 
     ref = sc.read_h5ad(ref_path)
 
-    # --- extract counts ---
     mat_main = _to_dense(adata.layers.get("counts", adata.X)).T
     mat_ref = _to_dense(ref.layers.get("counts", ref.X)).T
 
@@ -93,7 +96,6 @@ def run_copykat(adata, ref_path, n_cores=4, copykat_params=None):
     combined = np.concatenate([mat_main, mat_ref], axis=1)
     cell_names = list(adata.obs_names) + ref_cells
 
-    # --- save temp files ---
     tmp_dir = tempfile.mkdtemp()
 
     mat_file = os.path.join(tmp_dir, "matrix.csv")
@@ -101,7 +103,6 @@ def run_copykat(adata, ref_path, n_cores=4, copykat_params=None):
 
     r_script = os.path.join(tmp_dir, "run_copykat.R")
 
-    # --- R script ---
     with open(r_script, "w") as f:
         f.write(f"""
 library(copykat)
@@ -151,7 +152,6 @@ def run_preprocessing_pipeline(
 
     print("\n========== START ==========\n")
 
-    # 🔥 AUTO LOAD POPV
     if adata is None:
 
         if popv_path is not None:
@@ -162,15 +162,9 @@ def run_preprocessing_pipeline(
 
         adata = sc.read_h5ad(popv_path)
 
-    # ------------------------------------------------------
-    # 1. epithelial
-    # ------------------------------------------------------
     labels = adata.obs["popv_majority_vote_prediction"].astype(str)
     adata = adata[labels.str.contains("epithelial", case=False)].copy()
 
-    # ------------------------------------------------------
-    # 2. QC
-    # ------------------------------------------------------
     adata.var["mt"] = adata.var_names.str.startswith("MT-")
     sc.pp.calculate_qc_metrics(adata, qc_vars=["mt"], inplace=True)
 
@@ -179,9 +173,6 @@ def run_preprocessing_pipeline(
         (adata.obs["pct_counts_mt"] < max_mt)
     ].copy()
 
-    # ------------------------------------------------------
-    # 3. normalize
-    # ------------------------------------------------------
     if "counts" in adata.layers:
         adata.X = adata.layers["counts"].copy()
 
@@ -190,25 +181,26 @@ def run_preprocessing_pipeline(
     sc.pp.normalize_total(adata)
     sc.pp.log1p(adata)
 
-    # ------------------------------------------------------
-    # 4. scMalignantFinder
-    # ------------------------------------------------------
+    # =====================================================
+    # FIX 2: FORCE CORRECT MODEL PATH USAGE
+    # =====================================================
+    print("SCMALIGNANT_MODEL:", SCMALIGNANT_MODEL)
+    print("MODEL EXISTS:", os.path.exists(SCMALIGNANT_MODEL))
+
     from scMalignantFinder import classifier
 
     model = classifier.scMalignantFinder(
         test_input=adata,
         celltype_annotation=False,
-        pretrain_path=SCMALIGNANT_MODEL,
+        pretrain_path=os.path.abspath(SCMALIGNANT_MODEL),  # ✅ FIXED
         feature_path=os.path.join(SCMALIGNANT_MODEL, "ordered_feature.tsv"),
     )
+
     model.load()
     res = model.predict()
 
     adata.obs["scMF"] = res.obs["scMalignantFinder_prediction"]
 
-    # ------------------------------------------------------
-    # 5. COPYKAT
-    # ------------------------------------------------------
     if reference_h5ad is None:
         raise ValueError("reference_h5ad required for CopyKAT")
 
@@ -222,9 +214,6 @@ def run_preprocessing_pipeline(
     copykat_pred = copykat_pred.loc[adata.obs_names]
     adata.obs["copykat"] = copykat_pred["copykat.pred"]
 
-    # ------------------------------------------------------
-    # 6. FINAL MALIGNANCY
-    # ------------------------------------------------------
     if malignant_strategy == "union":
         adata.obs["malignant"] = (
             (adata.obs["scMF"] == "malignant") |
@@ -236,17 +225,11 @@ def run_preprocessing_pipeline(
             (adata.obs["copykat"] == "aneuploid")
         )
 
-    # ------------------------------------------------------
-    # 7. surfaceome + DEG
-    # ------------------------------------------------------
     surf = pd.read_csv(SURFACEOME_PATH)["Gene"].tolist()
     adata = adata[:, adata.var_names.intersection(surf)].copy()
 
     sc.tl.rank_genes_groups(adata, groupby="malignant", method="wilcoxon")
 
-    # ------------------------------------------------------
-    # 8. save
-    # ------------------------------------------------------
     out = os.path.join(SAVE_DIR, "final_tumor.h5ad")
     adata.write(out)
 
