@@ -40,5 +40,8 @@ setup(
         "typer",
         "rich",
         "onclass @ git+https://github.com/wangshenguiuc/OnClass.git"
+
+        # other deps
+        "scMalignantFinder @ file://localhost/absolute/path/to/external/scMalignantFinder"
     ]
 )
