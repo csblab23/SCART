@@ -39,6 +39,7 @@ setup(
         "torch>=2.0",
         "tensorflow>=2.12",
         "deap>=1.4",
+        "scMalignantFinder==1.0.0",
         "typer",
         "rich",
         "onclass @ git+https://github.com/wangshenguiuc/OnClass.git"
