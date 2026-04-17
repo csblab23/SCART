@@ -31,8 +31,6 @@ setup(
         ]
     },
     
-    # ensures non-.py files are included even in nested dirs
-    recursive_include=True,
     
     zip_safe=False,
 
