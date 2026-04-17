@@ -1,11 +1,12 @@
 """
 preprocessing.py
-Module 3 — Preprocessing, malignancy detection, and surfaceome DEG
+Module 3 — Preprocessing + scMalignantFinder + CopyKAT
 """
 
 import os
 import sys
 import logging
+import subprocess
 import tempfile
 
 import numpy as np
@@ -16,85 +17,124 @@ import scipy.sparse as sp
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Paths — repo-relative
-# ---------------------------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
 sys.path.append(os.path.join(BASE_DIR, "external"))
 
-SURFACEOME_PATH = os.path.join(
-    BASE_DIR, "GESP", "GESP_surfaceome_gene.csv"
-)
-
-SCMALIGNANT_MODEL = os.path.join(
-    BASE_DIR, "external", "scMalignantFinder", "model"
-)
+SURFACEOME_PATH = os.path.join(BASE_DIR, "GESP", "GESP_surfaceome_gene.csv")
+SCMALIGNANT_MODEL = os.path.join(BASE_DIR, "external", "scMalignantFinder", "model")
 
 SAVE_DIR = os.path.join(BASE_DIR, "preprocessed_input")
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 
-# ===========================================================================
-# Helper
-# ===========================================================================
-
-def _get_raw_matrix(adata):
-    for layer in ("scvi_counts", "raw_counts", "counts"):
-        if layer in adata.layers:
-            X = adata.layers[layer]
-            break
-    else:
-        X = adata.raw.X if adata.raw is not None else adata.X
-
-    if sp.issparse(X):
-        X = X.toarray()
-    return np.array(X, dtype=np.float64)
+# =========================================================
+# Helpers
+# =========================================================
+def _to_dense(X):
+    return X.toarray() if sp.issparse(X) else X
 
 
-# ===========================================================================
-# Main pipeline
-# ===========================================================================
+def run_copykat(adata, ref_path, n_cores=4):
+    """
+    Runs CopyKAT in R and returns predictions
+    """
 
+    print("\nRunning CopyKAT...\n")
+
+    ref = sc.read_h5ad(ref_path)
+
+    # --- extract counts ---
+    mat_main = _to_dense(adata.layers.get("counts", adata.X)).T
+    mat_ref = _to_dense(ref.layers.get("counts", ref.X)).T
+
+    genes_main = adata.var_names
+    genes_ref = ref.var_names
+
+    common = np.intersect1d(genes_main, genes_ref)
+
+    mat_main = mat_main[[genes_main.get_loc(g) for g in common], :]
+    mat_ref = mat_ref[[genes_ref.get_loc(g) for g in common], :]
+
+    # prefix ref cells
+    ref_cells = ["REF_" + c for c in ref.obs_names]
+
+    combined = np.concatenate([mat_main, mat_ref], axis=1)
+    cell_names = list(adata.obs_names) + ref_cells
+
+    # --- save temp files ---
+    tmp_dir = tempfile.mkdtemp()
+
+    mat_file = os.path.join(tmp_dir, "matrix.csv")
+    pd.DataFrame(combined, index=common, columns=cell_names).to_csv(mat_file)
+
+    r_script = os.path.join(tmp_dir, "run_copykat.R")
+
+    # --- R script ---
+    with open(r_script, "w") as f:
+        f.write(f"""
+library(copykat)
+
+data <- read.csv("{mat_file}", row.names=1)
+
+res <- copykat(
+  rawmat = data,
+  id.type = "S",
+  ngene.chr = 5,
+  win.size = 25,
+  KS.cut = 0.1,
+  sam.name = "sample",
+  distance = "euclidean",
+  norm.cell.names = colnames(data)[grep("^REF_", colnames(data))],
+  output.seg = "FALSE",
+  plot.genes = "TRUE",
+  genome = "hg20",
+  n.cores = {n_cores}
+)
+
+write.csv(res$prediction, file="{tmp_dir}/copykat_pred.csv")
+""")
+
+    # --- run R ---
+    subprocess.run(["Rscript", r_script], check=True)
+
+    pred = pd.read_csv(os.path.join(tmp_dir, "copykat_pred.csv"), index_col=0)
+
+    return pred
+
+
+# =========================================================
+# MAIN PIPELINE
+# =========================================================
 def run_preprocessing_pipeline(
-    adata=None,   # 🔥 changed
-    min_genes: int = 200,
-    max_mt: float = 40.0,
-    log2fc_threshold: float = 2.0,
-    pval_threshold: float = 0.5,
-    reference_h5ad: str = None,
-    n_cores: int = 1,
-    malignant_strategy: str = "union",
+    adata=None,
+    min_genes=200,
+    max_mt=40,
+    log2fc_threshold=2,
+    pval_threshold=0.5,
+    reference_h5ad=None,
+    n_cores=4,
+    malignant_strategy="union",
 ):
 
-    print("\n========== STARTING PREPROCESSING ==========\n")
+    print("\n========== START ==========\n")
 
-    # 🔥 AUTO-LOAD POPV OUTPUT
+    # 🔥 AUTO LOAD POPV
     if adata is None:
-        popv_path = os.path.join(
-            BASE_DIR, "..", "popv_results", "final_popv_annotated.h5ad"
+        popv_path = os.path.abspath(
+            os.path.join(BASE_DIR, "..", "popv_results", "final_popv_annotated.h5ad")
         )
-        popv_path = os.path.abspath(popv_path)
-
-        if not os.path.exists(popv_path):
-            raise FileNotFoundError(
-                f"POPV output not found at:\n{popv_path}"
-            )
-
-        print(f"Auto-loading POPV output:\n{popv_path}\n")
+        print(f"Loading POPV output: {popv_path}")
         adata = sc.read_h5ad(popv_path)
 
-    initial_cells = adata.n_obs
-
-    # ------------------------------------------------------------------
-    # 1. Epithelial
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------
+    # 1. epithelial
+    # ------------------------------------------------------
     labels = adata.obs["popv_majority_vote_prediction"].astype(str)
-    adata = adata[labels.str.endswith("epithelial cell")].copy()
+    adata = adata[labels.str.contains("epithelial", case=False)].copy()
 
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------
     # 2. QC
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------
     adata.var["mt"] = adata.var_names.str.startswith("MT-")
     sc.pp.calculate_qc_metrics(adata, qc_vars=["mt"], inplace=True)
 
@@ -103,22 +143,20 @@ def run_preprocessing_pipeline(
         (adata.obs["pct_counts_mt"] < max_mt)
     ].copy()
 
-    # ------------------------------------------------------------------
-    # 3. Raw counts
-    # ------------------------------------------------------------------
-    for layer in ("scvi_counts", "raw_counts", "counts"):
-        if layer in adata.layers:
-            adata.X = adata.layers[layer].copy()
-            break
+    # ------------------------------------------------------
+    # 3. normalize
+    # ------------------------------------------------------
+    if "counts" in adata.layers:
+        adata.X = adata.layers["counts"].copy()
 
     adata.layers["raw_for_copykat"] = adata.X.copy()
 
-    sc.pp.normalize_total(adata, target_sum=1e4)
+    sc.pp.normalize_total(adata)
     sc.pp.log1p(adata)
 
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------
     # 4. scMalignantFinder
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------
     from scMalignantFinder import classifier
 
     model = classifier.scMalignantFinder(
@@ -128,47 +166,50 @@ def run_preprocessing_pipeline(
         feature_path=os.path.join(SCMALIGNANT_MODEL, "ordered_feature.tsv"),
     )
     model.load()
-    result = model.predict()
+    res = model.predict()
 
-    adata.obs["scMalignantFinder_prediction"] = result.obs[
-        "scMalignantFinder_prediction"
-    ]
+    adata.obs["scMF"] = res.obs["scMalignantFinder_prediction"]
 
-    # ------------------------------------------------------------------
-    # 5. Surfaceome
-    # ------------------------------------------------------------------
-    surfaceome = pd.read_csv(SURFACEOME_PATH)
-    surf_genes = surfaceome["Gene"].astype(str).tolist()
-    adata = adata[:, adata.var_names.intersection(surf_genes)].copy()
+    # ------------------------------------------------------
+    # 5. COPYKAT
+    # ------------------------------------------------------
+    if reference_h5ad is None:
+        raise ValueError("reference_h5ad required for CopyKAT")
 
-    # ------------------------------------------------------------------
-    # 6. DEG
-    # ------------------------------------------------------------------
-    sc.tl.rank_genes_groups(
-        adata,
-        groupby="scMalignantFinder_prediction",
-        method="wilcoxon",
-    )
+    copykat_pred = run_copykat(adata, reference_h5ad, n_cores)
 
-    df = sc.get.rank_genes_groups_df(adata, group=None)
+    copykat_pred = copykat_pred.loc[adata.obs_names]
+    adata.obs["copykat"] = copykat_pred["copykat.pred"]
 
-    adata.uns["filtered_deg"] = df[
-        (df["logfoldchanges"] > log2fc_threshold) &
-        (df["pvals"] < pval_threshold)
-    ]
+    # ------------------------------------------------------
+    # 6. FINAL MALIGNANCY
+    # ------------------------------------------------------
+    if malignant_strategy == "union":
+        adata.obs["malignant"] = (
+            (adata.obs["scMF"] == "malignant") |
+            (adata.obs["copykat"] == "aneuploid")
+        )
+    else:
+        adata.obs["malignant"] = (
+            (adata.obs["scMF"] == "malignant") &
+            (adata.obs["copykat"] == "aneuploid")
+        )
 
-    # ------------------------------------------------------------------
-    # 7. Binarise
-    # ------------------------------------------------------------------
-    adata.X = (adata.layers["raw_for_copykat"] > 0).astype(int)
+    # ------------------------------------------------------
+    # 7. surfaceome + DEG
+    # ------------------------------------------------------
+    surf = pd.read_csv(SURFACEOME_PATH)["Gene"].tolist()
+    adata = adata[:, adata.var_names.intersection(surf)].copy()
 
-    # ------------------------------------------------------------------
-    # 8. Save
-    # ------------------------------------------------------------------
+    sc.tl.rank_genes_groups(adata, groupby="malignant", method="wilcoxon")
+
+    # ------------------------------------------------------
+    # 8. save
+    # ------------------------------------------------------
     out = os.path.join(SAVE_DIR, "final_tumor.h5ad")
     adata.write(out)
 
     print(f"\nSaved: {out}")
-    print("\n========== DONE ==========\n")
+    print("\n========== PREPROCESSING DONE ==========\n")
 
     return adata
