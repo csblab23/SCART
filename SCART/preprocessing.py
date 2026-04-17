@@ -8,6 +8,7 @@ import sys
 import logging
 import subprocess
 import tempfile
+import glob
 
 import numpy as np
 import pandas as pd
@@ -34,12 +35,44 @@ def _to_dense(X):
     return X.toarray() if sp.issparse(X) else X
 
 
-def run_copykat(adata, ref_path, n_cores=4):
+def _auto_find_popv():
+    search_paths = [os.getcwd(), "popv_results"]
+
+    files = []
+    for path in search_paths:
+        files.extend(glob.glob(os.path.join(path, "final_popv_annotated.h5ad")))
+
+    if not files:
+        raise FileNotFoundError(
+            "No POPV output found.\n"
+            "Expected: popv_results/final_popv_annotated.h5ad\n"
+            "Run Module 2 first OR pass popv_path"
+        )
+
+    files = list(set(files))
+    return max(files, key=os.path.getctime)
+
+
+def run_copykat(adata, ref_path, n_cores=4, copykat_params=None):
     """
     Runs CopyKAT in R and returns predictions
     """
 
     print("\nRunning CopyKAT...\n")
+
+    # --- default CopyKAT params ---
+    default_params = {
+        "id_type": "S",
+        "ngene_chr": 5,
+        "win_size": 25,
+        "KS_cut": 0.1,
+        "sam_name": "sample",
+        "distance": "euclidean",
+        "genome": "hg20"
+    }
+
+    if copykat_params is not None:
+        default_params.update(copykat_params)
 
     ref = sc.read_h5ad(ref_path)
 
@@ -55,7 +88,6 @@ def run_copykat(adata, ref_path, n_cores=4):
     mat_main = mat_main[[genes_main.get_loc(g) for g in common], :]
     mat_ref = mat_ref[[genes_ref.get_loc(g) for g in common], :]
 
-    # prefix ref cells
     ref_cells = ["REF_" + c for c in ref.obs_names]
 
     combined = np.concatenate([mat_main, mat_ref], axis=1)
@@ -78,23 +110,22 @@ data <- read.csv("{mat_file}", row.names=1)
 
 res <- copykat(
   rawmat = data,
-  id.type = "S",
-  ngene.chr = 5,
-  win.size = 25,
-  KS.cut = 0.1,
-  sam.name = "sample",
-  distance = "euclidean",
+  id.type = "{default_params['id_type']}",
+  ngene.chr = {default_params['ngene_chr']},
+  win.size = {default_params['win_size']},
+  KS.cut = {default_params['KS_cut']},
+  sam.name = "{default_params['sam_name']}",
+  distance = "{default_params['distance']}",
   norm.cell.names = colnames(data)[grep("^REF_", colnames(data))],
   output.seg = "FALSE",
   plot.genes = "TRUE",
-  genome = "hg20",
+  genome = "{default_params['genome']}",
   n.cores = {n_cores}
 )
 
 write.csv(res$prediction, file="{tmp_dir}/copykat_pred.csv")
 """)
 
-    # --- run R ---
     subprocess.run(["Rscript", r_script], check=True)
 
     pred = pd.read_csv(os.path.join(tmp_dir, "copykat_pred.csv"), index_col=0)
@@ -107,6 +138,7 @@ write.csv(res$prediction, file="{tmp_dir}/copykat_pred.csv")
 # =========================================================
 def run_preprocessing_pipeline(
     adata=None,
+    popv_path=None,
     min_genes=200,
     max_mt=40,
     log2fc_threshold=2,
@@ -114,16 +146,20 @@ def run_preprocessing_pipeline(
     reference_h5ad=None,
     n_cores=4,
     malignant_strategy="union",
+    copykat_params=None,
 ):
 
     print("\n========== START ==========\n")
 
     # 🔥 AUTO LOAD POPV
     if adata is None:
-        popv_path = os.path.abspath(
-            os.path.join(BASE_DIR, "..", "popv_results", "final_popv_annotated.h5ad")
-        )
-        print(f"Loading POPV output: {popv_path}")
+
+        if popv_path is not None:
+            print(f"Loading POPV output (user): {popv_path}")
+        else:
+            popv_path = _auto_find_popv()
+            print(f"Loading POPV output (auto): {popv_path}")
+
         adata = sc.read_h5ad(popv_path)
 
     # ------------------------------------------------------
@@ -176,7 +212,12 @@ def run_preprocessing_pipeline(
     if reference_h5ad is None:
         raise ValueError("reference_h5ad required for CopyKAT")
 
-    copykat_pred = run_copykat(adata, reference_h5ad, n_cores)
+    copykat_pred = run_copykat(
+        adata,
+        reference_h5ad,
+        n_cores,
+        copykat_params
+    )
 
     copykat_pred = copykat_pred.loc[adata.obs_names]
     adata.obs["copykat"] = copykat_pred["copykat.pred"]
