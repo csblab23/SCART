@@ -24,10 +24,19 @@ sys.path.append(os.path.join(BASE_DIR, "external"))
 SURFACEOME_PATH = os.path.join(BASE_DIR, "GESP", "GESP_surfaceome_gene.csv")
 
 
-# ✅ FIX 1: FORCE ABSOLUTE MODEL PATH (CRITICAL FIX)
-SCMALIGNANT_MODEL = os.path.abspath(
-    os.path.join(BASE_DIR, "external", "scMalignantFinder", "model")
+# =========================================================
+# ✅ PERMANENT FIX (ROBUST MODEL PATH)
+# =========================================================
+SCMALIGNANT_MODEL = os.path.join(
+    os.path.dirname(__file__),
+    "external",
+    "scMalignantFinder",
+    "model"
 )
+
+# hard fail early if broken install
+assert os.path.exists(os.path.join(SCMALIGNANT_MODEL, "model.joblib")), \
+    "scMalignantFinder model missing at expected path"
 
 SAVE_DIR = os.path.join(BASE_DIR, "preprocessed_input")
 os.makedirs(SAVE_DIR, exist_ok=True)
@@ -59,9 +68,6 @@ def _auto_find_popv():
 
 
 def run_copykat(adata, ref_path, n_cores=4, copykat_params=None):
-    """
-    Runs CopyKAT in R and returns predictions
-    """
 
     print("\nRunning CopyKAT...\n")
 
@@ -182,7 +188,7 @@ def run_preprocessing_pipeline(
     sc.pp.log1p(adata)
 
     # =====================================================
-    # FIX 2: FORCE CORRECT MODEL PATH USAGE
+    # FIXED scMalignantFinder PATH USAGE
     # =====================================================
     print("SCMALIGNANT_MODEL:", SCMALIGNANT_MODEL)
     print("MODEL EXISTS:", os.path.exists(SCMALIGNANT_MODEL))
@@ -192,7 +198,7 @@ def run_preprocessing_pipeline(
     model = classifier.scMalignantFinder(
         test_input=adata,
         celltype_annotation=False,
-        pretrain_path=os.path.abspath(SCMALIGNANT_MODEL),  # ✅ FIXED
+        pretrain_path=SCMALIGNANT_MODEL,
         feature_path=os.path.join(SCMALIGNANT_MODEL, "ordered_feature.tsv"),
     )
 
