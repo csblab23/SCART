@@ -13,16 +13,10 @@ Fixes applied:
      does not re-download at annotation time.
   6. Minor: bare excepts replaced with specific Exception catches; unused
      obo_file argument removed from public API.
-  7. Query-cell extraction: after PopV annotation the combined
+  7. [NEW] Query-cell extraction: after PopV annotation the combined
      query+reference AnnData is filtered back to query cells only using
      the '_dataset' column written by Process_Query.  Only the query
      portion (original Module 1 shape) is saved to disk.
-  8. [NEW] raw slot preservation: adata_query.raw (set by Module 1 before
-     any HVG subsetting) is captured before Process_Query runs and
-     re-attached to adata_query_out after annotation.  This gives Module 3
-     access to the full ~33k gene space needed by scMalignantFinder.
-     Without this, Process_Query's internal HVG step overwrites / discards
-     the raw slot and the saved h5ad only has 4000 HVG genes.
 """
 
 import os
@@ -210,6 +204,15 @@ def _set_input_matrix(adata, input_type: str):
 # ---------------------------------------------------------------------------
 
 def _build_label_map(ontology_json_path: str):
+    """
+    Build two dicts from cl_popv.json:
+
+    label_map   : lowercase_label → correctly-cased label
+                  e.g. "b cell" → "B cell"
+
+    label_to_id : correctly-cased label → short CL ID
+                  e.g. "B cell" → "CL:0000236"
+    """
     import json
     with open(ontology_json_path) as fh:
         cl = json.load(fh)
@@ -229,6 +232,10 @@ def _build_label_map(ontology_json_path: str):
 
 
 def _normalise_predictions(adata, label_map: dict):
+    """
+    For every *_prediction column in adata.obs, replace lowercase labels
+    with the correctly-cased ontology label.
+    """
     pred_cols = [c for c in adata.obs.columns if c.endswith("_prediction")]
     for col in pred_cols:
         adata.obs[col] = (
@@ -244,6 +251,7 @@ def _normalise_predictions(adata, label_map: dict):
 # ---------------------------------------------------------------------------
 
 def _resolve_ontology_folder() -> str:
+    """Return the directory containing cl_popv.json (or equivalent)."""
     candidate_packages = [
         "SCART.PopV.resources.ontology",
         "SCART.PopV.resources",
@@ -291,6 +299,7 @@ def _resolve_ontology_folder() -> str:
 
 
 def _find_ontology_json(cl_obo_folder: str) -> str:
+    """Return the full path to the ontology JSON inside cl_obo_folder."""
     for fname in ("cl.obo.json", "cl_popv.json", "cl.json"):
         p = os.path.join(cl_obo_folder.rstrip("/"), fname)
         if os.path.exists(p):
@@ -306,6 +315,9 @@ def _find_ontology_json(cl_obo_folder: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _check_batch_annotation(adata):
+    """
+    Warn if _batch_annotation has fewer than 2 unique values.
+    """
     col = "_batch_annotation"
     if col not in adata.obs.columns:
         logger.warning(
@@ -326,14 +338,27 @@ def _check_batch_annotation(adata):
 
 
 # ---------------------------------------------------------------------------
-# FIX 7 — extract query cells from the combined AnnData after PopV
+# NEW FIX 7 — extract query cells from the combined AnnData after PopV
 # ---------------------------------------------------------------------------
 
 def _extract_query_cells(adata_processed, adata_query_original):
     """
-    Filter the combined query+reference AnnData back to query cells only.
-    Three strategies tried in order (see module docstring for details).
+    After Process_Query + annotate_data, the AnnData contains both query
+    and reference cells concatenated together.  This function returns a new
+    AnnData containing ONLY the original query cells, with all PopV
+    prediction columns preserved.
+
+    Strategy (in order of preference):
+      1. Use adata.obs['_dataset'] == 'query'  ← written by Process_Query
+      2. Match obs_names against the original query obs_names
+      3. Use adata.obs['_reference_labels_annotation'].isna() as a proxy
+         (reference cells always have a label; query cells start as NaN)
+
+    The returned object keeps original Module 1 obs columns (gsm_id, gse_id)
+    plus all new popv_* prediction columns.  Reference-only columns
+    (donor, tissue, cdna_plate, …) are dropped to keep the file clean.
     """
+    # --- Strategy 1: _dataset column ----------------------------------------
     if "_dataset" in adata_processed.obs.columns:
         query_mask = adata_processed.obs["_dataset"] == "query"
         n_query = query_mask.sum()
@@ -345,6 +370,7 @@ def _extract_query_cells(adata_processed, adata_query_original):
             return adata_processed[query_mask].copy()
         logger.warning("'_dataset' == 'query' matched 0 cells; trying fallback.")
 
+    # --- Strategy 2: match original obs_names --------------------------------
     original_names = set(adata_query_original.obs_names)
     mask_by_name = adata_processed.obs_names.isin(original_names)
     n_matched = mask_by_name.sum()
@@ -354,6 +380,7 @@ def _extract_query_cells(adata_processed, adata_query_original):
         )
         return adata_processed[mask_by_name].copy()
 
+    # --- Strategy 3: _reference_labels_annotation NaN proxy -----------------
     if "_reference_labels_annotation" in adata_processed.obs.columns:
         mask_nan = adata_processed.obs["_reference_labels_annotation"].isna()
         n_nan = mask_nan.sum()
@@ -364,14 +391,27 @@ def _extract_query_cells(adata_processed, adata_query_original):
         if n_nan > 0:
             return adata_processed[mask_nan].copy()
 
+    # --- Fallback: return as-is with a loud warning --------------------------
     logger.error(
         "Could not identify query cells within the combined AnnData. "
-        "Returning the full combined object."
+        "Returning the full combined object. "
+        "Output will contain reference cells too — inspect '_dataset' column."
     )
     return adata_processed
 
 
-def _drop_reference_only_columns(adata):
+def _drop_reference_only_columns(adata, keep_prefixes=("popv_", "gsm_id", "gse_id")):
+    """
+    Drop obs columns that belong to the Tabula Sapiens reference metadata
+    and are not relevant to the query dataset.  Keeps:
+      - any column whose name starts with a prefix in keep_prefixes
+      - any column that was present in the original query adata
+      - PopV internal columns (_batch_annotation, over_clustering, etc.)
+        are kept as they may be useful for QC.
+    
+    This is optional/cosmetic — it just makes the saved file tidier.
+    Call it only if you want a lean output; skip it to keep all columns.
+    """
     tabula_ref_cols = {
         "donor", "tissue", "anatomical_position", "method", "cdna_plate",
         "library_plate", "notes", "cdna_well", "old_index", "assay",
@@ -384,122 +424,20 @@ def _drop_reference_only_columns(adata):
         "_scvi_batch", "_scvi_labels", "scvi_leiden_donorassay_full",
         "age", "sex", "ethnicity", "scvi_leiden_res05_tissue", "sample_number",
     }
-    cols_to_drop = [col for col in adata.obs.columns if col in tabula_ref_cols]
+
+    cols_to_drop = [
+        col for col in adata.obs.columns
+        if col in tabula_ref_cols
+    ]
+
     if cols_to_drop:
         logger.info(
             f"Dropping {len(cols_to_drop)} Tabula Sapiens reference columns "
             f"from query output: {cols_to_drop}"
         )
         adata.obs = adata.obs.drop(columns=cols_to_drop)
+
     return adata
-
-
-# ---------------------------------------------------------------------------
-# FIX 8 — preserve raw slot through Process_Query
-# ---------------------------------------------------------------------------
-
-def _capture_raw_slot(adata_query):
-    """
-    Capture adata_query.raw BEFORE Process_Query runs.
-
-    Process_Query internally:
-      1. Subsets to HVGs (4000 genes)
-      2. Concatenates query + reference
-      3. Runs PCA / scVI on the combined object
-
-    After step 1 the raw slot on the processed object refers to the
-    HVG-subsetted space (or is None).  We need the ORIGINAL full-gene raw
-    slot that Module 1 set (all ~33k genes) so that Module 3 can pass all
-    genes to scMalignantFinder.
-
-    Returns
-    -------
-    raw_X : np.ndarray or None
-        Dense float32 array of shape (n_query_cells, n_all_genes).
-        None if adata_query.raw is not set.
-    raw_var : pd.DataFrame or None
-        var DataFrame from adata_query.raw (index = all gene names).
-    """
-    if adata_query.raw is None:
-        logger.warning(
-            "adata_query.raw is None — full gene space not available. "
-            "scMalignantFinder will fall back to the 4000 HVG space (19% overlap). "
-            "To fix: ensure Module 1 sets  adata.raw = adata  before scVI training."
-        )
-        return None, None
-
-    raw_X = adata_query.raw.X
-    if sp.issparse(raw_X):
-        raw_X = raw_X.toarray()
-    raw_X = np.array(raw_X, dtype=np.float32)
-
-    raw_var = adata_query.raw.var.copy()
-
-    n_genes = raw_X.shape[1]
-    logger.info(
-        f"Captured raw slot: {raw_X.shape[0]} cells × {n_genes} genes "
-        f"(will be re-attached after annotation for Module 3)."
-    )
-    return raw_X, raw_var
-
-
-def _reattach_raw_slot(adata_query_out, raw_X, raw_var):
-    """
-    Re-attach the full-gene raw slot to the query-only output AnnData.
-
-    adata_query_out has n_obs = n_query_cells (after _extract_query_cells).
-    raw_X has shape (n_original_query_cells, n_all_genes).
-
-    If the cell order changed inside Process_Query (it can reorder cells
-    during concatenation), we realign by obs_names before re-attaching.
-    """
-    if raw_X is None or raw_var is None:
-        return adata_query_out
-
-    out_names  = list(adata_query_out.obs_names)
-    # raw_X rows were captured in the original Module-1 order.
-    # We need to find where each output cell sits in the original order.
-    # raw_var.index holds gene names; raw_X rows match original query order.
-    # We stored raw_X before Process_Query, so its row order matches
-    # adata_query (the object passed to Process_Query).
-    # After _extract_query_cells the cell order should be preserved, but
-    # we verify by checking obs_names alignment.
-
-    # Build a name→row-index map from the original capture
-    # (adata_query obs_names at capture time == same object passed to PQ)
-    # We stored raw_X in the same order as adata_query.obs_names at capture.
-    # adata_query_out.obs_names is a subset (query cells only), same order.
-    # So raw_X[i] corresponds to out_names[i] IF no reordering happened.
-    # To be safe, align explicitly.
-
-    # We don't have the original obs_names order stored separately, but
-    # adata_query_out.obs_names ARE the original query obs_names (verified
-    # in _extract_query_cells).  raw_X was captured from adata_query BEFORE
-    # Process_Query, so its row order == adata_query.obs_names order.
-    # As long as _extract_query_cells preserves row order (which .copy()
-    # on a boolean mask does), raw_X rows align 1:1 with out_names.
-
-    if raw_X.shape[0] != len(out_names):
-        logger.error(
-            f"raw_X has {raw_X.shape[0]} rows but output AnnData has "
-            f"{len(out_names)} cells — cannot re-attach raw slot safely. "
-            "Skipping raw re-attachment."
-        )
-        return adata_query_out
-
-    import anndata as ad
-    raw_adata = ad.AnnData(
-        X   = sp.csr_matrix(raw_X),
-        obs = adata_query_out.obs[[]].copy(),   # empty obs, just the index
-        var = raw_var,
-    )
-    adata_query_out.raw = raw_adata.copy()
-
-    logger.info(
-        f"Re-attached raw slot: {raw_X.shape[0]} cells × {raw_X.shape[1]} genes. "
-        f"Module 3 will use this for scMalignantFinder (full gene space)."
-    )
-    return adata_query_out
 
 
 # ---------------------------------------------------------------------------
@@ -521,8 +459,6 @@ def run_popv_annotation(
     ----------
     adata_query : AnnData
         Query dataset (tumor cells from Module 1).
-        Must have adata_query.raw set to the full-gene expression matrix
-        (Module 1 does this via  adata.raw = adata  before scVI training).
     adata_ref : AnnData
         Tabula Sapiens tissue reference.
     output_dir : str
@@ -533,18 +469,14 @@ def run_popv_annotation(
     n_samples_per_label : int
         Cells sampled per label during reference subsampling.
     drop_reference_columns : bool
-        If True, Tabula Sapiens metadata columns are removed from the saved
-        query AnnData.
+        If True (default), Tabula Sapiens metadata columns are removed from
+        the saved query AnnData to keep the output file clean.
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    # FIX 8 — capture raw slot BEFORE Process_Query discards it
-    # This must happen before _set_input_matrix / _force_float32 which
-    # modify adata_query in-place (those don't touch .raw, but capturing
-    # early is safer and makes the intent explicit).
-    raw_X, raw_var = _capture_raw_slot(adata_query)
-
-    # Keep a snapshot for query-cell extraction later (strategy 2)
+    # Keep a copy of original query obs_names for query-cell extraction later
+    original_query_obs_names = adata_query.obs_names.copy()
+    # Lightweight copy (just obs) so we can use strategy-2 name matching
     adata_query_snapshot = adata_query.copy()
 
     # --- pre-process dtypes -------------------------------------------------
@@ -616,10 +548,6 @@ def run_popv_annotation(
             )
 
     # --- Process_Query ------------------------------------------------------
-    # NOTE: Process_Query subsets to HVGs internally. After this call,
-    # adata_processed only has 4000 genes in .X. The full-gene raw slot
-    # was already captured above (raw_X, raw_var) and will be re-attached
-    # to the output after annotation (FIX 8).
     pq = Process_Query(
         query_adata=adata_query,
         ref_adata=adata_ref,
@@ -782,6 +710,9 @@ def run_popv_annotation(
             logger.error("No prediction columns found at all. Annotation failed.")
 
     # --- FIX 7: extract query cells only ------------------------------------
+    # Process_Query concatenates query + (subsampled) reference cells into
+    # adata_processed.  We must peel off the reference rows before saving so
+    # the output matches the original Module 1 shape (n_obs = query cells).
     logger.info(
         f"Combined AnnData shape after annotation: {adata_processed.shape}  "
         f"(query {adata_query_snapshot.n_obs} + reference cells)"
@@ -791,9 +722,6 @@ def run_popv_annotation(
         f"Query-only AnnData shape: {adata_query_out.shape}  "
         f"(expected n_obs ≈ {adata_query_snapshot.n_obs})"
     )
-
-    # --- FIX 8: re-attach full-gene raw slot --------------------------------
-    adata_query_out = _reattach_raw_slot(adata_query_out, raw_X, raw_var)
 
     # Optionally remove Tabula Sapiens reference metadata columns
     if drop_reference_columns:
@@ -807,14 +735,14 @@ def run_popv_annotation(
     logger.info(f"Saved annotated query data to: {out_path}")
     logger.info(
         f"Final saved shape: {adata_query_out.shape}  "
-        f"(raw slot: {adata_query_out.raw.n_vars if adata_query_out.raw is not None else 'None'} genes)"
+        f"obs columns: {list(adata_query_out.obs.columns)}"
     )
 
     return adata_query_out
 
 
 # ---------------------------------------------------------------------------
-# Auto entry-point
+# Auto entry-point (mirrors Module 1's run() interface)
 # ---------------------------------------------------------------------------
 
 def auto_run_popv(
@@ -844,7 +772,8 @@ def auto_run_popv(
         auto-downloaded based on the cancer_type stored in the query h5ad.
     drop_reference_columns : bool
         If True (default), Tabula Sapiens metadata columns are dropped from
-        the saved output.
+        the saved output to keep it clean (same as Module 1 output columns
+        plus popv_* predictions).
     """
     tumor_file = get_latest_tumor_h5ad()
     logger.info(f"Query file: {tumor_file}")
