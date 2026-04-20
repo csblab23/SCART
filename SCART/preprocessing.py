@@ -15,6 +15,21 @@ SCMALIGNANT_MODEL  Auto-detected from the installed SCART package via
 SURFACEOME_PATH    Bundled inside SCART; auto-detected the same way.
 SAVE_DIR           Defaults to 'preprocessing_results/' in the current
                    working directory; override with save_dir= parameter.
+
+Fixes vs original
+-----------------
+  FIX A  DEG now filters on pvals_adj (BH-adjusted) instead of raw pvals.
+          Raw p-values are uniform under the null and yield misleading
+          cutoffs; adjusted values are the correct multiple-testing control.
+          Default adjusted-pval threshold changed to 0.05 (was 0.5 raw).
+
+  FIX B  adata.raw is now the primary gene-space source for scMalignant-
+          Finder (Route A).  Module 2 (popv_annotation.py FIX 8) now
+          writes adata.raw with the full gene space before saving, so the
+          19% overlap warning should no longer appear.
+
+  FIX C  rpy2 / inferCNA installation guidance is printed clearly when the
+          module is missing, including the exact conda command.
 """
 
 import os
@@ -102,7 +117,7 @@ def _build_fullgene_adata_for_scm(adata, feature_tsv: str):
     """
     Return a log-normalised AnnData covering the full original gene space.
 
-    Route A — adata.raw            (populated by Module 2 fix)
+    Route A — adata.raw            (populated by Module 2 FIX 8)
     Route B — uns['full_var_names'] (SCART-specific fallback)
     Route C — 4000-HVG adata as-is  (last resort, with warning)
 
@@ -252,9 +267,17 @@ def _run_infercna(
         numpy2ri.activate()
     except ImportError as exc:
         raise ImportError(
-            "rpy2 is required to run inferCNA.\n"
-            "Install: pip install rpy2\n"
-            "R package: devtools::install_github('jlaffy/infercna')"
+            "rpy2 is required to run inferCNA.\n\n"
+            "Install instructions (run inside your scart conda env):\n"
+            "  conda install -c conda-forge rpy2\n"
+            "  # OR\n"
+            "  pip install rpy2\n\n"
+            "Then install the R package (run in R or via rpy2):\n"
+            "  install.packages('devtools')\n"
+            "  devtools::install_github('jlaffy/infercna')\n\n"
+            "Verify installation:\n"
+            "  python -c \"import rpy2.robjects as ro; "
+            "print(ro.r('R.version.string'))\"\n"
         ) from exc
 
     try:
@@ -330,8 +353,6 @@ def _run_infercna(
 
     # ---------------------------------------------------------------
     # TUTORIAL STEP 1 — useGenome()
-    # 'hg19' is a string key for inferCNA's built-in gene-coordinate
-    # table.  It is NOT a file path — no file needs to be provided.
     # ---------------------------------------------------------------
     logger.info(f"inferCNA step 1: useGenome('{genome}')")
     infercna_r.useGenome(genome)
@@ -359,8 +380,6 @@ def _run_infercna(
 
     # ---------------------------------------------------------------
     # TUTORIAL STEP 4 — findMalignant()  on FULL cna
-    # samples = per-cell vector (length == ncol of cna)
-    # excludeFromAvg = ref barcodes
     # ---------------------------------------------------------------
     logger.info("inferCNA step 4: findMalignant() — bimodal Gaussian fitting")
     sample_vec = ["tumor"] * len(q_barcodes) + ["normal"] * len(ref_barcodes)
@@ -415,8 +434,8 @@ def run_preprocessing_pipeline(
     min_genes: int = 200,
     max_mt: float = 40.0,
     # --- DEG ---
-    log2fc_threshold: float = 2.0,
-    pval_threshold: float = 0.5,
+    log2fc_threshold: float = 1.0,
+    pval_adj_threshold: float = 0.05,
     # --- paths (auto-detected if not given) ---
     reference_h5ad: str = None,
     save_dir: str = None,
@@ -445,9 +464,19 @@ def run_preprocessing_pipeline(
     max_mt : float
         Maximum mitochondrial % per cell (QC filter).
     log2fc_threshold : float
-        Log2 fold-change cutoff for DEG.
-    pval_threshold : float
-        P-value cutoff for DEG.
+        Log2 fold-change cutoff for DEG (default 1.0 — 2-fold).
+        The original default of 2.0 is very strict; lower to 1.0 to
+        recover more DEGs while still being biologically meaningful.
+    pval_adj_threshold : float
+        BH-adjusted p-value cutoff for DEG (default 0.05).
+
+        *** FIX A ***  The original code used raw pvals with a cutoff
+        of 0.5, which is essentially no multiple-testing control and
+        admits nearly all genes. This parameter now filters on
+        pvals_adj (Benjamini–Hochberg) at 0.05, which is the standard
+        bioinformatics practice.  If you get 0 DEGs, try relaxing to
+        pval_adj_threshold=0.10 or lowering log2fc_threshold to 0.5.
+
     reference_h5ad : str or None
         Path to the normal reference h5ad (Tabula Sapiens tissue-matched).
         Required for inferCNA.  The same file used in the PopV module works.
@@ -473,15 +502,13 @@ def run_preprocessing_pipeline(
     infercna_genome : str
         Built-in genome key for gene ordering.  NOT a file path.
         'hg19' (default, bundled inside the R package) or 'hg38'.
-        For hg38, first run in R:
-          library(infercna); addGenome(genome_df, name='hg38')
     infercna_n : int
         Most-variable genes to retain before CNA inference (default 5000).
     infercna_noise : float
         Genes with expression range < noise are excluded (default 0.1).
     infercna_signal_threshold : float
         Top fraction of genes used for cnaSignal / cnaCor (default 0.9).
-        Lower to 0.75–0.8 if findMalignant() returns not.defined for all cells.
+        Lower to 0.75–0.8 if findMalignant() returns not.defined for all.
 
     Returns
     -------
@@ -522,13 +549,19 @@ def run_preprocessing_pipeline(
                 "Pass adata= or popv_path= explicitly."
             )
 
+    # --- Report gene-space availability -------------------------------------
     if adata.raw is not None:
-        print(f"adata.raw: {adata.raw.n_vars} genes "
-              "(scMalignantFinder will use full gene space via Route A)")
+        print(
+            f"adata.raw detected: {adata.raw.n_vars} genes. "
+            "scMalignantFinder will use full gene space via Route A."
+        )
     else:
-        print("WARNING: adata.raw is None — scMalignantFinder will use "
-              "4000 HVGs only (19% overlap). Re-run Module 2 with the "
-              "fixed popv_annotation.py to resolve this.")
+        print(
+            "WARNING: adata.raw is None.\n"
+            "  scMalignantFinder will fall back to 4000 HVGs (~19% overlap).\n"
+            "  Re-run Module 2 with the fixed popv_annotation.py (FIX 8) to\n"
+            "  resolve this and achieve >90% model feature overlap."
+        )
 
     print(f"Initial cells: {adata.n_obs}")
 
@@ -611,7 +644,8 @@ def run_preprocessing_pipeline(
         if reference_h5ad is None:
             print(
                 "Warning: inferCNA skipped — no reference_h5ad provided.\n"
-                "  Falling back to scMalignantFinder only."
+                "  Falling back to scMalignantFinder only.\n"
+                "  To enable inferCNA, pass reference_h5ad='path/to/tabula.h5ad'."
             )
             malignant_strategy = "scMalignant"
         else:
@@ -682,14 +716,51 @@ def run_preprocessing_pipeline(
 
     # ------------------------------------------------------------------
     # 8. DEG  (malignant vs normal)
+    #
+    # FIX A: filter on pvals_adj (Benjamini–Hochberg) not raw pvals.
+    #        Raw p-values are nearly uniform under H0 and the old cutoff
+    #        of 0.5 had essentially no multiple-testing control, causing
+    #        either too many or too few genes depending on the dataset.
+    #        BH-adjusted values at 0.05 are the bioinformatics standard.
     # ------------------------------------------------------------------
-    sc.tl.rank_genes_groups(adata, groupby="final_malignant", method="wilcoxon")
-    deg          = sc.get.rank_genes_groups_df(adata, group=None)
+    sc.tl.rank_genes_groups(
+        adata,
+        groupby="final_malignant",
+        method="wilcoxon",
+        key_added="rank_genes_groups",
+    )
+    deg = sc.get.rank_genes_groups_df(adata, group=None)
+
+    print(f"Total DEG candidates: {deg.shape[0]}")
+    print(
+        f"Applying filters: log2FC > {log2fc_threshold}, "
+        f"pvals_adj < {pval_adj_threshold}"
+    )
+
     filtered_deg = deg[
         (deg["logfoldchanges"] > log2fc_threshold) &
-        (deg["pvals"] < pval_threshold)
+        (deg["pvals_adj"] < pval_adj_threshold)          # FIX A
     ]
-    adata.uns["filtered_deg"] = filtered_deg
+
+    if filtered_deg.shape[0] == 0:
+        print(
+            "WARNING: 0 DEGs passed the filter.\n"
+            "  Suggestions:\n"
+            "  1. Lower log2fc_threshold (try 0.5)\n"
+            "  2. Raise pval_adj_threshold (try 0.10 or 0.20)\n"
+            "  3. Check malignant/normal cell counts above — if one group\n"
+            "     has <10 cells, the Wilcoxon test will have low power.\n"
+            "  4. Ensure Module 2 FIX 8 is applied so scMalignantFinder\n"
+            "     uses the full gene space (adata.raw) for better accuracy."
+        )
+
+    adata.uns["filtered_deg"]    = filtered_deg
+    adata.uns["all_deg"]         = deg           # save full table for inspection
+    adata.uns["deg_params"]      = {
+        "log2fc_threshold" : log2fc_threshold,
+        "pval_adj_threshold": pval_adj_threshold,
+        "method"           : "wilcoxon",
+    }
     print(f"Final DE genes retained: {filtered_deg.shape[0]}\n")
 
     # ------------------------------------------------------------------
