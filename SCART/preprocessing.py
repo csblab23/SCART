@@ -213,15 +213,15 @@ def _run_infercna(
     signal_threshold=0.9,
 ):
     """
-    UPDATED — compatible with NEW infercna (findMalignant)
+    FINAL FIX — works with new rpy2 + new infercna
     """
 
     try:
         import rpy2.robjects as ro
-        from rpy2.robjects import pandas2ri, numpy2ri
         from rpy2.robjects.packages import importr
-        pandas2ri.activate()
-        numpy2ri.activate()
+        from rpy2.robjects.conversion import localconverter
+        from rpy2.robjects import default_converter
+        from rpy2.robjects import numpy2ri
     except Exception as exc:
         raise ImportError(f"rpy2 issue: {exc}")
 
@@ -248,18 +248,18 @@ def _run_infercna(
 
     q_barcodes   = np.array(adata_query.obs_names)
     ref_barcodes = np.array(["REF_" + b for b in adata_ref.obs_names])
-    all_barcodes = np.concatenate([q_barcodes, ref_barcodes])
 
-    r_mat = ro.r.matrix(
-        ro.FloatVector(mat_combined.flatten(order="F")),
-        nrow=mat_combined.shape[0],
-        ncol=mat_combined.shape[1],
-    )
+    # ✅ FIX: proper converter (no deprecated activate)
+    with localconverter(default_converter + numpy2ri.converter):
+        r_mat = ro.r.matrix(
+            ro.FloatVector(mat_combined.flatten(order="F")),
+            nrow=mat_combined.shape[0],
+            ncol=mat_combined.shape[1],
+        )
 
     ro.r.assign("r_mat", r_mat)
     ro.r.assign("ref_cells", ro.StrVector(ref_barcodes.tolist()))
 
-    # ===================== KEY CHANGE HERE =====================
     ro.r(f"""
         library(infercna)
         useGenome("{genome}")
@@ -280,7 +280,6 @@ def _run_infercna(
             error = function(e) NULL
         )
     """)
-    # ===========================================================
 
     modes = ro.r("modes")
 
@@ -298,6 +297,7 @@ def _run_infercna(
         index=q_barcodes,
         name="infercna_prediction",
     )
+    
 # ===========================================================================
 # Main pipeline
 # ===========================================================================
