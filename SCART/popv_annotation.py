@@ -1,7 +1,8 @@
 """
 popv_annotation.py
 Module 2 — PopV cell-type annotation
-Fixes applied:
+
+Fixes applied (all changes marked with # FIX N comments):
   1. Case-normalisation: predictions are title-cased before ontology lookup
      so "b cell" → "B cell" matches the digraph node label.
   2. Ontology path: uses popv's own bundled ontology, not SCART's copy.
@@ -13,10 +14,15 @@ Fixes applied:
      does not re-download at annotation time.
   6. Minor: bare excepts replaced with specific Exception catches; unused
      obo_file argument removed from public API.
-  7. [NEW] Query-cell extraction: after PopV annotation the combined
+  7. Query-cell extraction: after PopV annotation the combined
      query+reference AnnData is filtered back to query cells only using
      the '_dataset' column written by Process_Query.  Only the query
      portion (original Module 1 shape) is saved to disk.
+  8. [NEW] adata.raw preservation: the full gene-space raw count matrix is
+     snapshotted into adata_query.raw BEFORE Process_Query trims it, then
+     re-attached to the query-only output so Module 3 can use Route A
+     (full gene space) for scMalignantFinder — eliminating the 19% overlap
+     warning and the need to fall back to 4000 HVGs.
 """
 
 import os
@@ -26,6 +32,7 @@ import urllib.request
 import importlib.resources as pkg_resources
 
 import numpy as np
+import anndata
 import scanpy as sc
 import scipy.sparse as sp
 import requests
@@ -338,7 +345,7 @@ def _check_batch_annotation(adata):
 
 
 # ---------------------------------------------------------------------------
-# NEW FIX 7 — extract query cells from the combined AnnData after PopV
+# FIX 7 — extract query cells from the combined AnnData after PopV
 # ---------------------------------------------------------------------------
 
 def _extract_query_cells(adata_processed, adata_query_original):
@@ -352,11 +359,6 @@ def _extract_query_cells(adata_processed, adata_query_original):
       1. Use adata.obs['_dataset'] == 'query'  ← written by Process_Query
       2. Match obs_names against the original query obs_names
       3. Use adata.obs['_reference_labels_annotation'].isna() as a proxy
-         (reference cells always have a label; query cells start as NaN)
-
-    The returned object keeps original Module 1 obs columns (gsm_id, gse_id)
-    plus all new popv_* prediction columns.  Reference-only columns
-    (donor, tissue, cdna_plate, …) are dropped to keep the file clean.
     """
     # --- Strategy 1: _dataset column ----------------------------------------
     if "_dataset" in adata_processed.obs.columns:
@@ -403,14 +405,7 @@ def _extract_query_cells(adata_processed, adata_query_original):
 def _drop_reference_only_columns(adata, keep_prefixes=("popv_", "gsm_id", "gse_id")):
     """
     Drop obs columns that belong to the Tabula Sapiens reference metadata
-    and are not relevant to the query dataset.  Keeps:
-      - any column whose name starts with a prefix in keep_prefixes
-      - any column that was present in the original query adata
-      - PopV internal columns (_batch_annotation, over_clustering, etc.)
-        are kept as they may be useful for QC.
-    
-    This is optional/cosmetic — it just makes the saved file tidier.
-    Call it only if you want a lean output; skip it to keep all columns.
+    and are not relevant to the query dataset.
     """
     tabula_ref_cols = {
         "donor", "tissue", "anatomical_position", "method", "cdna_plate",
@@ -425,10 +420,7 @@ def _drop_reference_only_columns(adata, keep_prefixes=("popv_", "gsm_id", "gse_i
         "age", "sex", "ethnicity", "scvi_leiden_res05_tissue", "sample_number",
     }
 
-    cols_to_drop = [
-        col for col in adata.obs.columns
-        if col in tabula_ref_cols
-    ]
+    cols_to_drop = [col for col in adata.obs.columns if col in tabula_ref_cols]
 
     if cols_to_drop:
         logger.info(
@@ -438,6 +430,113 @@ def _drop_reference_only_columns(adata, keep_prefixes=("popv_", "gsm_id", "gse_i
         adata.obs = adata.obs.drop(columns=cols_to_drop)
 
     return adata
+
+
+# ---------------------------------------------------------------------------
+# FIX 8 — snapshot and re-attach adata.raw (full gene space)
+# ---------------------------------------------------------------------------
+
+def _snapshot_raw(adata_query: anndata.AnnData) -> anndata.AnnData:
+    """
+    Freeze the current full-gene .X (raw counts) into adata_query.raw so
+    that downstream modules can access the complete gene space even after
+    Process_Query subsets to HVGs.
+
+    Called AFTER _set_input_matrix (so .X holds raw counts) and BEFORE
+    Process_Query (which trims genes).
+
+    Returns a lightweight AnnData whose .raw is set; the caller should use
+    this object as the query going forward.
+    """
+    if adata_query.raw is not None:
+        logger.info(
+            "adata_query.raw already set "
+            f"({adata_query.raw.n_vars} genes) — skipping snapshot."
+        )
+        return adata_query
+
+    logger.info(
+        f"FIX 8: Snapshotting full gene space into adata_query.raw "
+        f"({adata_query.n_vars} genes) before Process_Query trims to HVGs."
+    )
+    # AnnData.raw = AnnData freezes the current .X and .var
+    adata_query.raw = adata_query
+    logger.info(
+        f"Snapshot complete — adata_query.raw.n_vars = {adata_query.raw.n_vars}"
+    )
+    return adata_query
+
+
+def _reattach_raw(
+    adata_query_out: anndata.AnnData,
+    adata_query_snapshot: anndata.AnnData,
+) -> anndata.AnnData:
+    """
+    After _extract_query_cells, re-attach the full-gene raw snapshot so
+    Module 3 can use Route A (adata.raw) for scMalignantFinder.
+
+    adata_query_snapshot still has .raw set (frozen before Process_Query).
+    adata_query_out is the query-only slice from the combined AnnData.
+
+    We align by obs_names so that any cells dropped during QC inside
+    Process_Query are handled correctly.
+    """
+    if adata_query_snapshot.raw is None:
+        logger.warning(
+            "FIX 8: adata_query_snapshot.raw is None — "
+            "cannot re-attach full gene space. "
+            "Module 3 will fall back to 4000 HVGs."
+        )
+        return adata_query_out
+
+    try:
+        raw_X   = adata_query_snapshot.raw.X        # (all_query_cells × all_genes)
+        raw_var = adata_query_snapshot.raw.var.copy()
+        orig_names = list(adata_query_snapshot.obs_names)
+        out_names  = list(adata_query_out.obs_names)
+
+        # Build index mapping: out_names → row index in orig
+        name_to_idx = {name: i for i, name in enumerate(orig_names)}
+        row_idx = [name_to_idx[n] for n in out_names if n in name_to_idx]
+
+        if len(row_idx) != len(out_names):
+            missing = len(out_names) - len(row_idx)
+            logger.warning(
+                f"FIX 8: {missing} output cells not found in raw snapshot. "
+                "They will receive zeros in adata.raw."
+            )
+
+        # Subset rows
+        if sp.issparse(raw_X):
+            raw_X_sub = raw_X[row_idx, :]
+        else:
+            raw_X_sub = np.asarray(raw_X)[row_idx, :]
+
+        # Build a minimal AnnData to assign to .raw
+        obs_sub = adata_query_snapshot.obs.iloc[
+            [adata_query_snapshot.obs_names.get_loc(n)
+             for n in out_names if n in name_to_idx]
+        ].copy()
+
+        raw_adata = anndata.AnnData(
+            X   = raw_X_sub,
+            obs = obs_sub,
+            var = raw_var,
+        )
+        adata_query_out.raw = raw_adata
+        logger.info(
+            f"FIX 8: Re-attached adata.raw — "
+            f"{raw_adata.n_vars} genes × {raw_adata.n_obs} cells. "
+            "Module 3 Route A (full gene space) is now available."
+        )
+
+    except Exception as exc:
+        logger.warning(
+            f"FIX 8: Could not re-attach adata.raw: {type(exc).__name__}: {exc}\n"
+            "Module 3 will fall back to 4000 HVGs."
+        )
+
+    return adata_query_out
 
 
 # ---------------------------------------------------------------------------
@@ -474,9 +573,7 @@ def run_popv_annotation(
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    # Keep a copy of original query obs_names for query-cell extraction later
-    original_query_obs_names = adata_query.obs_names.copy()
-    # Lightweight copy (just obs) so we can use strategy-2 name matching
+    # Keep a lightweight copy of original query for extraction and raw re-attach
     adata_query_snapshot = adata_query.copy()
 
     # --- pre-process dtypes -------------------------------------------------
@@ -488,6 +585,18 @@ def run_popv_annotation(
 
     _force_float32(adata_query)
     _force_float32(adata_ref)
+
+    # -----------------------------------------------------------------------
+    # FIX 8a — snapshot full gene space into adata_query.raw BEFORE
+    #           Process_Query trims to HVGs.
+    # This is the key fix for the 19% overlap / Route A failure in Module 3.
+    # -----------------------------------------------------------------------
+    adata_query = _snapshot_raw(adata_query)
+
+    # Re-sync snapshot so it also carries .raw (needed for _reattach_raw)
+    # We set .raw on the snapshot AFTER _force_float32 so dtypes match.
+    if adata_query_snapshot.raw is None:
+        adata_query_snapshot.raw = adata_query_snapshot
 
     # --- resolve ontology ---------------------------------------------------
     cl_obo_folder = _resolve_ontology_folder()
@@ -710,9 +819,6 @@ def run_popv_annotation(
             logger.error("No prediction columns found at all. Annotation failed.")
 
     # --- FIX 7: extract query cells only ------------------------------------
-    # Process_Query concatenates query + (subsampled) reference cells into
-    # adata_processed.  We must peel off the reference rows before saving so
-    # the output matches the original Module 1 shape (n_obs = query cells).
     logger.info(
         f"Combined AnnData shape after annotation: {adata_processed.shape}  "
         f"(query {adata_query_snapshot.n_obs} + reference cells)"
@@ -722,6 +828,13 @@ def run_popv_annotation(
         f"Query-only AnnData shape: {adata_query_out.shape}  "
         f"(expected n_obs ≈ {adata_query_snapshot.n_obs})"
     )
+
+    # -----------------------------------------------------------------------
+    # FIX 8b — re-attach the full-gene raw snapshot to the query-only output
+    # so Module 3 can use Route A (adata.raw) for scMalignantFinder.
+    # Without this step Module 3 falls back to 4000 HVGs (19% overlap).
+    # -----------------------------------------------------------------------
+    adata_query_out = _reattach_raw(adata_query_out, adata_query_snapshot)
 
     # Optionally remove Tabula Sapiens reference metadata columns
     if drop_reference_columns:
@@ -737,6 +850,16 @@ def run_popv_annotation(
         f"Final saved shape: {adata_query_out.shape}  "
         f"obs columns: {list(adata_query_out.obs.columns)}"
     )
+    if adata_query_out.raw is not None:
+        logger.info(
+            f"adata.raw preserved: {adata_query_out.raw.n_vars} genes — "
+            "Module 3 will use full gene space via Route A."
+        )
+    else:
+        logger.warning(
+            "adata.raw is None in final output — "
+            "Module 3 will fall back to HVG-only mode."
+        )
 
     return adata_query_out
 
@@ -783,7 +906,7 @@ def auto_run_popv(
     primary_cancer = cancer_type.split(",")[0].strip()
     reference_path = auto_select_reference(primary_cancer, user_reference)
 
-    logger.info(f"Loading query  : {tumor_file}")
+    logger.info(f"Loading query    : {tumor_file}")
     logger.info(f"Loading reference: {reference_path}")
 
     adata_query = sc.read_h5ad(tumor_file)
