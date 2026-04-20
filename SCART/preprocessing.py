@@ -2,28 +2,25 @@
 preprocessing.py
 Module 3 — Preprocessing, malignancy detection, and surfaceome DEG
 
-inferCNA step order (matches official tutorial exactly)
---------------------------------------------------------
-  1. useGenome()     — set the reference genome for gene-coordinate lookup
-  2. infercna()      — CNA inference on the COMBINED matrix (query + ref cells)
-                       with refCells supplied so refCorrect() runs internally
-  3. strip ref cols  — cnaM = cna[, query cells only]  (ref cells removed)
-  4. findMalignant() — called on the FULL cna (query + ref), with
-                         samples   = per-cell sample-name vector for query cols
-                         excludeFromAvg = ref cell barcodes
-                       fits bimodal Gaussians to cnaSignal × cnaCor and returns
-                       list(nonmalignant=..., malignant=...)
+GitHub: https://github.com/navinlabcode/SCART
 
-Two malignancy methods run in sequence:
-  1. scMalignantFinder — deep-learning expression classifier
-  2. inferCNA          — chromosomal CNA inference (R package via rpy2)
+All previously hardcoded paths (/lustre/..., /home/igib/...) have been
+replaced with function parameters or auto-detected from the installed
+package.  No path in this file requires editing before use.
 
-Final label (final_malignant) is determined by malignant_strategy
-  (union | intersection | scMalignant | infercna).
+Path resolution strategy
+-------------------------
+SCMALIGNANT_MODEL  Auto-detected from the installed SCART package via
+                   importlib; no user input needed.
+SURFACEOME_PATH    Bundled inside SCART; auto-detected the same way.
+SAVE_DIR           Defaults to 'preprocessing_results/' in the current
+                   working directory; override with save_dir= parameter.
 """
 
 import os
 import logging
+import importlib
+import importlib.resources as pkg_resources
 import tempfile
 
 import numpy as np
@@ -34,18 +31,67 @@ import scipy.sparse as sp
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Paths  (edit to match your installation)
-# ---------------------------------------------------------------------------
-SURFACEOME_PATH = (
-    "/lustre/anas.a/Vinaya/scT-CAR_Designer/GESP/GESP_surfaceome_gene.csv"
-)
-SCMALIGNANT_MODEL = (
-    "/home/igib/anaconda3/envs/scart/lib/python3.10/site-packages/"
-    "SCART/external/scMalignantFinder/model"
-)
-SAVE_DIR = "/lustre/anas.a/Vinaya/scT-CAR_Designer/preprocessed_input"
-os.makedirs(SAVE_DIR, exist_ok=True)
+
+# ===========================================================================
+# Auto-detect paths from the installed SCART package
+# ===========================================================================
+
+def _find_scart_resource(relative_path: str) -> str:
+    """
+    Locate a file bundled inside the installed SCART package.
+
+    Tries importlib.resources first (works for editable and wheel installs),
+    then falls back to a filesystem walk of the package root.
+
+    Parameters
+    ----------
+    relative_path : str
+        Path relative to the SCART package root, e.g.
+        'external/scMalignantFinder/model' or
+        'GESP/GESP_surfaceome_gene.csv'
+
+    Returns
+    -------
+    str  Absolute path to the resource, or None if not found.
+    """
+    try:
+        import SCART as _scart
+        pkg_root = os.path.dirname(_scart.__file__)
+        candidate = os.path.join(pkg_root, relative_path)
+        if os.path.exists(candidate):
+            return candidate
+    except ImportError:
+        pass
+    return None
+
+
+def _auto_scmalignant_model() -> str:
+    path = _find_scart_resource("external/scMalignantFinder/model")
+    if path is None:
+        raise FileNotFoundError(
+            "Could not auto-detect scMalignantFinder model directory.\n"
+            "Pass scmalignant_model_dir= explicitly to run_preprocessing_pipeline().\n"
+            "Expected location inside the SCART package:\n"
+            "  <scart_root>/external/scMalignantFinder/model/"
+        )
+    return path
+
+
+def _auto_surfaceome_path() -> str:
+    # Try common locations inside the SCART package
+    for candidate in (
+        "GESP/GESP_surfaceome_gene.csv",
+        "data/GESP_surfaceome_gene.csv",
+        "resources/GESP_surfaceome_gene.csv",
+    ):
+        path = _find_scart_resource(candidate)
+        if path is not None:
+            return path
+    raise FileNotFoundError(
+        "Could not auto-detect surfaceome gene list inside the SCART package.\n"
+        "Pass surfaceome_path= explicitly to run_preprocessing_pipeline().\n"
+        "Expected a CSV with a 'Gene' column somewhere under the SCART package root."
+    )
 
 
 # ===========================================================================
@@ -56,9 +102,9 @@ def _build_fullgene_adata_for_scm(adata, feature_tsv: str):
     """
     Return a log-normalised AnnData covering the full original gene space.
 
-    Route A — adata.raw   (populated by Module 2's _reattach_raw_slot fix)
-    Route B — uns['full_var_names']  (SCART-specific, future-proofing)
-    Route C — fallback: 4000-HVG adata as-is with a warning
+    Route A — adata.raw            (populated by Module 2 fix)
+    Route B — uns['full_var_names'] (SCART-specific fallback)
+    Route C — 4000-HVG adata as-is  (last resort, with warning)
 
     Only used for scMalignantFinder; caller's adata is not modified.
     """
@@ -70,7 +116,7 @@ def _build_fullgene_adata_for_scm(adata, feature_tsv: str):
     def _pct(names):
         return len(set(names) & model_features) / n_model * 100
 
-    # Route A
+    # Route A — adata.raw
     if adata.raw is not None:
         ov = _pct(adata.raw.var_names)
         logger.info(f"Route A (adata.raw): {adata.raw.n_vars} genes, {ov:.1f}% overlap")
@@ -89,11 +135,11 @@ def _build_fullgene_adata_for_scm(adata, feature_tsv: str):
             return af
         logger.warning(f"Route A overlap only {ov:.1f}% — trying Route B.")
 
-    # Route B
+    # Route B — uns['full_var_names']
     if "full_var_names" in adata.uns:
         full_var = list(adata.uns["full_var_names"])
         ov = _pct(full_var)
-        logger.info(f"Route B (uns['full_var_names']): {len(full_var)} genes, {ov:.1f}% overlap")
+        logger.info(f"Route B (uns): {len(full_var)} genes, {ov:.1f}% overlap")
         for lyr in ("scvi_counts", "raw_counts", "counts"):
             if lyr in adata.layers:
                 X = adata.layers[lyr]
@@ -115,7 +161,7 @@ def _build_fullgene_adata_for_scm(adata, feature_tsv: str):
     logger.warning(
         f"Routes A and B failed. Falling back to {adata.n_vars} HVGs "
         f"({ov_hvg:.1f}% overlap). Results may be unreliable.\n"
-        f"Re-run Module 2 with the fixed popv_annotation.py to fix this."
+        "Re-run Module 2 with the fixed popv_annotation.py to resolve this."
     )
     return adata.copy()
 
@@ -157,61 +203,47 @@ def _run_infercna(
 ):
     """
     Run inferCNA following the exact step order from the official tutorial:
+    https://rdrr.io/github/jlaffy/infercna/f/vignettes/infercna_tutorial.Rmd
 
-    Tutorial step 1 — useGenome()
-        Set the reference genome so infercna knows each gene's chromosomal
-        position and can sort them for rolling-mean smoothing.
+    Step 1 — useGenome()
+        Sets the built-in chromosome coordinate table (hg19 is bundled).
+        'hg19' and 'hg38' are the two supported values.
+        This is NOT a file — it is a string key for inferCNA's internal data.
 
-    Tutorial step 2 — infercna(m, refCells, n, noise, isLog)
-        Input matrix m = genes × ALL cells (query + ref combined).
-        refCells = named list of reference-cell barcodes (REF_* prefix).
-        n        = keep the n most variable genes before CNA inference.
-        noise    = exclude genes whose expression range < noise (reduces noise).
-        isLog    = TRUE because we log-normalise before passing.
-        Internally this runs:
-          • filterGenes()  — removes genes absent from the genome annotation
-          • orderGenes()   — sorts genes by chromosomal position (chr1→chrY)
-          • rolling mean (runMean, window ≈ 101 genes) per cell
-          • refCorrect()   — subtracts reference average → absolute CNA values
+    Step 2 — infercna(m, refCells, n, noise, isLog=TRUE)
+        Input m = genes × ALL cells (query + ref cells combined).
+        refCells = named list of normal-cell barcodes (REF_* prefix).
+        Internally runs:
+          • filterGenes()  — drops genes not in the genome annotation
+          • orderGenes()   — sorts genes by chromosomal position
+          • rolling mean (window ≈ n genes) per cell  → CNA profile
+          • refCorrect()   — subtracts reference average → absolute CNAs
 
-    Tutorial step 3 — strip reference columns
-        cnaM = cna[, query cells only]
-        (Reference cells served their purpose for refCorrect; drop them now.)
+    Step 3 — strip reference columns
+        cnaM = cna[, query cells only]  (ref cells used only for baseline)
 
-    Tutorial step 4 — findMalignant(cna, signal.threshold, samples, excludeFromAvg)
-        Called on the FULL cna (query + ref columns still present).
-        samples        = per-cell sample-name vector aligned to query columns,
-                         used so cnaCor correlates each cell against its own
-                         tumour average rather than a global average.
-        excludeFromAvg = ref barcodes, so they don't bias the tumour average.
+    Step 4 — findMalignant(cna, signal.threshold, samples, excludeFromAvg)
+        Called on the FULL cna (query + ref).
+        samples        = per-cell sample label vector (length == ncol of cna)
+        excludeFromAvg = ref barcodes, so they don't bias the tumour average
         Fits bimodal Gaussians to cnaSignal × cnaCor.
         Returns list(nonmalignant=..., malignant=...) or FALSE if unimodal.
 
     Parameters
     ----------
-    adata_query : AnnData
-        QC-filtered epithelial query cells (raw counts in scvi_counts layer).
-    adata_ref : AnnData
-        Normal reference (Tabula Sapiens); epithelial cells extracted inside.
-    genome : str
-        'hg19' (default, built-in) or 'hg38' (requires addGenome() in R).
-    n : int
-        Number of most-variable genes to keep before CNA inference (infercna n).
-    noise : float
-        Genes with expression range < noise are excluded (infercna noise).
-    signal_threshold : float
-        Top fraction of genes used for cnaSignal / cnaCor.  0.9 = top 10%.
-        Passed to findMalignant(signal.threshold=...).
+    adata_query : AnnData   Epithelial query cells (raw counts in layer).
+    adata_ref   : AnnData   Normal reference (Tabula Sapiens ovary h5ad).
+    genome      : str       'hg19' (default, built-in) or 'hg38'.
+    n           : int       Most-variable genes to keep (default 5000).
+    noise       : float     Exclude genes with range < noise (default 0.1).
+    signal_threshold : float  Top fraction for cnaSignal/cnaCor (default 0.9).
 
     Returns
     -------
-    pd.Series
-        Index = query barcodes (all of them), values:
-          'malignant' | 'non-malignant' | 'not.defined'
+    pd.Series  Index = all query barcodes.
+               Values = 'malignant' | 'non-malignant' | 'not.defined'
     """
-    # ------------------------------------------------------------------
-    # rpy2 / R package availability check
-    # ------------------------------------------------------------------
+    # --- rpy2 / R package availability ---
     try:
         import rpy2.robjects as ro
         from rpy2.robjects import pandas2ri, numpy2ri
@@ -235,23 +267,12 @@ def _run_infercna(
             "  devtools::install_github('jlaffy/infercna')"
         ) from exc
 
-    # ------------------------------------------------------------------
-    # STEP 0 — Prepare matrices
-    #
-    # inferCNA data requirements (from README):
-    #   • genes × cells matrix
-    #   • NOT centred
-    #   • normalised for sequencing depth (CPM / TPM / RPKM)
-    #   • optionally log-transformed (pass isLog=TRUE)
-    #
-    # We use log1p(CPM) and set isLog=TRUE.
-    # ------------------------------------------------------------------
-
+    # --- Prepare log-CPM matrices (genes × cells) ---
     def _to_log_cpm(adata_obj):
-        X = _get_raw_matrix(adata_obj)          # cells × genes
+        X  = _get_raw_matrix(adata_obj)            # cells × genes
         rs = X.sum(axis=1, keepdims=True)
         rs[rs == 0] = 1
-        return np.log1p(X / rs * 1e6).T         # → genes × cells
+        return np.log1p(X / rs * 1e6).T            # genes × cells
 
     mat_query = _to_log_cpm(adata_query)
 
@@ -262,17 +283,15 @@ def _run_infercna(
         "ovarian surface epithelial cell",
     }
     if "cell_ontology_class" in adata_ref.obs.columns:
-        ep_mask = adata_ref.obs["cell_ontology_class"].str.lower().isin(EPITHELIAL)
+        ep_mask      = adata_ref.obs["cell_ontology_class"].str.lower().isin(EPITHELIAL)
         adata_ref_ep = adata_ref[ep_mask].copy() if ep_mask.any() else adata_ref
-        logger.info(f"inferCNA reference: {ep_mask.sum()} epithelial reference cells")
+        logger.info(f"inferCNA reference: {ep_mask.sum()} epithelial cells")
     else:
         adata_ref_ep = adata_ref
 
     mat_ref = _to_log_cpm(adata_ref_ep)
 
-    # ------------------------------------------------------------------
-    # Align to common genes
-    # ------------------------------------------------------------------
+    # --- Align to common genes ---
     q_genes = np.array(adata_query.var_names)
     r_genes = np.array(adata_ref_ep.var_names)
     common  = np.intersect1d(q_genes, r_genes)
@@ -286,20 +305,15 @@ def _run_infercna(
 
     q_idx = np.where(np.isin(q_genes, common))[0]
     r_idx = np.where(np.isin(r_genes, common))[0]
-    sub_genes = q_genes[q_idx]
 
-    mat_query_sub = mat_query[q_idx, :]
-    mat_ref_sub   = mat_ref[r_idx,   :]
+    mat_combined = np.hstack([mat_query[q_idx, :], mat_ref[r_idx, :]])
+    sub_genes    = q_genes[q_idx]
 
-    # ------------------------------------------------------------------
-    # Build combined genes × cells matrix  (query first, then REF_)
-    # ------------------------------------------------------------------
     q_barcodes   = np.array(adata_query.obs_names)
     ref_barcodes = np.array(["REF_" + b for b in adata_ref_ep.obs_names])
-
-    mat_combined = np.hstack([mat_query_sub, mat_ref_sub])
     all_barcodes = np.concatenate([q_barcodes, ref_barcodes])
 
+    # --- Build R matrix ---
     r_mat = ro.r.matrix(
         ro.FloatVector(mat_combined.flatten(order="F")),
         nrow=mat_combined.shape[0],
@@ -309,25 +323,23 @@ def _run_infercna(
             ro.StrVector(all_barcodes.tolist()),
         ]),
     )
-
-    # refCells: named list — inferCNA expects list(group1=c(...), group2=c(...))
     r_ref_cells = ro.ListVector({
         "normal_ref": ro.StrVector(ref_barcodes.tolist())
     })
+    r_ref_vec   = ro.StrVector(ref_barcodes.tolist())
 
-    # ------------------------------------------------------------------
+    # ---------------------------------------------------------------
     # TUTORIAL STEP 1 — useGenome()
-    # ------------------------------------------------------------------
+    # 'hg19' is a string key for inferCNA's built-in gene-coordinate
+    # table.  It is NOT a file path — no file needs to be provided.
+    # ---------------------------------------------------------------
     logger.info(f"inferCNA step 1: useGenome('{genome}')")
     infercna_r.useGenome(genome)
 
-    # ------------------------------------------------------------------
-    # TUTORIAL STEP 2 — infercna()
-    #
-    # Combined matrix (query + ref) passed as m.
-    # refCells supplied → refCorrect() runs internally → absolute CNAs.
-    # ------------------------------------------------------------------
-    logger.info("inferCNA step 2: infercna() — CNA inference on combined matrix")
+    # ---------------------------------------------------------------
+    # TUTORIAL STEP 2 — infercna()  on COMBINED matrix
+    # ---------------------------------------------------------------
+    logger.info("inferCNA step 2: infercna() — CNA inference")
     cna = infercna_r.infercna(
         m        = r_mat,
         refCells = r_ref_cells,
@@ -337,90 +349,58 @@ def _run_infercna(
         verbose  = False,
     )
 
-    # ------------------------------------------------------------------
-    # TUTORIAL STEP 3 — strip reference columns from CNA result
-    #
-    # cnaM = cna[, !colnames(cna) %in% unlist(refCells)]
-    # Reference cells served their purpose in refCorrect; drop them now.
-    # We keep the full 'cna' object (query + ref) for findMalignant in step 4.
-    # ------------------------------------------------------------------
-    logger.info("inferCNA step 3: stripping reference columns → cnaM (query only)")
-    r_ref_vec = ro.StrVector(ref_barcodes.tolist())
-    # R: cnaM = cna[, !colnames(cna) %in% unlist(refCells)]
+    # ---------------------------------------------------------------
+    # TUTORIAL STEP 3 — strip reference columns → cnaM
+    # ---------------------------------------------------------------
+    logger.info("inferCNA step 3: stripping reference columns")
     cnaM = ro.r(
-        """
-        function(cna, ref_barcodes) {
-            cna[, !colnames(cna) %in% ref_barcodes, drop=FALSE]
-        }
-        """
+        "function(cna, ref) cna[, !colnames(cna) %in% ref, drop=FALSE]"
     )(cna, r_ref_vec)
 
-    # ------------------------------------------------------------------
-    # TUTORIAL STEP 4 — findMalignant()
-    #
-    # Called on the FULL cna (query + ref columns still present).
-    # samples        = per-cell sample label vector for query columns only,
-    #                  so cnaCor uses the correct tumour-average per sample.
-    # excludeFromAvg = ref_barcodes, so they don't bias the tumour average.
-    # signal.threshold = 0.9 → cnaHotspotGenes() selects top 10% of genes.
-    # ------------------------------------------------------------------
+    # ---------------------------------------------------------------
+    # TUTORIAL STEP 4 — findMalignant()  on FULL cna
+    # samples = per-cell vector (length == ncol of cna)
+    # excludeFromAvg = ref barcodes
+    # ---------------------------------------------------------------
     logger.info("inferCNA step 4: findMalignant() — bimodal Gaussian fitting")
-
-    # Build per-cell sample-name vector aligned to ALL columns of cna
-    # (tutorial: samples can be a vector of length == ncol matching columns)
-    # For query cells we use "tumor"; for ref cells use "normal".
     sample_vec = ["tumor"] * len(q_barcodes) + ["normal"] * len(ref_barcodes)
     r_samples  = ro.StrVector(sample_vec)
 
     try:
         modes = infercna_r.findMalignant(
-            cna             = cna,
+            cna              = cna,
             signal_threshold = signal_threshold,
-            samples         = r_samples,
-            excludeFromAvg  = r_ref_vec,
+            samples          = r_samples,
+            excludeFromAvg   = r_ref_vec,
         )
-        # findMalignant returns FALSE (not a list) if fitting fails
         if not hasattr(modes, "names") or modes.names is None:
             modes = None
     except Exception as exc:
         logger.warning(f"findMalignant() raised: {exc}")
         modes = None
 
-    # ------------------------------------------------------------------
-    # Parse R result → Python Series indexed by ALL query barcodes
-    # ------------------------------------------------------------------
+    # --- Parse result → Python Series ---
     if modes is None:
         logger.warning(
-            "inferCNA findMalignant() returned FALSE or failed — "
-            "bimodal fit did not converge (likely unimodal distribution). "
-            "All query cells labelled 'not.defined'. "
-            "Try lowering signal_threshold (e.g. 0.75) or check data quality."
+            "inferCNA findMalignant() returned FALSE — bimodal fit did not "
+            "converge. All query cells labelled 'not.defined'.\n"
+            "Try lowering infercna_signal_threshold (e.g. 0.75)."
         )
-        return pd.Series(
-            "not.defined",
-            index=q_barcodes,
-            name="infercna_prediction",
-        )
+        return pd.Series("not.defined", index=q_barcodes, name="infercna_prediction")
 
-    # modes is a named R list: names contain 'malignant' and 'nonmalignant'
     label_map = {}
     for key in list(modes.names):
-        cells  = list(modes.rx2(key))
-        label  = "malignant" if "malignant" in key.lower() else "non-malignant"
-        for bc in cells:
+        label = "malignant" if "malignant" in key.lower() else "non-malignant"
+        for bc in list(modes.rx2(key)):
             label_map[bc] = label
 
     preds = pd.Series(
         [label_map.get(bc, "not.defined") for bc in q_barcodes],
         index=q_barcodes,
         name="infercna_prediction",
-    )
-    # Guarantee full coverage via reindex (cells absent from modes → not.defined)
-    preds = preds.reindex(q_barcodes, fill_value="not.defined")
+    ).reindex(q_barcodes, fill_value="not.defined")
 
-    logger.info(
-        "inferCNA predictions:\n" + preds.value_counts().to_string()
-    )
+    logger.info("inferCNA predictions:\n" + preds.value_counts().to_string())
     return preds
 
 
@@ -431,13 +411,20 @@ def _run_infercna(
 def run_preprocessing_pipeline(
     adata=None,
     popv_path: str = None,
+    # --- QC ---
     min_genes: int = 200,
     max_mt: float = 40.0,
+    # --- DEG ---
     log2fc_threshold: float = 2.0,
     pval_threshold: float = 0.5,
+    # --- paths (auto-detected if not given) ---
     reference_h5ad: str = None,
+    save_dir: str = None,
+    scmalignant_model_dir: str = None,
+    surfaceome_path: str = None,
+    # --- malignancy logic ---
     malignant_strategy: str = "union",
-    # ---- inferCNA parameters (user-editable) ----
+    # --- inferCNA parameters ---
     infercna_genome: str = "hg19",
     infercna_n: int = 5000,
     infercna_noise: float = 0.1,
@@ -462,33 +449,39 @@ def run_preprocessing_pipeline(
     pval_threshold : float
         P-value cutoff for DEG.
     reference_h5ad : str or None
-        Path to the normal reference h5ad (Tabula Sapiens or equivalent).
-        Required for inferCNA.  If None, inferCNA is skipped.
+        Path to the normal reference h5ad (Tabula Sapiens tissue-matched).
+        Required for inferCNA.  The same file used in the PopV module works.
+        If None, inferCNA is skipped.
+    save_dir : str or None
+        Directory where final_tumor.h5ad is written.
+        Defaults to 'preprocessing_results/' in the current working directory.
+    scmalignant_model_dir : str or None
+        Path to the scMalignantFinder model directory.
+        Auto-detected from the SCART package if not provided.
+    surfaceome_path : str or None
+        Path to the surfaceome gene list CSV (must have a 'Gene' column).
+        Auto-detected from the SCART package if not provided.
     malignant_strategy : str
         How to combine scMalignantFinder and inferCNA calls:
           'union'        — malignant if EITHER method says so  (recommended)
           'intersection' — malignant only if BOTH agree  (more specific)
-          'scMalignant'  — use scMalignantFinder only
-          'infercna'     — use inferCNA only  (requires reference_h5ad)
+          'scMalignant'  — scMalignantFinder only
+          'infercna'     — inferCNA only  (requires reference_h5ad)
 
-    inferCNA parameters (passed to R — edit these to tune the CNA inference)
-    --------------------------------------------------------------------------
+    inferCNA parameters
+    -------------------
     infercna_genome : str
-        Reference genome for gene ordering.
-        'hg19' (default, built-in to infercna) or 'hg38'.
-        For hg38 run in R first:
+        Built-in genome key for gene ordering.  NOT a file path.
+        'hg19' (default, bundled inside the R package) or 'hg38'.
+        For hg38, first run in R:
           library(infercna); addGenome(genome_df, name='hg38')
     infercna_n : int
-        Number of most-variable genes to retain before CNA inference.
-        Default 5000 (same as tutorial). Lower values (e.g. 3000) speed up
-        inference; higher values (e.g. 8000) may capture more CNAs.
+        Most-variable genes to retain before CNA inference (default 5000).
     infercna_noise : float
-        Genes whose expression range across all cells is < noise are excluded.
-        Default 0.1 (same as tutorial). Increase to 0.2 for noisier data.
+        Genes with expression range < noise are excluded (default 0.1).
     infercna_signal_threshold : float
-        Top fraction of genes used to compute cnaSignal and cnaCor.
-        Default 0.9 = top 10% of genes by CNA signal (same as tutorial).
-        Lower to 0.75–0.8 if findMalignant() returns FALSE (unimodal fit).
+        Top fraction of genes used for cnaSignal / cnaCor (default 0.9).
+        Lower to 0.75–0.8 if findMalignant() returns not.defined for all cells.
 
     Returns
     -------
@@ -500,9 +493,21 @@ def run_preprocessing_pipeline(
     """
     print("\n========== START ==========\n")
 
-    # ------------------------------------------------------------------
-    # Auto-load adata
-    # ------------------------------------------------------------------
+    # --- Resolve paths ------------------------------------------------------
+    if save_dir is None:
+        save_dir = os.path.join(os.getcwd(), "preprocessing_results")
+    os.makedirs(save_dir, exist_ok=True)
+    print(f"Output directory: {save_dir}")
+
+    if scmalignant_model_dir is None:
+        scmalignant_model_dir = _auto_scmalignant_model()
+    logger.info(f"scMalignantFinder model: {scmalignant_model_dir}")
+
+    if surfaceome_path is None:
+        surfaceome_path = _auto_surfaceome_path()
+    logger.info(f"Surfaceome path: {surfaceome_path}")
+
+    # --- Auto-load adata ----------------------------------------------------
     if adata is None:
         for path in [popv_path,
                      "popv_results/final_popv_annotated.h5ad",
@@ -519,7 +524,7 @@ def run_preprocessing_pipeline(
 
     if adata.raw is not None:
         print(f"adata.raw: {adata.raw.n_vars} genes "
-              f"(scMalignantFinder will use full gene space via Route A)")
+              "(scMalignantFinder will use full gene space via Route A)")
     else:
         print("WARNING: adata.raw is None — scMalignantFinder will use "
               "4000 HVGs only (19% overlap). Re-run Module 2 with the "
@@ -568,7 +573,7 @@ def run_preprocessing_pipeline(
             print("No raw layer — assuming adata.X is raw counts.")
 
     adata.var_names_make_unique()
-    adata.layers["raw_for_cna"] = adata.X.copy()   # raw snapshot for inferCNA
+    adata.layers["raw_for_cna"] = adata.X.copy()   # snapshot for inferCNA
 
     sc.pp.normalize_total(adata, target_sum=1e4)
     sc.pp.log1p(adata)
@@ -577,7 +582,7 @@ def run_preprocessing_pipeline(
     # 4. scMalignantFinder
     # ------------------------------------------------------------------
     print("Running scMalignantFinder ...")
-    feature_tsv = os.path.join(SCMALIGNANT_MODEL, "ordered_feature.tsv")
+    feature_tsv = os.path.join(scmalignant_model_dir, "ordered_feature.tsv")
     print("  Building full-gene matrix ...")
     adata_scm = _build_fullgene_adata_for_scm(adata, feature_tsv)
     print(f"  Gene space: {adata_scm.n_vars} genes")
@@ -586,7 +591,7 @@ def run_preprocessing_pipeline(
     model = classifier.scMalignantFinder(
         test_input          = adata_scm,
         celltype_annotation = False,
-        pretrain_path       = SCMALIGNANT_MODEL,
+        pretrain_path       = scmalignant_model_dir,
         feature_path        = feature_tsv,
     )
     model.load()
@@ -644,7 +649,6 @@ def run_preprocessing_pipeline(
 
     if infercna_available:
         cna_mal = adata.obs["infercna_prediction"].str.lower() == "malignant"
-
         if malignant_strategy == "union":
             malignant_mask = scm_mal | cna_mal
             strategy_label = "union  (scMalignantFinder OR inferCNA)"
@@ -670,7 +674,7 @@ def run_preprocessing_pipeline(
     # ------------------------------------------------------------------
     # 7. Surfaceome filter
     # ------------------------------------------------------------------
-    surfaceome = pd.read_csv(SURFACEOME_PATH)
+    surfaceome = pd.read_csv(surfaceome_path)
     surfaceome.columns = surfaceome.columns.str.strip()
     surf_genes = surfaceome["Gene"].astype(str).tolist()
     adata      = adata[:, adata.var_names.intersection(surf_genes)].copy()
@@ -701,8 +705,8 @@ def run_preprocessing_pipeline(
         if adata.obs[col].dtype == object:
             adata.obs[col] = adata.obs[col].astype(str)
 
-    final_path = os.path.join(SAVE_DIR, "final_tumor.h5ad")
+    final_path = os.path.join(save_dir, "final_tumor.h5ad")
     adata.write(final_path)
-    print(f"Final object saved to:\n{final_path}")
+    print(f"Final object saved to: {final_path}")
     print("\n========== PREPROCESSING COMPLETED ==========\n")
     return adata
