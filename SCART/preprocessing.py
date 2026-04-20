@@ -202,6 +202,7 @@ def _get_raw_matrix(adata):
 # inferCNA  (via rpy2)
 # ===========================================================================
 
+# ===================== UPDATED inferCNA FUNCTION =====================
 
 def _run_infercna(
     adata_query,
@@ -212,7 +213,7 @@ def _run_infercna(
     signal_threshold=0.9,
 ):
     """
-    FIXED VERSION — compatible with R ≥4.4 + infercna
+    UPDATED — compatible with NEW infercna (findMalignant)
     """
 
     try:
@@ -258,7 +259,7 @@ def _run_infercna(
     ro.r.assign("r_mat", r_mat)
     ro.r.assign("ref_cells", ro.StrVector(ref_barcodes.tolist()))
 
-    # FIX: updated R-side execution (new infercna compatibility)
+    # ===================== KEY CHANGE HERE =====================
     ro.r(f"""
         library(infercna)
         useGenome("{genome}")
@@ -279,6 +280,7 @@ def _run_infercna(
             error = function(e) NULL
         )
     """)
+    # ===========================================================
 
     modes = ro.r("modes")
 
@@ -296,8 +298,6 @@ def _run_infercna(
         index=q_barcodes,
         name="infercna_prediction",
     )
-
-
 # ===========================================================================
 # Main pipeline
 # ===========================================================================
