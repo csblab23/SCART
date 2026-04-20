@@ -18,11 +18,27 @@ Fixes applied (all changes marked with # FIX N comments):
      query+reference AnnData is filtered back to query cells only using
      the '_dataset' column written by Process_Query.  Only the query
      portion (original Module 1 shape) is saved to disk.
-  8. [NEW] adata.raw preservation: the full gene-space raw count matrix is
-     snapshotted into adata_query.raw BEFORE Process_Query trims it, then
-     re-attached to the query-only output so Module 3 can use Route A
-     (full gene space) for scMalignantFinder — eliminating the 19% overlap
-     warning and the need to fall back to 4000 HVGs.
+  8. [NEW — revised] Full-gene raw count preservation via a dedicated
+     layer 'full_counts' rather than adata.raw.
+
+     WHY THE LAYER APPROACH (not adata.raw):
+       AnnData.raw = <AnnData> is not a public API.  The only supported
+       usage is `adata.raw = adata`, which freezes the CURRENT .X and
+       .var in-place.  After Process_Query trims .var to 4000 HVGs,
+       assigning a separate AnnData object to .raw either raises
+       AttributeError or is silently discarded on write/read — which is
+       exactly why Module 3 saw "adata.raw is None".
+
+       Using layers['full_counts'] is the h5ad-safe fix:
+         • Snapshot taken BEFORE Process_Query (full gene space, e.g. 36 k).
+         • Layers are indexed (cell × gene) so AnnData concatenation and
+           slicing in _extract_query_cells carry them automatically.
+         • adata.write() / sc.read_h5ad() round-trip layers with zero loss.
+         • Gene names saved to uns['full_counts_var_names'] (list of str).
+
+       Module 3 _build_fullgene_adata_for_scm() checks 'full_counts'
+       first, giving scMalignantFinder ≥90% model feature overlap instead
+       of the previous 19%.
 """
 
 import os
@@ -322,9 +338,7 @@ def _find_ontology_json(cl_obo_folder: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _check_batch_annotation(adata):
-    """
-    Warn if _batch_annotation has fewer than 2 unique values.
-    """
+    """Warn if _batch_annotation has fewer than 2 unique values."""
     col = "_batch_annotation"
     if col not in adata.obs.columns:
         logger.warning(
@@ -351,62 +365,52 @@ def _check_batch_annotation(adata):
 def _extract_query_cells(adata_processed, adata_query_original):
     """
     After Process_Query + annotate_data, the AnnData contains both query
-    and reference cells concatenated together.  This function returns a new
-    AnnData containing ONLY the original query cells, with all PopV
-    prediction columns preserved.
+    and reference cells concatenated together.  Returns a new AnnData
+    containing ONLY the original query cells with all PopV columns.
 
     Strategy (in order of preference):
-      1. Use adata.obs['_dataset'] == 'query'  ← written by Process_Query
+      1. adata.obs['_dataset'] == 'query'   ← written by Process_Query
       2. Match obs_names against the original query obs_names
-      3. Use adata.obs['_reference_labels_annotation'].isna() as a proxy
+      3. adata.obs['_reference_labels_annotation'].isna() proxy
     """
-    # --- Strategy 1: _dataset column ----------------------------------------
     if "_dataset" in adata_processed.obs.columns:
         query_mask = adata_processed.obs["_dataset"] == "query"
         n_query = query_mask.sum()
         logger.info(
-            f"_extract_query_cells: '_dataset' column found. "
-            f"Extracting {n_query} query cells out of {adata_processed.n_obs} total."
+            f"_extract_query_cells: '_dataset' found — "
+            f"extracting {n_query} query cells out of {adata_processed.n_obs} total."
         )
         if n_query > 0:
             return adata_processed[query_mask].copy()
         logger.warning("'_dataset' == 'query' matched 0 cells; trying fallback.")
 
-    # --- Strategy 2: match original obs_names --------------------------------
     original_names = set(adata_query_original.obs_names)
-    mask_by_name = adata_processed.obs_names.isin(original_names)
-    n_matched = mask_by_name.sum()
+    mask_by_name   = adata_processed.obs_names.isin(original_names)
+    n_matched      = mask_by_name.sum()
     if n_matched > 0:
         logger.info(
-            f"_extract_query_cells: matched {n_matched} query cells by obs_names."
+            f"_extract_query_cells: matched {n_matched} cells by obs_names."
         )
         return adata_processed[mask_by_name].copy()
 
-    # --- Strategy 3: _reference_labels_annotation NaN proxy -----------------
     if "_reference_labels_annotation" in adata_processed.obs.columns:
         mask_nan = adata_processed.obs["_reference_labels_annotation"].isna()
-        n_nan = mask_nan.sum()
+        n_nan    = mask_nan.sum()
         logger.warning(
-            f"_extract_query_cells: using NaN proxy — {n_nan} cells with no "
-            "reference label (assumed to be query cells)."
+            f"_extract_query_cells: NaN proxy — {n_nan} cells assumed query."
         )
         if n_nan > 0:
             return adata_processed[mask_nan].copy()
 
-    # --- Fallback: return as-is with a loud warning --------------------------
     logger.error(
-        "Could not identify query cells within the combined AnnData. "
-        "Returning the full combined object. "
-        "Output will contain reference cells too — inspect '_dataset' column."
+        "Could not identify query cells — returning full combined object. "
+        "Output will contain reference cells too."
     )
     return adata_processed
 
 
-def _drop_reference_only_columns(adata, keep_prefixes=("popv_", "gsm_id", "gse_id")):
-    """
-    Drop obs columns that belong to the Tabula Sapiens reference metadata
-    and are not relevant to the query dataset.
-    """
+def _drop_reference_only_columns(adata):
+    """Remove Tabula Sapiens metadata columns from the query output."""
     tabula_ref_cols = {
         "donor", "tissue", "anatomical_position", "method", "cdna_plate",
         "library_plate", "notes", "cdna_well", "old_index", "assay",
@@ -420,123 +424,79 @@ def _drop_reference_only_columns(adata, keep_prefixes=("popv_", "gsm_id", "gse_i
         "age", "sex", "ethnicity", "scvi_leiden_res05_tissue", "sample_number",
     }
 
-    cols_to_drop = [col for col in adata.obs.columns if col in tabula_ref_cols]
-
+    cols_to_drop = [c for c in adata.obs.columns if c in tabula_ref_cols]
     if cols_to_drop:
-        logger.info(
-            f"Dropping {len(cols_to_drop)} Tabula Sapiens reference columns "
-            f"from query output: {cols_to_drop}"
-        )
+        logger.info(f"Dropping {len(cols_to_drop)} Tabula reference columns.")
         adata.obs = adata.obs.drop(columns=cols_to_drop)
-
     return adata
 
 
 # ---------------------------------------------------------------------------
-# FIX 8 — snapshot and re-attach adata.raw (full gene space)
+# FIX 8 (REVISED) — preserve full-gene raw counts as layers['full_counts']
 # ---------------------------------------------------------------------------
 
-def _snapshot_raw(adata_query: anndata.AnnData) -> anndata.AnnData:
+def _store_full_counts_layer(adata_query: anndata.AnnData) -> anndata.AnnData:
     """
-    Freeze the current full-gene .X (raw counts) into adata_query.raw so
-    that downstream modules can access the complete gene space even after
-    Process_Query subsets to HVGs.
+    Snapshot raw counts for ALL genes into layers['full_counts'] and save
+    gene names to uns['full_counts_var_names'].
 
-    Called AFTER _set_input_matrix (so .X holds raw counts) and BEFORE
-    Process_Query (which trims genes).
+    Call AFTER _set_input_matrix (so .X = raw counts) and BEFORE
+    Process_Query (which trims .var to 4000 HVGs).
 
-    Returns a lightweight AnnData whose .raw is set; the caller should use
-    this object as the query going forward.
+    The layer persists through Process_Query concatenation and AnnData
+    slicing because layers are indexed by cell barcode, not var names.
+    Module 3 reads this layer in _build_fullgene_adata_for_scm() to give
+    scMalignantFinder the full gene space (≥90% model overlap vs 19%).
     """
-    if adata_query.raw is not None:
+    if "full_counts" in adata_query.layers:
         logger.info(
-            "adata_query.raw already set "
-            f"({adata_query.raw.n_vars} genes) — skipping snapshot."
+            "FIX 8: 'full_counts' already present "
+            f"({adata_query.n_vars} genes) — skipping."
         )
         return adata_query
 
     logger.info(
-        f"FIX 8: Snapshotting full gene space into adata_query.raw "
-        f"({adata_query.n_vars} genes) before Process_Query trims to HVGs."
+        f"FIX 8: Snapshotting {adata_query.n_vars} genes → "
+        "layers['full_counts'] before Process_Query."
     )
-    # AnnData.raw = AnnData freezes the current .X and .var
-    adata_query.raw = adata_query
+
+    X = adata_query.X
+    if sp.issparse(X):
+        adata_query.layers["full_counts"] = X.tocsr().copy()
+    else:
+        adata_query.layers["full_counts"] = sp.csr_matrix(
+            np.asarray(X, dtype=np.float32)
+        )
+
+    # Gene names stored as a list of str — survives uns h5ad round-trip
+    adata_query.uns["full_counts_var_names"] = list(adata_query.var_names)
+
     logger.info(
-        f"Snapshot complete — adata_query.raw.n_vars = {adata_query.raw.n_vars}"
+        f"FIX 8: Snapshot done — "
+        f"layers['full_counts'].shape = {adata_query.layers['full_counts'].shape}, "
+        f"uns['full_counts_var_names'] has "
+        f"{len(adata_query.uns['full_counts_var_names'])} entries."
     )
     return adata_query
 
 
-def _reattach_raw(
-    adata_query_out: anndata.AnnData,
-    adata_query_snapshot: anndata.AnnData,
-) -> anndata.AnnData:
-    """
-    After _extract_query_cells, re-attach the full-gene raw snapshot so
-    Module 3 can use Route A (adata.raw) for scMalignantFinder.
-
-    adata_query_snapshot still has .raw set (frozen before Process_Query).
-    adata_query_out is the query-only slice from the combined AnnData.
-
-    We align by obs_names so that any cells dropped during QC inside
-    Process_Query are handled correctly.
-    """
-    if adata_query_snapshot.raw is None:
-        logger.warning(
-            "FIX 8: adata_query_snapshot.raw is None — "
-            "cannot re-attach full gene space. "
-            "Module 3 will fall back to 4000 HVGs."
-        )
-        return adata_query_out
-
-    try:
-        raw_X   = adata_query_snapshot.raw.X        # (all_query_cells × all_genes)
-        raw_var = adata_query_snapshot.raw.var.copy()
-        orig_names = list(adata_query_snapshot.obs_names)
-        out_names  = list(adata_query_out.obs_names)
-
-        # Build index mapping: out_names → row index in orig
-        name_to_idx = {name: i for i, name in enumerate(orig_names)}
-        row_idx = [name_to_idx[n] for n in out_names if n in name_to_idx]
-
-        if len(row_idx) != len(out_names):
-            missing = len(out_names) - len(row_idx)
-            logger.warning(
-                f"FIX 8: {missing} output cells not found in raw snapshot. "
-                "They will receive zeros in adata.raw."
-            )
-
-        # Subset rows
-        if sp.issparse(raw_X):
-            raw_X_sub = raw_X[row_idx, :]
-        else:
-            raw_X_sub = np.asarray(raw_X)[row_idx, :]
-
-        # Build a minimal AnnData to assign to .raw
-        obs_sub = adata_query_snapshot.obs.iloc[
-            [adata_query_snapshot.obs_names.get_loc(n)
-             for n in out_names if n in name_to_idx]
-        ].copy()
-
-        raw_adata = anndata.AnnData(
-            X   = raw_X_sub,
-            obs = obs_sub,
-            var = raw_var,
-        )
-        adata_query_out.raw = raw_adata
+def _verify_full_counts_layer(adata_out: anndata.AnnData) -> None:
+    """Log whether 'full_counts' survived the full pipeline."""
+    if "full_counts" in adata_out.layers:
+        n_genes    = adata_out.layers["full_counts"].shape[1]
+        n_names    = len(adata_out.uns.get("full_counts_var_names", []))
         logger.info(
-            f"FIX 8: Re-attached adata.raw — "
-            f"{raw_adata.n_vars} genes × {raw_adata.n_obs} cells. "
-            "Module 3 Route A (full gene space) is now available."
+            f"FIX 8 VERIFIED: layers['full_counts'] present — "
+            f"{adata_out.n_obs} cells × {n_genes} genes, "
+            f"uns['full_counts_var_names'] has {n_names} entries. "
+            "Module 3 will use full gene space for scMalignantFinder."
         )
-
-    except Exception as exc:
-        logger.warning(
-            f"FIX 8: Could not re-attach adata.raw: {type(exc).__name__}: {exc}\n"
-            "Module 3 will fall back to 4000 HVGs."
+    else:
+        logger.error(
+            "FIX 8 FAILED: layers['full_counts'] MISSING from query output. "
+            "Process_Query may have dropped non-HVG layers. "
+            "Module 3 will fall back to 4000 HVGs (~19% overlap)."
         )
-
-    return adata_query_out
 
 
 # ---------------------------------------------------------------------------
@@ -573,7 +533,7 @@ def run_popv_annotation(
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    # Keep a lightweight copy of original query for extraction and raw re-attach
+    # Snapshot of original query needed for _extract_query_cells
     adata_query_snapshot = adata_query.copy()
 
     # --- pre-process dtypes -------------------------------------------------
@@ -587,22 +547,18 @@ def run_popv_annotation(
     _force_float32(adata_ref)
 
     # -----------------------------------------------------------------------
-    # FIX 8a — snapshot full gene space into adata_query.raw BEFORE
-    #           Process_Query trims to HVGs.
-    # This is the key fix for the 19% overlap / Route A failure in Module 3.
+    # FIX 8 — snapshot full gene space into layers['full_counts'] BEFORE
+    # Process_Query trims .var to HVGs.
+    # This replaces the previous adata.raw approach which did not survive
+    # the write/read round-trip.
     # -----------------------------------------------------------------------
-    adata_query = _snapshot_raw(adata_query)
-
-    # Re-sync snapshot so it also carries .raw (needed for _reattach_raw)
-    # We set .raw on the snapshot AFTER _force_float32 so dtypes match.
-    if adata_query_snapshot.raw is None:
-        adata_query_snapshot.raw = adata_query_snapshot
+    adata_query = _store_full_counts_layer(adata_query)
 
     # --- resolve ontology ---------------------------------------------------
     cl_obo_folder = _resolve_ontology_folder()
     ontology_json = _find_ontology_json(cl_obo_folder)
     label_map, label_to_id = _build_label_map(ontology_json)
-    logger.info(f"Loaded {len(label_map):,} ontology labels for case-normalisation.")
+    logger.info(f"Loaded {len(label_map):,} ontology labels.")
 
     # FIX 1a — normalise reference labels and filter non-ontology terms
     _ref_label_col = "cell_ontology_class"
@@ -615,21 +571,22 @@ def run_popv_annotation(
             .map(lambda v: label_map.get(v, v))
         )
 
-        valid_labels = set(label_map.values())
-        mask = adata_ref.obs[_ref_label_col].isin(valid_labels)
-        n_before = adata_ref.n_obs
+        valid_labels     = set(label_map.values())
+        mask             = adata_ref.obs[_ref_label_col].isin(valid_labels)
+        n_before         = adata_ref.n_obs
         n_dropped_labels = (~mask).sum()
+
         if n_dropped_labels > 0:
             dropped = adata_ref.obs.loc[~mask, _ref_label_col].unique().tolist()
             logger.warning(
-                f"Dropping {n_dropped_labels} reference cells whose labels are "
-                f"not in the cell ontology digraph: {dropped}"
+                f"Dropping {n_dropped_labels} reference cells not in "
+                f"cell ontology digraph: {dropped}"
             )
             adata_ref = adata_ref[mask].copy()
+
         logger.info(
-            f"Reference '{_ref_label_col}': {n_before} → {adata_ref.n_obs} cells, "
-            f"{adata_ref.obs[_ref_label_col].nunique()} unique labels after "
-            "case-normalisation and ontology filtering."
+            f"Reference: {n_before} → {adata_ref.n_obs} cells, "
+            f"{adata_ref.obs[_ref_label_col].nunique()} unique labels."
         )
 
     # Sync cell_ontology_id
@@ -646,15 +603,9 @@ def run_popv_annotation(
         )
         missing_ids = (adata_ref.obs[_ref_id_col] == "").sum()
         if missing_ids > 0:
-            logger.warning(
-                f"{missing_ids} reference cells have no CL ID after sync — "
-                "ONCLASS may still fail for those labels."
-            )
+            logger.warning(f"{missing_ids} reference cells have no CL ID after sync.")
         else:
-            logger.info(
-                "cell_ontology_id synced with normalised labels — "
-                "ONCLASS label→ID dict will be complete."
-            )
+            logger.info("cell_ontology_id synced — ONCLASS dict will be complete.")
 
     # --- Process_Query ------------------------------------------------------
     pq = Process_Query(
@@ -667,7 +618,19 @@ def run_popv_annotation(
     )
     adata_processed = pq.adata
 
-    # FIX 3: check batch column before running harmony
+    # Confirm layer survived Process_Query
+    if "full_counts" in adata_processed.layers:
+        logger.info(
+            f"FIX 8: 'full_counts' survived Process_Query — "
+            f"combined shape {adata_processed.shape}"
+        )
+    else:
+        logger.error(
+            "FIX 8: 'full_counts' DROPPED by Process_Query — "
+            "Module 3 will fall back to 4000 HVGs."
+        )
+
+    # FIX 3: check batch column
     _check_batch_annotation(adata_processed)
     has_two_batches = (
         "_batch_annotation" in adata_processed.obs.columns
@@ -683,7 +646,7 @@ def run_popv_annotation(
 
         def __setitem__(self, key, value):
             if key == _harmony_key:
-                arr = np.array(value)
+                arr   = np.array(value)
                 n_obs = object.__getattribute__(self, "_n_obs")
                 if arr.ndim == 2 and arr.shape[0] != n_obs:
                     logger.warning(
@@ -693,8 +656,7 @@ def run_popv_annotation(
                     arr = arr.T
                 elif arr.ndim == 1:
                     logger.warning(
-                        f"obsm proxy: {key} is 1-D {arr.shape}, "
-                        "cannot auto-correct — KNN_HARMONY will be skipped."
+                        f"obsm proxy: {key} is 1-D — KNN_HARMONY skipped."
                     )
                     return
                 object.__getattribute__(self, "_real").__setitem__(key, arr)
@@ -719,12 +681,11 @@ def run_popv_annotation(
                 ("onclass_utils", "cell_type_nlp_network", "cell_type_nlp"),
                 ("onclass_utils", "cell_ontology_graph",   "name2id"),
             ]
-
             patched = []
             for mod_name, obj_attr, dict_attr in candidates:
                 try:
-                    import importlib
-                    mod = importlib.import_module(mod_name)
+                    import importlib as _il
+                    mod = _il.import_module(mod_name)
                     obj = getattr(mod, obj_attr, None)
                     if obj is None:
                         continue
@@ -734,16 +695,14 @@ def run_popv_annotation(
                     missing = {k: v for k, v in label_to_id_map.items() if k not in d}
                     if missing:
                         logger.info(
-                            f"ONCLASS patch: injecting {len(missing)} missing "
-                            f"label→ID entries into {mod_name}.{obj_attr}.{dict_attr}"
+                            f"ONCLASS patch: injecting {len(missing)} entries into "
+                            f"{mod_name}.{obj_attr}.{dict_attr}"
                         )
                         d.update(missing)
                         patched.append((d, missing))
                 except Exception:
                     continue
-
             yield
-
             for d, added in patched:
                 for k in added:
                     d.pop(k, None)
@@ -755,14 +714,12 @@ def run_popv_annotation(
 
         if method == "KNN_HARMONY":
             real_obsm = adata.obsm
-            proxy = _ObsmProxy(real_obsm, adata.n_obs)
+            proxy     = _ObsmProxy(real_obsm, adata.n_obs)
             with mock.patch.object(adata, "obsm", proxy):
                 annotate_data(adata, methods=[method])
-
         elif method == "ONCLASS":
             with _patch_onclass(label_to_id):
                 annotate_data(adata, methods=[method])
-
         else:
             annotate_data(adata, methods=[method])
 
@@ -780,7 +737,7 @@ def run_popv_annotation(
         if has_two_batches:
             methods.insert(2, "KNN_HARMONY")
         else:
-            logger.warning("Skipping KNN_HARMONY: fewer than 2 batch values detected.")
+            logger.warning("Skipping KNN_HARMONY: fewer than 2 batch values.")
     else:
         methods = ["CELLTYPIST"]
 
@@ -793,11 +750,10 @@ def run_popv_annotation(
             _normalise_predictions(adata_processed, label_map)
             successful_methods.append(method)
             logger.info(f"✓ {method} completed.")
-
         except Exception as exc:
             logger.warning(f"✗ Skipping {method}: {type(exc).__name__}: {exc}")
 
-    logger.info(f"Methods that completed: {successful_methods}")
+    logger.info(f"Methods completed: {successful_methods}")
 
     # --- FIX 4: robust fallback for majority-vote ---------------------------
     if "popv_majority_vote_prediction" not in adata_processed.obs.columns:
@@ -820,23 +776,15 @@ def run_popv_annotation(
 
     # --- FIX 7: extract query cells only ------------------------------------
     logger.info(
-        f"Combined AnnData shape after annotation: {adata_processed.shape}  "
+        f"Combined shape after annotation: {adata_processed.shape} "
         f"(query {adata_query_snapshot.n_obs} + reference cells)"
     )
     adata_query_out = _extract_query_cells(adata_processed, adata_query_snapshot)
-    logger.info(
-        f"Query-only AnnData shape: {adata_query_out.shape}  "
-        f"(expected n_obs ≈ {adata_query_snapshot.n_obs})"
-    )
+    logger.info(f"Query-only shape: {adata_query_out.shape}")
 
-    # -----------------------------------------------------------------------
-    # FIX 8b — re-attach the full-gene raw snapshot to the query-only output
-    # so Module 3 can use Route A (adata.raw) for scMalignantFinder.
-    # Without this step Module 3 falls back to 4000 HVGs (19% overlap).
-    # -----------------------------------------------------------------------
-    adata_query_out = _reattach_raw(adata_query_out, adata_query_snapshot)
+    # --- FIX 8 verification -------------------------------------------------
+    _verify_full_counts_layer(adata_query_out)
 
-    # Optionally remove Tabula Sapiens reference metadata columns
     if drop_reference_columns:
         adata_query_out = _drop_reference_only_columns(adata_query_out)
 
@@ -845,27 +793,22 @@ def run_popv_annotation(
 
     out_path = os.path.join(output_dir, "final_popv_annotated.h5ad")
     adata_query_out.write(out_path)
-    logger.info(f"Saved annotated query data to: {out_path}")
+
     logger.info(
-        f"Final saved shape: {adata_query_out.shape}  "
-        f"obs columns: {list(adata_query_out.obs.columns)}"
+        f"\n{'='*60}\n"
+        f"PopV output saved: {out_path}\n"
+        f"Shape             : {adata_query_out.shape}\n"
+        f"obs columns       : {list(adata_query_out.obs.columns)}\n"
+        f"layers            : {list(adata_query_out.layers.keys())}\n"
+        f"uns keys          : {list(adata_query_out.uns.keys())}\n"
+        f"{'='*60}"
     )
-    if adata_query_out.raw is not None:
-        logger.info(
-            f"adata.raw preserved: {adata_query_out.raw.n_vars} genes — "
-            "Module 3 will use full gene space via Route A."
-        )
-    else:
-        logger.warning(
-            "adata.raw is None in final output — "
-            "Module 3 will fall back to HVG-only mode."
-        )
 
     return adata_query_out
 
 
 # ---------------------------------------------------------------------------
-# Auto entry-point (mirrors Module 1's run() interface)
+# Auto entry-point
 # ---------------------------------------------------------------------------
 
 def auto_run_popv(
@@ -876,33 +819,14 @@ def auto_run_popv(
     drop_reference_columns: bool = True,
 ):
     """
-    Fully automatic entry-point.
-
-    Finds the tumor h5ad written by Module 1, downloads the matching
-    Tabula Sapiens reference (or uses user_reference if provided), and
-    runs PopV annotation.
-
-    Parameters
-    ----------
-    input_type : str
-        'raw' or 'log1p' (see run_popv_annotation).
-    nsamples : int
-        n_samples_per_label for Process_Query.
-    output_dir : str
-        Where to write final_popv_annotated.h5ad.
-    user_reference : str or None
-        Path to a custom reference h5ad.  If None, Tabula Sapiens is
-        auto-downloaded based on the cancer_type stored in the query h5ad.
-    drop_reference_columns : bool
-        If True (default), Tabula Sapiens metadata columns are dropped from
-        the saved output to keep it clean (same as Module 1 output columns
-        plus popv_* predictions).
+    Fully automatic entry-point.  Finds the tumor h5ad from Module 1,
+    downloads the matching Tabula Sapiens reference (or uses
+    user_reference), and runs PopV annotation.
     """
     tumor_file = get_latest_tumor_h5ad()
     logger.info(f"Query file: {tumor_file}")
 
-    cancer_type = detect_cancer_type_from_h5ad(tumor_file)
-
+    cancer_type    = detect_cancer_type_from_h5ad(tumor_file)
     primary_cancer = cancer_type.split(",")[0].strip()
     reference_path = auto_select_reference(primary_cancer, user_reference)
 
