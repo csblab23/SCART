@@ -10,10 +10,13 @@ Step 1  Load the full PopV-annotated h5ad (all cell types, e.g. 15202 cells).
         Save this as adata_full — it is the complete dataset.
 
 Step 2  Extract epithelial cells only from adata_full → apply QC filters.
+        QC thresholds (min_genes, max_mt) are read automatically from
+        adata.uns['qc_params'] written by Module 1 (geo_fetcher.py).
         These are the cells we want to classify as malignant or not.
 
 Step 3  Run scMalignantFinder + inferCNA on the epithelial cells.
         Combine predictions → final_malignant column on the epithelial adata.
+        Strategy: intersection (scMalignantFinder AND inferCNA must both agree).
 
 Step 4  Keep ONLY the malignant epithelial cells (drop non-malignant epithelial).
         These are the true tumour cells.
@@ -28,14 +31,33 @@ Step 6  DEG:  malignant epithelial cells  vs  all non-epithelial cells
 Step 7  Binarise ONLY the malignant epithelial AnnData, store DEG results, save.
 
 ═══════════════════════════════════════════════════════════════════════════════
+QC PARAMETER FLOW
+═══════════════════════════════════════════════════════════════════════════════
+
+Module 1 (geo_fetcher.py)
+  SampleAnnotator("GSE…", min_genes=200, max_mt=40) stores QC thresholds in
+  adata.uns['qc_params'] = {"min_genes": 200, "max_mt": 40.0} of every h5ad
+  it writes.
+
+Module 2 (popv_annotation.py)
+  Passes the h5ad through — uns keys including 'qc_params' are preserved.
+
+Module 3 (this file)
+  Reads adata.uns['qc_params'] automatically.
+  Logs which values it will use so the user can verify them.
+  Falls back to defaults (min_genes=200, max_mt=40) if the key is absent
+  (e.g. when adata was passed directly without going through Module 1).
+
+═══════════════════════════════════════════════════════════════════════════════
 DATA FLOW ACROSS MODULES
 ═══════════════════════════════════════════════════════════════════════════════
 
 Module 1 (geo_fetcher.py)
   Saves:  GSE*_tumor.h5ad
-  Contains: adata.layers['counts']        raw integer counts, full gene space
-            adata.raw = adata             same data frozen
+  Contains: adata.layers['counts']          raw integer counts, full gene space
+            adata.raw = adata               same data frozen
             adata.uns['cancer_type']
+            adata.uns['qc_params']          {"min_genes": …, "max_mt": …}
 
 Module 2 (popv_annotation.py)
   Reads:  GSE*_tumor.h5ad
@@ -43,6 +65,7 @@ Module 2 (popv_annotation.py)
   Contains (after FIX 8 layer approach):
             adata.layers['full_counts']          raw counts, full gene space
             adata.uns['full_counts_var_names']   list of gene names
+            adata.uns['qc_params']               passed through from Module 1
             adata.layers['scvi_counts']          4000 HVG subset
             obs['popv_majority_vote_prediction'] cell-type labels
 
@@ -54,7 +77,7 @@ Module 3 (this file)
                    infercna_cna_signal, infercna_cna_cor,
                    infercna_gmm_label, final_malignant
             → uns: infercna_results (full detail DataFrame)
-                   filtered_deg, all_deg, deg_params, cancer_type
+                   filtered_deg, all_deg, deg_params, cancer_type, qc_params
 
 ═══════════════════════════════════════════════════════════════════════════════
 KEY FIXES
@@ -86,6 +109,12 @@ FIX 9   CORRECT DEG DESIGN:
         Malignant epithelial cells vs all NON-EPITHELIAL cells from adata_full.
         Both groups surfaceome-filtered before DEG.
         Non-malignant epithelial cells are REMOVED (not used in any group).
+
+QC FIX  min_genes and max_mt removed from the public API of
+        run_preprocessing_pipeline().  Both values are read from
+        adata.uns['qc_params'] (written by Module 1).  Sensible defaults
+        (200 / 40) are used as a fallback so the pipeline still works when
+        an h5ad was not produced by Module 1.
 """
 
 import os
@@ -99,6 +128,10 @@ import scipy.sparse as sp
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ── QC fallback defaults (used only when uns['qc_params'] is absent) ───────
+_DEFAULT_MIN_GENES = 200
+_DEFAULT_MAX_MT    = 40.0
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -167,6 +200,42 @@ def _auto_popv_h5ad():
         if os.path.exists(c):
             return c
     return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# QC parameter reader
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _read_qc_params(adata):
+    """
+    Read QC thresholds from adata.uns['qc_params'] (written by Module 1).
+
+    Falls back to package defaults if the key is absent so the pipeline
+    works even when adata was not produced by Module 1.
+
+    Returns
+    -------
+    min_genes : int
+    max_mt    : float
+    source    : str   Human-readable description of where the values came from.
+    """
+    qc = adata.uns.get("qc_params", None)
+
+    if qc is not None:
+        min_genes = int(qc.get("min_genes", _DEFAULT_MIN_GENES))
+        max_mt    = float(qc.get("max_mt",    _DEFAULT_MAX_MT))
+        source    = "adata.uns['qc_params'] (set by Module 1)"
+    else:
+        min_genes = _DEFAULT_MIN_GENES
+        max_mt    = _DEFAULT_MAX_MT
+        source    = (
+            f"package defaults ({_DEFAULT_MIN_GENES} / {_DEFAULT_MAX_MT}) — "
+            "'qc_params' key not found in adata.uns. "
+            "Re-run Module 1 with SampleAnnotator(min_genes=…, max_mt=…) "
+            "to propagate custom thresholds automatically."
+        )
+
+    return min_genes, max_mt, source
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -262,7 +331,7 @@ def _build_fullgene_adata_for_scm(adata, feature_tsv, tumor_h5ad_path=None):
     if rescue and os.path.exists(rescue):
         logger.info(f"Route A-rescue: {rescue}")
         try:
-            m1 = sc.read_h5ad(rescue)
+            m1     = sc.read_h5ad(rescue)
             shared = sorted(set(adata.obs_names) & set(m1.obs_names))
             if m1.raw is not None and len(shared) > 0:
                 ov = _pct(m1.raw.var_names)
@@ -276,12 +345,18 @@ def _build_fullgene_adata_for_scm(adata, feature_tsv, tumor_h5ad_path=None):
             for lyr in ("counts", "raw_counts", "scvi_counts"):
                 if lyr in m1.layers and len(shared) > 0:
                     ov = _pct(m1.var_names)
-                    logger.info(f"Route A-rescue (m1.layers['{lyr}']): {m1.n_vars} genes, {ov:.1f}%")
+                    logger.info(
+                        f"Route A-rescue (m1.layers['{lyr}']): {m1.n_vars} genes, {ov:.1f}%"
+                    )
                     if ov >= 50:
                         order = [c for c in adata.obs_names if c in set(shared)]
                         sub   = m1[order]
-                        af    = _make_adata(sub.layers[lyr], adata.obs.loc[order], sub.var)
-                        logger.info(f"scMalignantFinder → Route A-rescue (layers['{lyr}']).")
+                        af    = _make_adata(
+                            sub.layers[lyr], adata.obs.loc[order], sub.var
+                        )
+                        logger.info(
+                            f"scMalignantFinder → Route A-rescue (layers['{lyr}'])."
+                        )
                         return af
                     break
         except Exception as exc:
@@ -341,10 +416,10 @@ def _python_find_malignant(cna_df, q_barcodes, signal_threshold=0.9):
     Returns
     -------
     pd.DataFrame with columns:
-        barcode         cell barcode
-        cna_signal      cnaSignal value
-        cna_cor         cnaCor value
-        gmm_label       raw GMM cluster (0 or 1)
+        barcode             cell barcode
+        cna_signal          cnaSignal value
+        cna_cor             cnaCor value
+        gmm_label           raw GMM cluster (0 or 1)
         infercna_prediction  'malignant' | 'non-malignant' | 'not.defined'
     """
     try:
@@ -411,8 +486,10 @@ def _python_find_malignant(cna_df, q_barcodes, signal_threshold=0.9):
         # Reindex to match all q_barcodes (some may be missing from CNA cols)
         result_full = pd.DataFrame({"barcode": list(q_barcodes)})
         result_full = result_full.merge(result_df, on="barcode", how="left")
-        result_full["infercna_prediction"] = result_full["infercna_prediction"].fillna("not.defined")
-        result_full["gmm_label"]           = result_full["gmm_label"].fillna(-1).astype(int)
+        result_full["infercna_prediction"] = (
+            result_full["infercna_prediction"].fillna("not.defined")
+        )
+        result_full["gmm_label"] = result_full["gmm_label"].fillna(-1).astype(int)
 
         logger.info(
             "Python GMM findMalignant results:\n"
@@ -562,7 +639,9 @@ def _run_infercna(
     ro.globalenv["noise_val"]    = ro.FloatVector([noise])
     ro.globalenv["genome_name"]  = ro.StrVector([genome])
 
-    logger.info("inferCNA: running R (useGenome + infercna only — findMalignant bypassed) ...")
+    logger.info(
+        "inferCNA: running R (useGenome + infercna only — findMalignant bypassed) ..."
+    )
     ro.r("""
         suppressPackageStartupMessages(library(infercna))
         r_mat <- matrix(mat_flat, nrow=n_rows, ncol=n_cols)
@@ -586,7 +665,9 @@ def _run_infercna(
         cna_rows   = list(cna_r.rownames)
         cna_values = np.array(cna_r).reshape(len(cna_rows), len(cna_cols), order="F")
         cna_df     = pd.DataFrame(cna_values, index=cna_rows, columns=cna_cols)
-        logger.info(f"CNA matrix retrieved: {cna_df.shape[0]} genes × {cna_df.shape[1]} cells")
+        logger.info(
+            f"CNA matrix retrieved: {cna_df.shape[0]} genes × {cna_df.shape[1]} cells"
+        )
     except Exception as exc:
         logger.error(f"Could not convert CNA matrix: {exc}")
         return pd.DataFrame({
@@ -600,7 +681,10 @@ def _run_infercna(
     # FIX 7 — Python GMM replaces findMalignant()
     logger.info("FIX 7: Python-side GMM findMalignant replacement ...")
     result_df = _python_find_malignant(cna_df, q_barcodes, signal_threshold)
-    logger.info("inferCNA predictions:\n" + result_df["infercna_prediction"].value_counts().to_string())
+    logger.info(
+        "inferCNA predictions:\n"
+        + result_df["infercna_prediction"].value_counts().to_string()
+    )
     return result_df
 
 
@@ -611,9 +695,6 @@ def _run_infercna(
 def run_preprocessing_pipeline(
     adata=None,
     popv_path=None,
-    # QC
-    min_genes=200,
-    max_mt=40.0,
     # DEG
     log2fc_threshold=1.0,
     pval_adj_threshold=0.05,
@@ -624,7 +705,7 @@ def run_preprocessing_pipeline(
     scmalignant_model_dir=None,
     surfaceome_path=None,
     # malignancy
-    malignant_strategy="union",
+    malignant_strategy="intersection",
     # inferCNA
     infercna_genome="hg19",
     infercna_n=5000,
@@ -635,16 +716,32 @@ def run_preprocessing_pipeline(
     """
     Full preprocessing pipeline.
 
+    QC THRESHOLDS (min_genes, max_mt)
+    ----------------------------------
+    These are NO LONGER parameters of this function.  They are set once in
+    Module 1::
+
+        annotator = SampleAnnotator("GSE…", min_genes=200, max_mt=40)
+
+    Module 1 stores them in ``adata.uns['qc_params']`` of every h5ad it
+    writes.  Module 3 reads them from that key automatically, so you never
+    need to repeat them here.
+
+    If ``qc_params`` is absent (e.g. you supplied an h5ad that did not come
+    from Module 1), the pipeline falls back to ``min_genes=200, max_mt=40``
+    and prints a warning.
+
     PIPELINE FLOW
     -------------
     1.  Load full PopV h5ad (all cell types)  → adata_full
-    2.  Extract epithelial cells → QC
-    3.  scMalignantFinder + inferCNA on epithelial cells
-    4.  Keep ONLY malignant epithelial cells (non-malignant dropped)
-    5.  adata_full non-epithelial cells → "rest" comparison group
-    6.  Surfaceome filter (GESP genes) applied to BOTH groups
-    7.  DEG: malignant epithelial vs non-epithelial rest
-    8.  Binarise malignant-only cells, save
+    2.  Read QC thresholds from adata.uns['qc_params']
+    3.  Extract epithelial cells → QC
+    4.  scMalignantFinder + inferCNA on epithelial cells
+    5.  Keep ONLY malignant epithelial cells (non-malignant dropped)
+    6.  adata_full non-epithelial cells → "rest" comparison group
+    7.  Surfaceome filter (GESP genes) applied to BOTH groups
+    8.  DEG: malignant epithelial vs non-epithelial rest
+    9.  Binarise malignant-only cells, save
 
     Parameters
     ----------
@@ -652,8 +749,6 @@ def run_preprocessing_pipeline(
         Full PopV output. Auto-loaded if None.
     popv_path : str or None
         Explicit PopV h5ad path.
-    min_genes : int        QC: minimum genes per cell. Default 200.
-    max_mt : float         QC: max mitochondrial %. Default 40.
     log2fc_threshold : float   DEG log2FC cutoff. Default 1.0.
     pval_adj_threshold : float DEG BH-adjusted p-value cutoff. Default 0.05.
     reference_h5ad : str or None
@@ -666,8 +761,7 @@ def run_preprocessing_pipeline(
     scmalignant_model_dir : str or None  Auto-detected from SCART.
     surfaceome_path : str or None        Auto-detected from SCART GESP file.
     malignant_strategy : str
-        'union'        — malignant if scMalignantFinder OR inferCNA says so
-        'intersection' — malignant only if BOTH agree
+        'intersection' — malignant only if BOTH tools agree (default)
         'scMalignant'  — scMalignantFinder only
         'infercna'     — inferCNA only (requires reference_h5ad)
     infercna_genome : str   'hg19' (default) or 'hg38'. String key, not file.
@@ -681,6 +775,7 @@ def run_preprocessing_pipeline(
     AnnData  Malignant epithelial cells only, surfaceome-filtered, binarised.
              DEG stored in adata.uns['filtered_deg'] and adata.uns['all_deg'].
              inferCNA full results in adata.uns['infercna_results'].
+             QC params echoed in adata.uns['qc_params'].
     """
     print("\n========== START ==========\n")
 
@@ -704,7 +799,11 @@ def run_preprocessing_pipeline(
     # STEP 1 — Load full PopV h5ad  → adata_full
     # ------------------------------------------------------------------
     if adata is None:
-        cands = ([popv_path] if popv_path else []) + ([_auto_popv_h5ad()] if _auto_popv_h5ad() else [])
+        auto_popv = _auto_popv_h5ad()
+        cands = (
+            ([popv_path]   if popv_path   else []) +
+            ([auto_popv]   if auto_popv   else [])
+        )
         for path in cands:
             if path and os.path.exists(path):
                 print(f"Loading PopV output: {path}")
@@ -722,25 +821,41 @@ def run_preprocessing_pipeline(
     print(f"Full dataset loaded: {adata_full.n_obs} cells × {adata_full.n_vars} genes")
 
     # ------------------------------------------------------------------
-    # STEP 2 — Extract epithelial cells → QC
+    # STEP 2 — Read QC thresholds written by Module 1
     # ------------------------------------------------------------------
-    print("\n--- Step 2: Epithelial selection + QC ---")
+    min_genes, max_mt, qc_source = _read_qc_params(adata_full)
+
+    print(f"\n--- Step 2: QC thresholds ---")
+    print(f"  Source    : {qc_source}")
+    print(f"  min_genes : {min_genes}")
+    print(f"  max_mt    : {max_mt}")
+
+    # ------------------------------------------------------------------
+    # STEP 3 — Extract epithelial cells → QC
+    # ------------------------------------------------------------------
+    print("\n--- Step 3: Epithelial selection + QC ---")
     labels  = adata_full.obs["popv_majority_vote_prediction"].astype(str)
     ep_mask = labels.str.endswith("epithelial cell")
     print(f"Epithelial cells: {ep_mask.sum()} / {adata_full.n_obs} total")
-    print(f"Non-epithelial cells (will be 'rest' group for DEG): {(~ep_mask).sum()}")
+    print(
+        f"Non-epithelial cells (will be 'rest' group for DEG): {(~ep_mask).sum()}"
+    )
 
     adata_epi = adata_full[ep_mask].copy()
 
     adata_epi.var["mt"] = adata_epi.var_names.str.startswith("MT-")
     sc.pp.calculate_qc_metrics(adata_epi, qc_vars=["mt"], inplace=True)
     print(f"Mean MT% BEFORE QC: {adata_epi.obs['pct_counts_mt'].mean():.2f}")
-    before_qc  = adata_epi.n_obs
-    adata_epi  = adata_epi[
+    before_qc = adata_epi.n_obs
+    adata_epi = adata_epi[
         (adata_epi.obs["n_genes_by_counts"] > min_genes) &
-        (adata_epi.obs["pct_counts_mt"] < max_mt)
+        (adata_epi.obs["pct_counts_mt"]     < max_mt)
     ].copy()
-    print(f"Epithelial cells after QC: {adata_epi.n_obs}  (removed {before_qc - adata_epi.n_obs})")
+    print(
+        f"Epithelial cells after QC: {adata_epi.n_obs}  "
+        f"(removed {before_qc - adata_epi.n_obs}  |  "
+        f"min_genes>{min_genes}, max_mt<{max_mt})"
+    )
     print(f"Mean MT% AFTER QC:  {adata_epi.obs['pct_counts_mt'].mean():.2f}\n")
 
     # Route raw counts → .X; snapshot for inferCNA
@@ -763,20 +878,25 @@ def run_preprocessing_pipeline(
     sc.pp.log1p(adata_epi)
 
     # ------------------------------------------------------------------
-    # STEP 3a — scMalignantFinder
+    # STEP 4a — scMalignantFinder
     # ------------------------------------------------------------------
-    print("\n--- Step 3a: scMalignantFinder ---")
+    print("\n--- Step 4a: scMalignantFinder ---")
     feature_tsv = os.path.join(scmalignant_model_dir, "ordered_feature.tsv")
 
     # Report gene-space route
     if "full_counts" in adata_epi.layers and adata_epi.uns.get("full_counts_var_names"):
-        print(f"Gene-space: Route A-new ({len(adata_epi.uns['full_counts_var_names'])} genes)")
+        print(
+            f"Gene-space: Route A-new "
+            f"({len(adata_epi.uns['full_counts_var_names'])} genes)"
+        )
     else:
         rescue = tumor_h5ad or _auto_tumor_h5ad()
         if rescue and os.path.exists(rescue):
             print(f"Gene-space: Route A-rescue ({rescue})")
         elif adata_epi.raw is not None:
-            print(f"Gene-space: Route A-old (adata.raw, {adata_epi.raw.n_vars} genes)")
+            print(
+                f"Gene-space: Route A-old (adata.raw, {adata_epi.raw.n_vars} genes)"
+            )
         else:
             print("Gene-space: Route C (4000-HVG fallback — ~19% model overlap)")
 
@@ -810,12 +930,12 @@ def run_preprocessing_pipeline(
     print(adata_epi.obs[scm_col].value_counts().to_string())
 
     # ------------------------------------------------------------------
-    # STEP 3b — inferCNA (FIX 7: scalop-safe Python GMM)
+    # STEP 4b — inferCNA (FIX 7: scalop-safe Python GMM)
     # ------------------------------------------------------------------
     infercna_available = False
     infercna_result_df = None
 
-    if malignant_strategy in ("infercna", "union", "intersection"):
+    if malignant_strategy in ("infercna", "intersection"):
         if reference_h5ad is None:
             print(
                 "\nWarning: inferCNA skipped — no reference_h5ad provided.\n"
@@ -824,7 +944,7 @@ def run_preprocessing_pipeline(
             malignant_strategy = "scMalignant"
         else:
             print(
-                f"\n--- Step 3b: inferCNA ---\n"
+                f"\n--- Step 4b: inferCNA ---\n"
                 f"  Reference: {reference_h5ad}\n"
                 f"  Reference subsampled to <={infercna_ref_max_cells} cells\n"
                 f"  n auto-capped, scalop-safe Python GMM"
@@ -845,7 +965,6 @@ def run_preprocessing_pipeline(
                 )
 
                 # FIX 8 — store detailed inferCNA results on adata_epi
-                # Map by barcode (not positional) for safety
                 bc_to_pred   = dict(zip(infercna_result_df["barcode"],
                                         infercna_result_df["infercna_prediction"]))
                 bc_to_signal = dict(zip(infercna_result_df["barcode"],
@@ -855,17 +974,17 @@ def run_preprocessing_pipeline(
                 bc_to_gmm    = dict(zip(infercna_result_df["barcode"],
                                         infercna_result_df["gmm_label"]))
 
-                adata_epi.obs["infercna_prediction"] = [
-                    bc_to_pred.get(b, "not.defined") for b in adata_epi.obs_names
+                adata_epi.obs["infercna_prediction"]  = [
+                    bc_to_pred.get(b,   "not.defined") for b in adata_epi.obs_names
                 ]
-                adata_epi.obs["infercna_cna_signal"] = [
-                    bc_to_signal.get(b, np.nan) for b in adata_epi.obs_names
+                adata_epi.obs["infercna_cna_signal"]  = [
+                    bc_to_signal.get(b, np.nan)         for b in adata_epi.obs_names
                 ]
-                adata_epi.obs["infercna_cna_cor"] = [
-                    bc_to_cor.get(b, np.nan) for b in adata_epi.obs_names
+                adata_epi.obs["infercna_cna_cor"]     = [
+                    bc_to_cor.get(b,    np.nan)         for b in adata_epi.obs_names
                 ]
-                adata_epi.obs["infercna_gmm_label"] = [
-                    bc_to_gmm.get(b, -1) for b in adata_epi.obs_names
+                adata_epi.obs["infercna_gmm_label"]   = [
+                    bc_to_gmm.get(b,    -1)             for b in adata_epi.obs_names
                 ]
 
                 infercna_available = True
@@ -873,50 +992,57 @@ def run_preprocessing_pipeline(
                 print("\ninferCNA completed.")
                 print("  Prediction counts:")
                 print(adata_epi.obs["infercna_prediction"].value_counts().to_string())
-                print(f"\n  cna_signal stats:  mean={adata_epi.obs['infercna_cna_signal'].mean():.4f}"
-                      f"  std={adata_epi.obs['infercna_cna_signal'].std():.4f}")
-                print(f"  cna_cor stats:     mean={adata_epi.obs['infercna_cna_cor'].mean():.4f}"
-                      f"  std={adata_epi.obs['infercna_cna_cor'].std():.4f}")
+                print(
+                    f"\n  cna_signal stats:  "
+                    f"mean={adata_epi.obs['infercna_cna_signal'].mean():.4f}  "
+                    f"std={adata_epi.obs['infercna_cna_signal'].std():.4f}"
+                )
+                print(
+                    f"  cna_cor stats:     "
+                    f"mean={adata_epi.obs['infercna_cna_cor'].mean():.4f}  "
+                    f"std={adata_epi.obs['infercna_cna_cor'].std():.4f}"
+                )
 
             except Exception as exc:
-                print(f"\nWarning: inferCNA failed — {type(exc).__name__}: {exc}")
-                print("  Falling back to scMalignantFinder only.")
+                print(
+                    f"\nWarning: inferCNA failed — {type(exc).__name__}: {exc}\n"
+                    "  Falling back to scMalignantFinder only."
+                )
                 logger.exception("inferCNA error:")
                 malignant_strategy = "scMalignant"
 
     # ------------------------------------------------------------------
-    # STEP 3c — Combine malignancy calls → final_malignant
+    # STEP 4c — Combine malignancy calls → final_malignant
     # ------------------------------------------------------------------
-    print("\n--- Step 3c: Combine malignancy calls ---")
+    print("\n--- Step 4c: Combine malignancy calls ---")
     scm_mal = adata_epi.obs[scm_col].str.lower() == "malignant"
 
     if infercna_available:
         cna_mal = adata_epi.obs["infercna_prediction"].str.lower() == "malignant"
-        if malignant_strategy == "union":
-            malignant_mask = scm_mal | cna_mal
-            strategy_label = "union (scMalignantFinder OR inferCNA)"
-        elif malignant_strategy == "intersection":
-            malignant_mask = scm_mal & cna_mal
-            strategy_label = "intersection (scMalignantFinder AND inferCNA)"
+        if malignant_strategy == "intersection":
+            malignant_mask  = scm_mal & cna_mal
+            strategy_label  = "intersection (scMalignantFinder AND inferCNA)"
         elif malignant_strategy == "infercna":
-            malignant_mask = cna_mal
-            strategy_label = "inferCNA only"
+            malignant_mask  = cna_mal
+            strategy_label  = "inferCNA only"
         else:
-            malignant_mask = scm_mal
-            strategy_label = "scMalignantFinder only"
+            malignant_mask  = scm_mal
+            strategy_label  = "scMalignantFinder only"
     else:
         malignant_mask = scm_mal
         strategy_label = "scMalignantFinder only"
 
-    adata_epi.obs["final_malignant"] = malignant_mask.map({True: "malignant", False: "non-malignant"})
+    adata_epi.obs["final_malignant"] = malignant_mask.map(
+        {True: "malignant", False: "non-malignant"}
+    )
     print(f"Strategy: {strategy_label}")
     print(f"  Malignant epithelial:     {malignant_mask.sum()}")
     print(f"  Non-malignant epithelial: {(~malignant_mask).sum()}  ← these will be REMOVED")
 
     # ------------------------------------------------------------------
-    # STEP 4 — Keep ONLY malignant epithelial cells
+    # STEP 5 — Keep ONLY malignant epithelial cells
     # ------------------------------------------------------------------
-    print("\n--- Step 4: Retain malignant epithelial cells only ---")
+    print("\n--- Step 5: Retain malignant epithelial cells only ---")
     adata_mal = adata_epi[malignant_mask].copy()
     print(f"Malignant epithelial cells retained: {adata_mal.n_obs}")
     print(f"Non-malignant epithelial cells removed: {(~malignant_mask).sum()}")
@@ -928,20 +1054,19 @@ def run_preprocessing_pipeline(
         )
 
     # ------------------------------------------------------------------
-    # STEP 5 — Non-epithelial "rest" group from adata_full
+    # STEP 6 — Non-epithelial "rest" group from adata_full
     # ------------------------------------------------------------------
-    print("\n--- Step 5: Extract non-epithelial 'rest' group ---")
-    rest_mask    = ~ep_mask    # non-epithelial cells from the full dataset
-    adata_rest   = adata_full[rest_mask].copy()
+    print("\n--- Step 6: Extract non-epithelial 'rest' group ---")
+    rest_mask  = ~ep_mask    # non-epithelial cells from the full dataset
+    adata_rest = adata_full[rest_mask].copy()
     print(f"Non-epithelial 'rest' cells: {adata_rest.n_obs}")
     print("  Cell types in rest group:")
-    rest_types = (
+    print(
         adata_rest.obs["popv_majority_vote_prediction"]
         .value_counts()
         .head(15)
         .to_string()
     )
-    print(rest_types)
 
     # Normalise the rest group for DEG
     for lyr in ("scvi_counts", "raw_counts", "counts"):
@@ -955,41 +1080,36 @@ def run_preprocessing_pipeline(
     sc.pp.log1p(adata_rest)
 
     # ------------------------------------------------------------------
-    # STEP 6 — Surfaceome filter (GESP genes) applied to BOTH groups
+    # STEP 7 — Surfaceome filter (GESP genes) applied to BOTH groups
     # ------------------------------------------------------------------
-    print("\n--- Step 6: Surfaceome filter (GESP file) ---")
+    print("\n--- Step 7: Surfaceome filter (GESP file) ---")
     surfaceome   = pd.read_csv(surfaceome_path)
     surfaceome.columns = surfaceome.columns.str.strip()
     surf_genes   = surfaceome["Gene"].astype(str).tolist()
     print(f"Surfaceome genes in GESP file: {len(surf_genes)}")
 
-    # Filter malignant cells
     surf_in_mal  = adata_mal.var_names.intersection(surf_genes)
     adata_mal    = adata_mal[:, surf_in_mal].copy()
     print(f"Surfaceome genes in malignant cells: {len(surf_in_mal)}")
 
-    # Filter rest group
     surf_in_rest = adata_rest.var_names.intersection(surf_genes)
     adata_rest   = adata_rest[:, surf_in_rest].copy()
     print(f"Surfaceome genes in rest cells: {len(surf_in_rest)}")
 
-    # Align to common surfaceome genes (intersection of both)
     surf_common  = surf_in_mal.intersection(surf_in_rest)
     adata_mal    = adata_mal[:, surf_common].copy()
     adata_rest   = adata_rest[:, surf_common].copy()
     print(f"Common surfaceome genes (used for DEG): {len(surf_common)}\n")
 
     # ------------------------------------------------------------------
-    # STEP 7 — DEG: malignant epithelial vs non-epithelial rest
+    # STEP 8 — DEG: malignant epithelial vs non-epithelial rest
     #          (FIX 9: correct biological comparison)
     # ------------------------------------------------------------------
-    print("--- Step 7: DEG — malignant epithelial vs non-epithelial rest ---")
+    print("--- Step 8: DEG — malignant epithelial vs non-epithelial rest ---")
 
-    # Tag both groups
     adata_mal.obs["deg_group"]  = "malignant_epithelial"
     adata_rest.obs["deg_group"] = "non_epithelial_rest"
 
-    # Concatenate for DEG
     adata_deg = sc.concat(
         [adata_mal, adata_rest],
         join="outer",
@@ -998,15 +1118,20 @@ def run_preprocessing_pipeline(
     adata_deg.obs_names_make_unique()
     adata_deg.var = adata_mal.var.copy()
 
-    # Fill any NaNs introduced by outer join
     if sp.issparse(adata_deg.X):
         adata_deg.X = adata_deg.X.toarray()
     adata_deg.X = np.nan_to_num(np.array(adata_deg.X, dtype=np.float32), nan=0.0)
     adata_deg.X = sp.csr_matrix(adata_deg.X)
 
     print(f"DEG AnnData: {adata_deg.n_obs} cells × {adata_deg.n_vars} genes")
-    print(f"  malignant_epithelial: {(adata_deg.obs['deg_group'] == 'malignant_epithelial').sum()}")
-    print(f"  non_epithelial_rest:  {(adata_deg.obs['deg_group'] == 'non_epithelial_rest').sum()}")
+    print(
+        f"  malignant_epithelial: "
+        f"{(adata_deg.obs['deg_group'] == 'malignant_epithelial').sum()}"
+    )
+    print(
+        f"  non_epithelial_rest:  "
+        f"{(adata_deg.obs['deg_group'] == 'non_epithelial_rest').sum()}"
+    )
 
     sc.tl.rank_genes_groups(
         adata_deg,
@@ -1018,7 +1143,10 @@ def run_preprocessing_pipeline(
     )
     deg = sc.get.rank_genes_groups_df(adata_deg, group="malignant_epithelial")
     print(f"\nTotal DEG candidates: {deg.shape[0]}")
-    print(f"Applying filters: log2FC > {log2fc_threshold}, pvals_adj < {pval_adj_threshold}")
+    print(
+        f"Applying filters: log2FC > {log2fc_threshold}, "
+        f"pvals_adj < {pval_adj_threshold}"
+    )
 
     filtered_deg = deg[
         (deg["logfoldchanges"] > log2fc_threshold) &
@@ -1036,20 +1164,22 @@ def run_preprocessing_pipeline(
         print(filtered_deg.head(10).to_string(index=False))
 
     # ------------------------------------------------------------------
-    # STEP 8 — Binarise ONLY malignant cells; store results; save
+    # STEP 9 — Binarise ONLY malignant cells; store results; save
     # ------------------------------------------------------------------
-    print("\n--- Step 8: Binarise malignant cells and save ---")
+    print("\n--- Step 9: Binarise malignant cells and save ---")
 
-    # Binarise from the log-normalised .X (which was set from raw in step 2)
-    adata_mal.X = (np.array(adata_mal.X.toarray() if sp.issparse(adata_mal.X)
-                             else adata_mal.X) > 0).astype(np.int8)
+    adata_mal.X = (
+        np.array(
+            adata_mal.X.toarray() if sp.issparse(adata_mal.X) else adata_mal.X
+        ) > 0
+    ).astype(np.int8)
     adata_mal.X = sp.csr_matrix(adata_mal.X)
     print("Expression converted to binary (0/1).")
 
     # Store DEG results
-    adata_mal.uns["filtered_deg"]     = filtered_deg.reset_index(drop=True)
-    adata_mal.uns["all_deg"]          = deg.reset_index(drop=True)
-    adata_mal.uns["deg_params"]       = {
+    adata_mal.uns["filtered_deg"] = filtered_deg.reset_index(drop=True)
+    adata_mal.uns["all_deg"]      = deg.reset_index(drop=True)
+    adata_mal.uns["deg_params"]   = {
         "comparison"         : "malignant_epithelial vs non_epithelial_rest",
         "log2fc_threshold"   : log2fc_threshold,
         "pval_adj_threshold" : pval_adj_threshold,
@@ -1060,21 +1190,27 @@ def run_preprocessing_pipeline(
         "n_filtered_deg"     : int(filtered_deg.shape[0]),
     }
 
-    # FIX 8 — store full inferCNA results in uns for inspection
+    # Echo the QC params used so they stay with the output file
+    adata_mal.uns["qc_params"] = {"min_genes": min_genes, "max_mt": max_mt}
+
+    # FIX 8 — store full inferCNA results
     if infercna_result_df is not None:
-        # Only keep rows for cells that survived to final output
-        final_barcodes    = set(adata_mal.obs_names)
-        infercna_stored   = infercna_result_df.copy()
-        infercna_stored["in_final_output"] = infercna_stored["barcode"].isin(final_barcodes)
+        final_barcodes         = set(adata_mal.obs_names)
+        infercna_stored        = infercna_result_df.copy()
+        infercna_stored["in_final_output"] = infercna_stored["barcode"].isin(
+            final_barcodes
+        )
         adata_mal.uns["infercna_results"] = infercna_stored
 
         print(
             f"\ninferCNA results stored in adata.uns['infercna_results']:\n"
-            f"  Shape: {infercna_stored.shape[0]} rows × {infercna_stored.shape[1]} columns\n"
+            f"  Shape: {infercna_stored.shape[0]} rows × "
+            f"{infercna_stored.shape[1]} columns\n"
             f"  Columns: {list(infercna_stored.columns)}\n"
             f"  Prediction summary (all epithelial cells before filtering):\n"
-            + infercna_stored["infercna_prediction"].value_counts().to_string() + "\n"
-            f"  Cells in final malignant output: {infercna_stored['in_final_output'].sum()}"
+            + infercna_stored["infercna_prediction"].value_counts().to_string()
+            + f"\n  Cells in final malignant output: "
+            f"{infercna_stored['in_final_output'].sum()}"
         )
     else:
         adata_mal.uns["infercna_results"] = None
@@ -1099,6 +1235,7 @@ def run_preprocessing_pipeline(
         f"Full dataset (Module 2 output):    {adata_full.n_obs} cells\n"
         f"Epithelial cells (pre-QC):         {ep_mask.sum()}\n"
         f"Epithelial cells (post-QC):        {before_qc}  →  {adata_epi.n_obs}\n"
+        f"  QC: min_genes>{min_genes}, max_mt<{max_mt}  [{qc_source}]\n"
         f"Malignant epithelial (kept):       {adata_mal.n_obs}\n"
         f"Non-malignant epithelial (removed):{(~malignant_mask).sum()}\n"
         f"Non-epithelial rest (DEG ref):     {adata_rest.n_obs}\n"
