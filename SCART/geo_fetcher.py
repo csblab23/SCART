@@ -44,16 +44,52 @@ TABULA_FILES = {
 
 
 class SampleAnnotator:
+    """
+    Downloads GEO datasets (or accepts pre-built h5ad files), classifies
+    samples as tumour / normal / unspecified, and writes a query h5ad for
+    downstream PopV annotation (Module 2).
 
-    def __init__(self, *inputs):
+    Parameters
+    ----------
+    *inputs : str
+        One or more GEO accession IDs (e.g. "GSE158937") or paths to
+        existing .h5ad files.
+    min_genes : int, optional
+        Minimum number of genes detected per cell used for QC filtering in
+        Module 3 (preprocessing).  The value is stored in
+        ``adata.uns['qc_params']`` of every h5ad written by this module so
+        that Module 3 can read it automatically.
+        Default: 200.
+    max_mt : float, optional
+        Maximum mitochondrial gene percentage per cell used for QC filtering
+        in Module 3.  Stored alongside ``min_genes`` in
+        ``adata.uns['qc_params']``.
+        Default: 40.0.
 
-        self.inputs = list(inputs)
-        self.base_dir = "GSE_data"
+    Usage
+    -----
+    # Default QC thresholds (min_genes=200, max_mt=40)
+    annotator = SampleAnnotator("GSE158937")
+
+    # Custom QC thresholds passed through to Module 3
+    annotator = SampleAnnotator("GSE158937", min_genes=300, max_mt=25)
+
+    normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = annotator.run()
+    """
+
+    def __init__(self, *inputs, min_genes: int = 200, max_mt: float = 40.0):
+
+        self.inputs    = list(inputs)
+        self.base_dir  = "GSE_data"
+
+        # ── QC parameters stored here and written into every h5ad ──────────
+        self.min_genes = min_genes
+        self.max_mt    = max_mt
 
         os.makedirs(self.base_dir, exist_ok=True)
 
-        self.gse_ids = []
-        self.h5ad_inputs = []
+        self.gse_ids      = []
+        self.h5ad_inputs  = []
 
         for item in self.inputs:
             if isinstance(item, str) and item.lower().endswith(".h5ad"):
@@ -61,7 +97,20 @@ class SampleAnnotator:
             else:
                 self.gse_ids.append(item)
 
-    # ✅ NEW FUNCTION
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _store_qc_params(self, adata):
+        """
+        Write QC thresholds into adata.uns['qc_params'] so that Module 3
+        can read them without the user having to re-specify them.
+        """
+        adata.uns["qc_params"] = {
+            "min_genes": self.min_genes,
+            "max_mt":    self.max_mt,
+        }
+
     def _print_reference_guidance(self, cancer_type):
 
         print("\n========== REFERENCE GUIDANCE ==========")
@@ -90,16 +139,20 @@ class SampleAnnotator:
                 print("❌ Not available in Tabula Sapiens")
                 print("👉 Provide your own reference file")
 
+    # ------------------------------------------------------------------
+    # Public entry-point
+    # ------------------------------------------------------------------
+
     def run(self):
 
-        normal = []
-        tumor = []
-        unspecified = []
+        normal       = []
+        tumor        = []
+        unspecified  = []
         annotation_info = {}
-        cancer_type = None
+        cancer_type  = None
 
         tumor_adatas = []
-        results = {}
+        results      = {}
 
         for gse_id in self.gse_ids:
 
@@ -123,39 +176,25 @@ class SampleAnnotator:
             if adata is not None:
                 tumor_adatas.append(adata)
 
-            results[gse_id] = (
-                n,
-                t,
-                u,
-                ann,
-                None,
-                ct
-            )
+            results[gse_id] = (n, t, u, ann, None, ct)
 
         for file in self.h5ad_inputs:
 
             print("\n========== Reading h5ad file ==========")
 
             adata = sc.read_h5ad(file)
-
             adata.obs_names_make_unique()
-
             adata.layers["counts"] = adata.X.copy()
             adata.raw = adata
 
+            # Store QC params in user-supplied h5ad too
+            self._store_qc_params(adata)
+
             tumor_adatas.append(adata)
 
-            results[file] = (
-                [],
-                [],
-                [],
-                {},
-                None,
-                None
-            )
+            results[file] = ([], [], [], {}, None, None)
 
-        query_h5ad = None
-
+        query_h5ad  = None
         total_inputs = len(self.gse_ids) + len(self.h5ad_inputs)
 
         if total_inputs == 1:
@@ -165,100 +204,85 @@ class SampleAnnotator:
                 query_h5ad = f"{self.gse_ids[0]}_tumor.h5ad"
 
                 results[self.gse_ids[0]] = (
-                    normal,
-                    tumor,
-                    unspecified,
-                    annotation_info,
-                    query_h5ad,
-                    cancer_type
+                    normal, tumor, unspecified,
+                    annotation_info, query_h5ad, cancer_type
                 )
 
             elif len(self.h5ad_inputs) == 1:
 
-                adata = tumor_adatas[0]
-
+                adata    = tumor_adatas[0]
                 filename = "input_tumor.h5ad"
 
+                # QC params already stored by the loop above
                 adata.write(filename)
 
                 print("\n========== h5ad created ==========")
                 print(f"{filename} is created successfully")
+                print(
+                    f"QC params stored → "
+                    f"min_genes={self.min_genes}, max_mt={self.max_mt}"
+                )
 
                 query_h5ad = filename
+                key        = self.h5ad_inputs[0]
 
-                key = self.h5ad_inputs[0]
-
-                results[key] = (
-                    [],
-                    [],
-                    [],
-                    {},
-                    query_h5ad,
-                    None
-                )
+                results[key] = ([], [], [], {}, query_h5ad, None)
 
         elif total_inputs > 1 and len(tumor_adatas) > 0:
 
             combined = ad.concat(tumor_adatas, join="outer")
-
             combined.obs_names_make_unique()
-
             combined.layers["counts"] = combined.X.copy()
             combined.raw = combined
+
+            # Store QC params in the combined h5ad
+            self._store_qc_params(combined)
 
             combined.write("combined_tumor.h5ad")
 
             print("\n========== h5ad created ==========")
             print("combined_tumor.h5ad is created successfully")
+            print(
+                f"QC params stored → "
+                f"min_genes={self.min_genes}, max_mt={self.max_mt}"
+            )
 
             query_h5ad = "combined_tumor.h5ad"
 
             for key in results:
-
                 n, t, u, ann, _, ct = results[key]
+                results[key]        = (n, t, u, ann, query_h5ad, ct)
 
-                results[key] = (
-                    n,
-                    t,
-                    u,
-                    ann,
-                    query_h5ad,
-                    ct
-                )
-
-        # ✅ NEW CALL
         self._print_reference_guidance(cancer_type)
 
         return normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results
 
+    # ------------------------------------------------------------------
+    # GEO processing
+    # ------------------------------------------------------------------
+
     def _process_gse(self, gse_id):
 
         gse_dir = os.path.join(self.base_dir, gse_id)
-
         os.makedirs(gse_dir, exist_ok=True)
 
-        gse = GEOparse.get_GEO(
-            geo=gse_id,
-            destdir=gse_dir
-        )
-
+        gse = GEOparse.get_GEO(geo=gse_id, destdir=gse_dir)
         gse.download_supplementary_files(gse_dir)
 
-        normal = []
-        tumor = []
+        normal      = []
+        tumor       = []
         unspecified = []
         annotation_info = {}
 
-        excluded_non_scrna = []
-        excluded_non_human = []
+        excluded_non_scrna  = []
+        excluded_non_human  = []
 
         cancer_type = self._predict_cancer_type(gse)
 
-        tumor_keywords = [
+        tumor_keywords  = [
             "tumor", "tumour", "cancer", "carcinoma",
             "adenocarcinoma", "malignant", "metastatic"
         ]
-
         normal_keywords = [
             "normal", "healthy", "control", "adjacent normal"
         ]
@@ -282,75 +306,69 @@ class SampleAnnotator:
             label = "unspecified"
 
             if any(k in text for k in tumor_keywords):
-
                 tumor.append(gsm_id)
                 label = "tumor"
-
             elif any(k in text for k in normal_keywords):
-
                 normal.append(gsm_id)
                 label = "normal"
-
             else:
-
                 unspecified.append(gsm_id)
 
             annotation_info[gsm_id] = label
 
         print(f"\n========== SAMPLE SUMMARY: {gse_id} ==========")
         print(f"Cancer type: {cancer_type}")
-        print("Normal samples:", ", ".join(normal) if normal else "None")
-        print("Tumor samples:", ", ".join(tumor) if tumor else "None")
-        print("Unspecified samples:", ", ".join(unspecified) if unspecified else "None")
+        print("Normal samples:",      ", ".join(normal)              if normal              else "None")
+        print("Tumor samples:",       ", ".join(tumor)               if tumor               else "None")
+        print("Unspecified samples:", ", ".join(unspecified)         if unspecified         else "None")
         print("Excluded (non-human):", ", ".join(excluded_non_human) if excluded_non_human else "None")
         print("Excluded (non-scRNA):", ", ".join(excluded_non_scrna) if excluded_non_scrna else "None")
 
         return normal, tumor, unspecified, annotation_info, cancer_type
 
-
+    # ------------------------------------------------------------------
 
     def _predict_cancer_type(self, gse):
 
         text = (
-            gse.metadata.get("title", [""])[0] +
+            gse.metadata.get("title",   [""])[0] +
             " " +
             gse.metadata.get("summary", [""])[0]
         ).lower()
 
         cancer_map = {
-            "ovary": ["ovarian"],
-            "uterus": ["uterine", "endometrial"],
-            "lung": ["lung"],
-            "kidney": ["renal", "kidney"],
-            "liver": ["liver", "hepatocellular"],
-            "pancreas": ["pancreatic"],
-            "prostate": ["prostate"],
-            "bladder": ["bladder"],
-            "stomach": ["gastric", "stomach"],
-            "small_intestine": ["small intestine"],
-            "large_intestine": ["colon", "colorectal"],
-            "skin": ["melanoma", "skin"],
-            "brain": ["glioma", "brain"],
-            "blood": ["leukemia"],
-            "lymph_node": ["lymphoma"],
-            "bone_marrow": ["myeloma"],
-            "heart": ["cardiac"],
-            "thyroid": ["thyroid"],
-            "esophagus": ["esophageal"],
-            "trachea": ["trachea"],
-            "tongue": ["tongue"],
+            "ovary":          ["ovarian"],
+            "uterus":         ["uterine", "endometrial"],
+            "lung":           ["lung"],
+            "kidney":         ["renal", "kidney"],
+            "liver":          ["liver", "hepatocellular"],
+            "pancreas":       ["pancreatic"],
+            "prostate":       ["prostate"],
+            "bladder":        ["bladder"],
+            "stomach":        ["gastric", "stomach"],
+            "small_intestine":["small intestine"],
+            "large_intestine":["colon", "colorectal"],
+            "skin":           ["melanoma", "skin"],
+            "brain":          ["glioma", "brain"],
+            "blood":          ["leukemia"],
+            "lymph_node":     ["lymphoma"],
+            "bone_marrow":    ["myeloma"],
+            "heart":          ["cardiac"],
+            "thyroid":        ["thyroid"],
+            "esophagus":      ["esophageal"],
+            "trachea":        ["trachea"],
+            "tongue":         ["tongue"],
             "salivary_gland": ["salivary"],
-            "muscle": ["sarcoma"],
-            "eye": ["ocular"],
-            "ear": ["ear"],
-            "fat": ["liposarcoma"],
-            "vasculature": ["vascular"],
-            "thymus": ["thymoma"],
-            "testis": ["testicular"],
+            "muscle":         ["sarcoma"],
+            "eye":            ["ocular"],
+            "ear":            ["ear"],
+            "fat":            ["liposarcoma"],
+            "vasculature":    ["vascular"],
+            "thymus":         ["thymoma"],
+            "testis":         ["testicular"],
         }
 
         detected = []
-
         for tissue, keywords in cancer_map.items():
             if any(k in text for k in keywords):
                 detected.append(f"{tissue}_cancer")
@@ -360,7 +378,7 @@ class SampleAnnotator:
 
         return ", ".join(sorted(set(detected)))
 
-
+    # ------------------------------------------------------------------
 
     def _read_generic_matrix(self, file_path):
 
@@ -381,7 +399,7 @@ class SampleAnnotator:
         except Exception:
             return None
 
-
+    # ------------------------------------------------------------------
 
     def _build_h5ad(self, gse_id, tumor_samples, save_single=False):
 
@@ -399,12 +417,10 @@ class SampleAnnotator:
             gsm_dir = os.path.join(gse_dir, gsm_id)
 
             if not os.path.isdir(gsm_dir):
-
                 supp_dirs = [
                     d for d in os.listdir(gse_dir)
                     if d.startswith(f"Supp_{gsm_id}")
                 ]
-
                 if len(supp_dirs) > 0:
                     gsm_dir = os.path.join(gse_dir, supp_dirs[0])
                 else:
@@ -412,13 +428,13 @@ class SampleAnnotator:
 
             files = os.listdir(gsm_dir)
 
-            matrix_file = None
+            matrix_file   = None
             features_file = None
             barcodes_file = None
 
             for f in files:
-                if "matrix" in f and f.endswith(".mtx.gz"):
-                    matrix_file = f
+                if "matrix"   in f and f.endswith(".mtx.gz"):
+                    matrix_file   = f
                 elif "features" in f and f.endswith(".tsv.gz"):
                     features_file = f
                 elif "barcodes" in f and f.endswith(".tsv.gz"):
@@ -431,46 +447,38 @@ class SampleAnnotator:
                 try:
                     os.rename(os.path.join(gsm_dir, matrix_file),
                               os.path.join(gsm_dir, "matrix.mtx.gz"))
-                except:
+                except Exception:
                     pass
-
                 try:
                     os.rename(os.path.join(gsm_dir, features_file),
                               os.path.join(gsm_dir, "features.tsv.gz"))
-                except:
+                except Exception:
                     pass
-
                 try:
                     os.rename(os.path.join(gsm_dir, barcodes_file),
                               os.path.join(gsm_dir, "barcodes.tsv.gz"))
-                except:
+                except Exception:
                     pass
 
                 try:
                     print(f"Reading MTX matrix for {gsm_id}")
-
                     adata = sc.read_10x_mtx(
                         gsm_dir,
                         var_names="gene_symbols",
                         cache=False
                     )
-
                 except Exception:
                     print(f"Skipping {gsm_id} (MTX read failed)")
 
             if adata is None:
-
                 for f in files:
-
-                    if any(f.endswith(ext) for ext in [".tsv", ".csv", ".txt", ".gz"]) \
-                       and "matrix" in f.lower():
-
+                    if (
+                        any(f.endswith(ext) for ext in [".tsv", ".csv", ".txt", ".gz"])
+                        and "matrix" in f.lower()
+                    ):
                         file_path = os.path.join(gsm_dir, f)
-
                         print(f"Reading generic matrix for {gsm_id}: {f}")
-
                         adata = self._read_generic_matrix(file_path)
-
                         if adata is not None:
                             break
 
@@ -480,10 +488,8 @@ class SampleAnnotator:
 
             adata.obs["gsm_id"] = gsm_id
             adata.obs["gse_id"] = gse_id
-
             adata.layers["counts"] = adata.X.copy()
             adata.raw = adata
-
             adata.obs_names_make_unique()
 
             adatas.append(adata)
@@ -492,7 +498,6 @@ class SampleAnnotator:
             return None
 
         combined = ad.concat(adatas, join="outer")
-
         combined.obs_names_make_unique()
 
         print("... storing 'gsm_id' as categorical")
@@ -501,7 +506,7 @@ class SampleAnnotator:
         combined.obs["gsm_id"] = combined.obs["gsm_id"].astype("category")
         combined.obs["gse_id"] = combined.obs["gse_id"].astype("category")
 
-        # ✅ ONLY NEW CHANGE
+        # Store cancer type
         cancer_type = self._predict_cancer_type(
             GEOparse.get_GEO(geo=gse_id, destdir=self.base_dir)
         )
@@ -509,10 +514,16 @@ class SampleAnnotator:
             combined.uns["cancer_type"] = cancer_type
             print(f"... stored cancer_type in h5ad: {cancer_type}")
 
+        # ── Store QC params so Module 3 can read them automatically ────────
+        self._store_qc_params(combined)
+        print(
+            f"... stored qc_params in h5ad: "
+            f"min_genes={self.min_genes}, max_mt={self.max_mt}"
+        )
+
         if save_single:
 
             filename = f"{gse_id}_tumor.h5ad"
-
             combined.write(filename)
 
             print("\n========== h5ad created ==========")
