@@ -132,7 +132,14 @@ def _build_fullgene_adata_for_scm(adata, feature_tsv, tumor_h5ad_path=None):
         return len(set(names) & model_features) / n_model * 100
 
     def _make_adata(X, obs, var_names_or_df):
-        """Normalise a raw count matrix and wrap in AnnData."""
+        """
+        Normalise a raw count matrix and wrap in AnnData.
+
+        scMalignantFinder._make_predictions() calls .todense() on adata.X,
+        which only works on scipy sparse matrices — not numpy arrays.
+        After normalize_total + log1p the matrix becomes a dense numpy array,
+        so we convert back to CSR before returning.
+        """
         if sp.issparse(X):
             X = X.toarray()
         X = X.astype(np.float32)
@@ -141,6 +148,8 @@ def _build_fullgene_adata_for_scm(adata, feature_tsv, tumor_h5ad_path=None):
         af = sc.AnnData(X=X, obs=obs, var=var)
         sc.pp.normalize_total(af, target_sum=1e4)
         sc.pp.log1p(af)
+        # Convert to CSR sparse so scMalignantFinder can call .todense()
+        af.X = sp.csr_matrix(af.X)
         return af
 
     # ----------------------------------------------------------------
