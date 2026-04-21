@@ -2,37 +2,51 @@
 preprocessing.py
 Module 3 — Preprocessing, malignancy detection, and surfaceome DEG
 
-GitHub: https://github.com/navinlabcode/SCART
+Data flow across modules
+------------------------
+Module 1 (geo_fetcher.py)
+  Saves:  GSE*_tumor.h5ad
+  Contains: adata.layers['counts']  (raw integer counts, full gene space ~33k)
+            adata.raw = adata        (same data frozen in .raw)
+            adata.uns['cancer_type']
 
-Fixes in this revision
-----------------------
-FIX 1 — scMalignantFinder full-gene rescue without re-running Module 2
-  The current final_popv_annotated.h5ad was generated before the
-  _reattach_raw_slot fix, so adata.raw is None and only 4000 HVGs
-  are available (19% model overlap).
-  New Route A-rescue: loads the original Module 1 tumor h5ad (e.g.
-  GSE158937_tumor.h5ad) which still has adata.raw with all ~33k genes.
-  Pass tumor_h5ad= to the pipeline to activate this route.
-  Auto-detected by searching for *_tumor.h5ad / combined_tumor.h5ad
-  in the current directory if not provided explicitly.
+Module 2 (popv_annotation.py)
+  Reads:  GSE*_tumor.h5ad
+  Saves:  popv_results/final_popv_annotated.h5ad
+  Contains (after FIX 8 layer approach):
+            adata.layers['full_counts']          (raw counts, full gene space)
+            adata.uns['full_counts_var_names']   (list of gene names)
+            adata.layers['scvi_counts']          (4000 HVG subset)
+            popv_majority_vote_prediction column
 
-FIX 2 — inferCNA speed: reference subsampling
-  Loading the full Tabula Sapiens ovary h5ad (~49k cells) and
-  transposing it to a log-CPM genes×cells matrix was the "stuck" step.
-  New parameter infercna_ref_max_cells (default 2000) subsamples the
-  reference epithelial cells to at most this number before passing to R.
-  inferCNA's refCorrect() only needs a stable baseline average —
-  2000 normal cells is more than sufficient for that.
+Module 3 (this file)
+  Reads:  popv_results/final_popv_annotated.h5ad  (auto-detected)
+  Uses:   layers['full_counts']  → Route A-new  (Module 2 FIX 8 path)
+          Auto-found Module 1 h5ad from cwd     → Route A-rescue (no user input)
+          adata.raw                              → Route A-old
+          4000 HVG fallback                     → Route C
 
-FIX 3 — DEG uses pvals_adj (BH-adjusted) not raw pvals (carried over).
+Key fixes
+---------
+FIX 1  Full-gene rescue priority: A-new → A-rescue (auto-detected) → A-old → C.
+       tumor_h5ad is now OPTIONAL — auto-detected from cwd/GSE_data/ without
+       any user input.  Just leave the Module 1 h5ad in the working directory.
 
-All hardcoded paths removed (carried over from previous revision).
+FIX 2  inferCNA reference subsampled to infercna_ref_max_cells=2000.
+
+FIX 3  DEG uses pvals_adj (BH-adjusted) not raw pvals.
+
+FIX 4  inferCNA: auto-cap n to (n_common_genes - 1) — prevents the R error
+       "<ngenes> cannot be larger than nrow(m)".
+
+FIX 5  inferCNA reference: prefer adata.raw over HVG layers.
+
+FIX 6  scMalignantFinder output aligned by obs_names not positional .values.
 """
 
 import os
 import glob
 import logging
-import importlib.resources as pkg_resources
 
 import numpy as np
 import pandas as pd
@@ -44,7 +58,7 @@ logger = logging.getLogger(__name__)
 
 
 # ===========================================================================
-# Auto-detect paths from the installed SCART package
+# Auto-detect paths
 # ===========================================================================
 
 def _find_scart_resource(relative_path):
@@ -86,42 +100,73 @@ def _auto_surfaceome_path():
 
 def _auto_tumor_h5ad():
     """
-    Find the Module 1 tumor h5ad in the current working directory.
-    Searched in order: *_tumor.h5ad, combined_tumor.h5ad, input_tumor.h5ad
+    Auto-detect the Module 1 tumor h5ad from cwd and GSE_data/.
+
+    Search order mirrors geo_fetcher.py output conventions:
+      1. *_tumor.h5ad in cwd          (e.g. GSE158937_tumor.h5ad)
+      2. combined_tumor.h5ad in cwd
+      3. input_tumor.h5ad in cwd
+      4. Same patterns inside GSE_data/
+
     Returns the most recently created match, or None if nothing found.
+    Used as Route A-rescue when Module 2 layers['full_counts'] is absent.
     """
     patterns = ["*_tumor.h5ad", "combined_tumor.h5ad", "input_tumor.h5ad"]
+    search_dirs = [os.getcwd(), os.path.join(os.getcwd(), "GSE_data")]
+
     files = []
-    for pattern in patterns:
-        files.extend(glob.glob(os.path.join(os.getcwd(), pattern)))
-        files.extend(glob.glob(os.path.join(os.getcwd(), "GSE_data", pattern)))
+    for d in search_dirs:
+        for pattern in patterns:
+            files.extend(glob.glob(os.path.join(d, pattern)))
+
     files = list(set(files))
     if not files:
         return None
-    return max(files, key=os.path.getctime)
+
+    found = max(files, key=os.path.getctime)
+    logger.info(f"Auto-detected Module 1 tumor h5ad: {found}")
+    return found
+
+
+def _auto_popv_h5ad():
+    """
+    Auto-detect the Module 2 PopV output h5ad.
+
+    Search order:
+      1. popv_results/final_popv_annotated.h5ad  (default Module 2 output dir)
+      2. final_popv_annotated.h5ad in cwd
+    """
+    candidates = [
+        os.path.join("popv_results", "final_popv_annotated.h5ad"),
+        "final_popv_annotated.h5ad",
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return None
 
 
 # ===========================================================================
-# FIX 1 — Build full-gene AnnData for scMalignantFinder
+# FIX 1 - Build full-gene AnnData for scMalignantFinder
 # ===========================================================================
 
 def _build_fullgene_adata_for_scm(adata, feature_tsv, tumor_h5ad_path=None):
     """
     Return a log-normalised AnnData covering the full original gene space.
 
-    Route A-rescue  Load original Module 1 tumor h5ad → adata.raw (~33k genes)
-                    This is the primary fix for the 19% overlap problem when
-                    Module 2 was run before the _reattach_raw_slot fix.
-                    Activated when tumor_h5ad_path is provided (or auto-detected).
+    Route priority
+    --------------
+    A-new     layers['full_counts'] in current adata (from Module 2 FIX 8).
+              Primary path when Module 2 is up to date.
 
-    Route A-new     layers['full_counts'] + uns['full_counts_var_names']
-                    Written by Module 2 FIX 8 (future runs).
+    A-rescue  Module 1 tumor h5ad. Auto-detected from cwd/GSE_data/ with no
+              user input required. Activated when A-new is unavailable.
 
-    Route A-old     adata.raw  (if Module 2 FIX 8 was applied)
+    A-old     adata.raw (earlier Module 2 approach).
 
-    Route B         uns['full_var_names']
+    B         uns['full_var_names'] (SCART-internal fallback).
 
-    Route C         4000-HVG fallback with warning
+    C         4000-HVG fallback with loud warning.
     """
     model_features = set(
         pd.read_csv(feature_tsv, sep="\t", header=None)[0].tolist()
@@ -133,12 +178,8 @@ def _build_fullgene_adata_for_scm(adata, feature_tsv, tumor_h5ad_path=None):
 
     def _make_adata(X, obs, var_names_or_df):
         """
-        Normalise a raw count matrix and wrap in AnnData.
-
-        scMalignantFinder._make_predictions() calls .todense() on adata.X,
-        which only works on scipy sparse matrices — not numpy arrays.
-        After normalize_total + log1p the matrix becomes a dense numpy array,
-        so we convert back to CSR before returning.
+        Wrap raw counts in a log-normalised AnnData.
+        Returns CSR sparse so scMalignantFinder can call .todense().
         """
         if sp.issparse(X):
             X = X.toarray()
@@ -148,93 +189,11 @@ def _build_fullgene_adata_for_scm(adata, feature_tsv, tumor_h5ad_path=None):
         af = sc.AnnData(X=X, obs=obs, var=var)
         sc.pp.normalize_total(af, target_sum=1e4)
         sc.pp.log1p(af)
-        # Convert to CSR sparse so scMalignantFinder can call .todense()
         af.X = sp.csr_matrix(af.X)
         return af
 
     # ----------------------------------------------------------------
-    # Route A-rescue: reload Module 1 tumor h5ad raw slot
-    # ----------------------------------------------------------------
-    if tumor_h5ad_path is not None and os.path.exists(tumor_h5ad_path):
-        logger.info(f"Route A-rescue: loading raw slot from {tumor_h5ad_path}")
-        try:
-            adata_m1 = sc.read_h5ad(tumor_h5ad_path)
-            # Module 1 sets adata.raw = adata before any processing
-            raw_src = None
-            raw_var = None
-
-            if adata_m1.raw is not None:
-                raw_var = adata_m1.raw.var_names
-                ov = _pct(raw_var)
-                logger.info(
-                    f"Route A-rescue (adata_m1.raw): "
-                    f"{adata_m1.raw.n_vars} genes, {ov:.1f}% overlap"
-                )
-                if ov >= 50:
-                    # Align cells: Module 1 h5ad may have more cells than
-                    # the QC-filtered adata; subset to matching obs_names.
-                    shared = adata.obs_names.intersection(adata_m1.obs_names)
-                    if len(shared) == 0:
-                        logger.warning(
-                            "Route A-rescue: no shared obs_names between "
-                            "current adata and Module 1 h5ad. "
-                            "Trying adata_m1.X directly."
-                        )
-                        # Fall through to X-based approach below
-                    else:
-                        m1_sub = adata_m1[shared].copy()
-                        # Re-order to match current adata cell order
-                        current_order = [
-                            c for c in adata.obs_names if c in set(shared)
-                        ]
-                        m1_sub = m1_sub[current_order]
-                        X_raw = m1_sub.raw.X
-                        af = _make_adata(X_raw, adata.obs.copy(), m1_sub.raw.var.copy())
-                        logger.info(
-                            f"scMalignantFinder using Route A-rescue "
-                            f"({af.n_vars} genes, {ov:.1f}% overlap)."
-                        )
-                        return af
-
-            # Fallback inside rescue: use adata_m1.layers['counts'] or .X
-            for lyr in ("counts", "raw_counts", "scvi_counts"):
-                if lyr in adata_m1.layers:
-                    raw_var = adata_m1.var_names
-                    ov = _pct(raw_var)
-                    logger.info(
-                        f"Route A-rescue (layers['{lyr}']): "
-                        f"{len(raw_var)} genes, {ov:.1f}% overlap"
-                    )
-                    if ov >= 50:
-                        shared = adata.obs_names.intersection(adata_m1.obs_names)
-                        if len(shared) > 0:
-                            current_order = [
-                                c for c in adata.obs_names if c in set(shared)
-                            ]
-                            m1_sub = adata_m1[current_order]
-                            X_raw = m1_sub.layers[lyr]
-                            af = _make_adata(
-                                X_raw,
-                                adata.obs.copy(),
-                                m1_sub.var.copy()
-                            )
-                            logger.info(
-                                f"scMalignantFinder using Route A-rescue "
-                                f"(layers['{lyr}'], {af.n_vars} genes, {ov:.1f}% overlap)."
-                            )
-                            return af
-                    break
-
-        except Exception as exc:
-            logger.warning(f"Route A-rescue failed: {exc}. Trying next route.")
-    else:
-        if tumor_h5ad_path is not None:
-            logger.warning(
-                f"Route A-rescue: provided tumor_h5ad={tumor_h5ad_path!r} not found."
-            )
-
-    # ----------------------------------------------------------------
-    # Route A-new: layers['full_counts']
+    # Route A-new: layers['full_counts'] written by Module 2 FIX 8
     # ----------------------------------------------------------------
     if "full_counts" in adata.layers:
         var_names = adata.uns.get("full_counts_var_names", None)
@@ -256,7 +215,89 @@ def _build_fullgene_adata_for_scm(adata, feature_tsv, tumor_h5ad_path=None):
                     f"({af.n_vars} genes, {ov:.1f}% overlap)."
                 )
                 return af
-            logger.warning(f"Route A-new overlap {ov:.1f}% < 50% — trying A-old.")
+            logger.warning(
+                f"Route A-new overlap {ov:.1f}% < 50% — trying Route A-rescue."
+            )
+        else:
+            logger.warning(
+                "layers['full_counts'] present but gene names mismatch or missing. "
+                "Trying Route A-rescue."
+            )
+
+    # ----------------------------------------------------------------
+    # Route A-rescue: auto-detect Module 1 tumor h5ad (no user input needed)
+    # ----------------------------------------------------------------
+    rescue_path = tumor_h5ad_path or _auto_tumor_h5ad()
+
+    if rescue_path is not None and os.path.exists(rescue_path):
+        logger.info(f"Route A-rescue: loading from {rescue_path}")
+        try:
+            adata_m1 = sc.read_h5ad(rescue_path)
+
+            # Prefer adata.raw (geo_fetcher sets adata.raw = adata)
+            if adata_m1.raw is not None:
+                raw_var = adata_m1.raw.var_names
+                ov = _pct(raw_var)
+                logger.info(
+                    f"Route A-rescue (adata_m1.raw): "
+                    f"{adata_m1.raw.n_vars} genes, {ov:.1f}% overlap"
+                )
+                if ov >= 50:
+                    shared = adata.obs_names.intersection(adata_m1.obs_names)
+                    if len(shared) > 0:
+                        current_order = [c for c in adata.obs_names if c in set(shared)]
+                        m1_sub = adata_m1[current_order]
+                        af = _make_adata(
+                            m1_sub.raw.X,
+                            adata.obs.loc[current_order].copy(),
+                            m1_sub.raw.var.copy()
+                        )
+                        logger.info(
+                            f"scMalignantFinder using Route A-rescue "
+                            f"({af.n_vars} genes, {ov:.1f}% overlap)."
+                        )
+                        return af
+                    logger.warning(
+                        "Route A-rescue: no shared obs_names — "
+                        "trying layers inside Module 1 h5ad."
+                    )
+
+            # Fallback within rescue: layers['counts']
+            for lyr in ("counts", "raw_counts", "scvi_counts"):
+                if lyr in adata_m1.layers:
+                    raw_var = adata_m1.var_names
+                    ov = _pct(raw_var)
+                    logger.info(
+                        f"Route A-rescue (layers['{lyr}']): "
+                        f"{len(raw_var)} genes, {ov:.1f}% overlap"
+                    )
+                    if ov >= 50:
+                        shared = adata.obs_names.intersection(adata_m1.obs_names)
+                        if len(shared) > 0:
+                            current_order = [c for c in adata.obs_names if c in set(shared)]
+                            m1_sub = adata_m1[current_order]
+                            af = _make_adata(
+                                m1_sub.layers[lyr],
+                                adata.obs.loc[current_order].copy(),
+                                m1_sub.var.copy()
+                            )
+                            logger.info(
+                                f"scMalignantFinder using Route A-rescue "
+                                f"(layers['{lyr}'], {af.n_vars} genes, {ov:.1f}% overlap)."
+                            )
+                            return af
+                    break
+
+        except Exception as exc:
+            logger.warning(f"Route A-rescue failed: {exc}. Trying Route A-old.")
+
+    elif rescue_path is not None:
+        logger.warning(f"Route A-rescue path not found: {rescue_path!r}")
+    else:
+        logger.info(
+            "Route A-rescue: no Module 1 h5ad found in cwd or GSE_data/. "
+            "Trying Route A-old."
+        )
 
     # ----------------------------------------------------------------
     # Route A-old: adata.raw
@@ -267,11 +308,7 @@ def _build_fullgene_adata_for_scm(adata, feature_tsv, tumor_h5ad_path=None):
             f"Route A-old (adata.raw): {adata.raw.n_vars} genes, {ov:.1f}% overlap"
         )
         if ov >= 50:
-            af = _make_adata(
-                adata.raw.X,
-                adata.obs.copy(),
-                adata.raw.var.copy()
-            )
+            af = _make_adata(adata.raw.X, adata.obs.copy(), adata.raw.var.copy())
             logger.info("scMalignantFinder using Route A-old.")
             return af
         logger.warning(f"Route A-old overlap {ov:.1f}% < 50% — trying Route B.")
@@ -290,50 +327,82 @@ def _build_fullgene_adata_for_scm(adata, feature_tsv, tumor_h5ad_path=None):
                     X = X.toarray()
                 if X.shape[1] == len(full_var) and ov >= 50:
                     af = _make_adata(X, adata.obs.copy(), full_var)
-                    logger.info(
-                        f"scMalignantFinder using Route B (layers['{lyr}'])."
-                    )
+                    logger.info(f"scMalignantFinder using Route B (layers['{lyr}']).")
                     return af
 
     # ----------------------------------------------------------------
-    # Route C — fallback (19% overlap)
+    # Route C — 4000 HVG fallback
     # ----------------------------------------------------------------
     ov_hvg = _pct(adata.var_names)
+    auto_rescue = _auto_tumor_h5ad()
     logger.warning(
         f"All routes failed. Falling back to {adata.n_vars} HVGs "
         f"({ov_hvg:.1f}% overlap).\n"
-        "To fix without re-running Module 2:\n"
-        "  Pass tumor_h5ad='/path/to/GSE158937_tumor.h5ad' to the pipeline.\n"
-        "For future runs: update Module 2 (popv_annotation.py FIX 8)."
+        "Diagnosis:\n"
+        "  1. Is Module 2 up to date with FIX 8?\n"
+        "     Check adata.uns.get('full_counts_var_names') is not None\n"
+        "  2. Is the Module 1 h5ad in cwd or GSE_data/?\n"
+        f"     Auto-search found: {auto_rescue}"
     )
     return adata.copy()
 
 
 # ===========================================================================
-# Helper: extract raw count matrix
+# FIX 5 - Helper: raw count matrix (adata.raw first, then layers)
 # ===========================================================================
 
 def _get_raw_matrix(adata):
-    """Return a dense float64 (cells × genes) array of raw integer counts."""
+    """
+    Return a dense float64 (cells x genes) array of raw integer counts.
+
+    FIX 5: Check adata.raw BEFORE layers.
+    The Tabula Sapiens reference h5ad has adata.raw with ~30k genes but
+    also HVG layers with only 4000 genes. Checking adata.raw first gives
+    ~15-25k common genes with the query for proper CNA inference.
+    """
+    if adata.raw is not None:
+        raw_n = adata.raw.n_vars
+        layer_n = max(
+            (adata.layers[l].shape[1]
+             for l in ("full_counts", "scvi_counts", "raw_counts", "counts")
+             if l in adata.layers),
+            default=0
+        )
+        if raw_n > layer_n:
+            logger.info(
+                f"Raw counts from adata.raw ({raw_n} genes > "
+                f"best layer {layer_n} genes)"
+            )
+            X = adata.raw.X
+            if sp.issparse(X):
+                X = X.toarray()
+            return np.array(X, dtype=np.float64)
+
     for lyr in ("full_counts", "scvi_counts", "raw_counts", "counts"):
         if lyr in adata.layers:
             logger.info(f"Raw counts from adata.layers['{lyr}']")
             X = adata.layers[lyr]
-            break
+            if sp.issparse(X):
+                X = X.toarray()
+            return np.array(X, dtype=np.float64)
+
+    if adata.raw is not None:
+        logger.info("Raw counts from adata.raw.X (fallback)")
+        X = adata.raw.X
     else:
-        if adata.raw is not None:
-            logger.info("Raw counts from adata.raw.X")
-            X = adata.raw.X
-        else:
-            logger.info("No raw layer — assuming adata.X is raw counts")
-            X = adata.X
+        logger.warning(
+            "No raw layer or adata.raw — using adata.X which may be "
+            "log-normalised. inferCNA results may be unreliable."
+        )
+        X = adata.X
+
     if sp.issparse(X):
         X = X.toarray()
     return np.array(X, dtype=np.float64)
 
 
 # ===========================================================================
-# inferCNA  (via rpy2) — official tutorial step order
+# inferCNA  (via rpy2)
 # ===========================================================================
 
 def _run_infercna(
@@ -346,37 +415,10 @@ def _run_infercna(
     ref_max_cells=2000,
 ):
     """
-    Run inferCNA following the official tutorial step order:
-    https://rdrr.io/github/jlaffy/infercna/f/vignettes/infercna_tutorial.Rmd
+    Run inferCNA (official tutorial step order).
 
-    Step 1  useGenome()   — set built-in chromosome coordinate table
-    Step 2  infercna()    — CNA inference on combined (query + ref) matrix
-    Step 3  strip ref     — remove reference columns from cna result
-    Step 4  findMalignant()  — bimodal Gaussian fitting on full cna
-
-    FIX 2 — reference subsampling
-    The Tabula Sapiens ovary h5ad has ~49k cells.  Building a genes×cells
-    matrix for all of them took several minutes and appeared to "hang".
-    refCorrect() only needs a stable average of the normal baseline;
-    ref_max_cells=2000 epithelial reference cells is more than sufficient.
-    Subsampling is done BEFORE building the R matrix, keeping the
-    Python-side work small.
-
-    Parameters
-    ----------
-    adata_query      : AnnData  Query epithelial cells (raw counts).
-    adata_ref        : AnnData  Normal reference (Tabula Sapiens tissue h5ad).
-    genome           : str      'hg19' (default, built-in) or 'hg38'.
-    n                : int      Most-variable genes to keep (default 5000).
-    noise            : float    Exclude genes with range < noise (default 0.1).
-    signal_threshold : float    Top fraction for cnaSignal/cnaCor (default 0.9).
-    ref_max_cells    : int      Max reference epithelial cells to pass to R
-                                (default 2000). Reduces memory and runtime.
-
-    Returns
-    -------
-    pd.Series  Index = all query barcodes.
-               Values = 'malignant' | 'non-malignant' | 'not.defined'
+    FIX 4: n auto-capped to (n_common_genes - 1).
+    FIX 5: _get_raw_matrix() prefers adata.raw for the reference.
     """
     try:
         import rpy2.robjects as ro
@@ -384,7 +426,7 @@ def _run_infercna(
     except ImportError as exc:
         raise ImportError(
             "rpy2 is required to run inferCNA.\n"
-            "Install: pip install rpy2\n"
+            "Install: conda install -c conda-forge rpy2\n"
             "R package: devtools::install_github('jlaffy/infercna')"
         ) from exc
 
@@ -393,14 +435,10 @@ def _run_infercna(
     except Exception as exc:
         raise ImportError(
             "R package 'infercna' not found.\n"
-            "Install in R:\n"
-            "  install.packages('devtools')\n"
-            "  devtools::install_github('jlaffy/infercna')"
+            "In R: devtools::install_github('jlaffy/infercna')"
         ) from exc
 
-    # ------------------------------------------------------------------
-    # FIX 2 — subsample reference epithelial cells
-    # ------------------------------------------------------------------
+    # FIX 2 - subsample reference epithelial cells
     EPITHELIAL = {
         "epithelial cell",
         "glandular epithelial cell",
@@ -409,55 +447,59 @@ def _run_infercna(
     if "cell_ontology_class" in adata_ref.obs.columns:
         ep_mask = adata_ref.obs["cell_ontology_class"].str.lower().isin(EPITHELIAL)
         adata_ref_ep = adata_ref[ep_mask].copy() if ep_mask.any() else adata_ref.copy()
+        logger.info(f"inferCNA reference epithelial cells: {adata_ref_ep.n_obs}")
     else:
         adata_ref_ep = adata_ref.copy()
 
-    # Subsample to ref_max_cells
     if adata_ref_ep.n_obs > ref_max_cells:
         rng = np.random.default_rng(seed=42)
         idx = rng.choice(adata_ref_ep.n_obs, size=ref_max_cells, replace=False)
         adata_ref_ep = adata_ref_ep[np.sort(idx)].copy()
-        logger.info(
-            f"inferCNA reference subsampled to {ref_max_cells} epithelial cells "
-            f"(was {ep_mask.sum() if 'cell_ontology_class' in adata_ref.obs.columns else adata_ref.n_obs})."
-        )
-    else:
-        logger.info(f"inferCNA reference: {adata_ref_ep.n_obs} epithelial cells")
+        logger.info(f"Reference subsampled to {ref_max_cells} cells.")
 
-    # ------------------------------------------------------------------
-    # Build log-CPM matrices (genes × cells)
-    # ------------------------------------------------------------------
+    # Build log-CPM matrices (FIX 5: _get_raw_matrix checks .raw first)
     def _to_log_cpm(adata_obj):
         X  = _get_raw_matrix(adata_obj)
         rs = X.sum(axis=1, keepdims=True)
         rs[rs == 0] = 1
-        return np.log1p(X / rs * 1e6).T   # genes × cells
+        return np.log1p(X / rs * 1e6).T
 
     logger.info("inferCNA: building query log-CPM matrix ...")
     mat_query = _to_log_cpm(adata_query)
     logger.info("inferCNA: building reference log-CPM matrix ...")
     mat_ref   = _to_log_cpm(adata_ref_ep)
 
-    # ------------------------------------------------------------------
-    # Align to common genes
-    # ------------------------------------------------------------------
     q_genes = np.array(adata_query.var_names)
-    r_genes = np.array(adata_ref_ep.var_names)
-    common  = np.intersect1d(q_genes, r_genes)
-    logger.info(f"inferCNA common genes: {len(common)}")
+    if adata_ref_ep.raw is not None and \
+            adata_ref_ep.raw.n_vars > max(
+                (adata_ref_ep.layers[l].shape[1]
+                 for l in ("scvi_counts", "raw_counts", "counts")
+                 if l in adata_ref_ep.layers),
+                default=0):
+        r_genes = np.array(adata_ref_ep.raw.var_names)
+    else:
+        r_genes = np.array(adata_ref_ep.var_names)
 
-    if len(common) < 200:
+    common   = np.intersect1d(q_genes, r_genes)
+    n_common = len(common)
+    logger.info(f"inferCNA common genes: {n_common}")
+
+    if n_common < 200:
         raise ValueError(
-            f"Only {len(common)} common genes between query and reference. "
-            "Check that both use HGNC gene symbols."
+            f"Only {n_common} common genes. Need >= 200.\n"
+            "Check both datasets use HGNC gene symbols."
+        )
+    if n_common < 2000:
+        logger.warning(
+            f"Only {n_common} common genes — inferCNA works best with 5000+."
         )
 
-    if len(common) < 2000:
+    # FIX 4 - auto-cap n
+    n_safe = min(n, n_common - 1)
+    if n_safe < n:
         logger.warning(
-            f"Only {len(common)} common genes found. "
-            "The reference may be HVG-filtered (e.g. scvi_counts has only 4000 genes). "
-            "inferCNA works best with 5000+ genes. "
-            "The reference's raw counts will be used if available via adata.raw."
+            f"FIX 4: infercna_n={n} capped to {n_safe} "
+            f"(must be < n_common_genes={n_common})."
         )
 
     q_idx = np.where(np.isin(q_genes, common))[0]
@@ -465,55 +507,35 @@ def _run_infercna(
 
     mat_combined = np.hstack([mat_query[q_idx, :], mat_ref[r_idx, :]])
     sub_genes    = q_genes[q_idx]
-
     q_barcodes   = np.array(adata_query.obs_names)
     ref_barcodes = np.array(["REF_" + b for b in adata_ref_ep.obs_names])
     all_barcodes = np.concatenate([q_barcodes, ref_barcodes])
 
     logger.info(
-        f"inferCNA combined matrix: {mat_combined.shape[0]} genes × "
+        f"inferCNA matrix: {mat_combined.shape[0]} genes x "
         f"{mat_combined.shape[1]} cells "
-        f"({len(q_barcodes)} query + {len(ref_barcodes)} ref)"
+        f"({len(q_barcodes)} query + {len(ref_barcodes)} ref), n_safe={n_safe}"
     )
 
-    # ------------------------------------------------------------------
-    # Pass data to R.
-    #
-    # rpy2 compatibility: assigning a numpy ndarray to ro.globalenv[]
-    # raises NotImplementedError in rpy2 >= 3.5 unless a numpy converter
-    # is active.  The safest approach that works across ALL rpy2 versions
-    # is to use only native rpy2 scalar types (FloatVector, StrVector,
-    # IntVector) which never require a converter.
-    # The numpy array is flattened to a plain Python list via .tolist()
-    # before wrapping in FloatVector -- no converter needed at all.
-    # ------------------------------------------------------------------
-    logger.info("inferCNA: transferring matrix to R ...")
-
+    logger.info("inferCNA: transferring to R ...")
     ro.globalenv["mat_flat"]     = ro.FloatVector(mat_combined.flatten(order="F").tolist())
     ro.globalenv["n_rows"]       = ro.IntVector([mat_combined.shape[0]])
     ro.globalenv["n_cols"]       = ro.IntVector([mat_combined.shape[1]])
     ro.globalenv["all_barcodes"] = ro.StrVector(all_barcodes.tolist())
     ro.globalenv["ref_barcodes"] = ro.StrVector(ref_barcodes.tolist())
     ro.globalenv["gene_names"]   = ro.StrVector(sub_genes.tolist())
-    ro.globalenv["n_genes"]      = ro.IntVector([n])
+    ro.globalenv["n_genes"]      = ro.IntVector([n_safe])
     ro.globalenv["noise_val"]    = ro.FloatVector([noise])
     ro.globalenv["sig_thresh"]   = ro.FloatVector([signal_threshold])
     ro.globalenv["genome_name"]  = ro.StrVector([genome])
 
     logger.info("inferCNA: running R steps ...")
-
     ro.r("""
         library(infercna)
-
-        # Reconstruct matrix from flat vector (avoids numpy converter)
         r_mat <- matrix(mat_flat, nrow=n_rows, ncol=n_cols)
         rownames(r_mat) <- gene_names
         colnames(r_mat) <- all_barcodes
-
-        # STEP 1: useGenome -- built-in string key, NOT a file path
         useGenome(genome_name)
-
-        # STEP 2: infercna on combined matrix (query + ref cells)
         cna <- infercna(
             m        = r_mat,
             refCells = list(normal_ref = ref_barcodes),
@@ -522,17 +544,10 @@ def _run_infercna(
             isLog    = TRUE,
             verbose  = FALSE
         )
-
-        # STEP 3: strip reference columns -> cnaM (query only)
         cnaM <- cna[, !colnames(cna) %in% ref_barcodes, drop = FALSE]
-
-        # STEP 4: findMalignant on FULL cna
-        # samples = per-cell label vector aligned to all columns of cna
-        # excludeFromAvg = ref barcodes so they don't bias tumour average
         n_query    <- ncol(cna) - length(ref_barcodes)
         n_ref      <- length(ref_barcodes)
         sample_vec <- c(rep("tumor", n_query), rep("normal", n_ref))
-
         modes <- tryCatch(
             findMalignant(
                 cna              = cna,
@@ -540,19 +555,11 @@ def _run_infercna(
                 samples          = sample_vec,
                 excludeFromAvg   = ref_barcodes
             ),
-            error = function(e) {
-                message("findMalignant error: ", conditionMessage(e))
-                NULL
-            }
+            error = function(e) { message("findMalignant error: ", conditionMessage(e)); NULL }
         )
     """)
 
     modes = ro.globalenv["modes"]
-
-    # ------------------------------------------------------------------
-    # Parse R result → Python Series indexed by all query barcodes
-    # ------------------------------------------------------------------
-    # modes is NULL / FALSE when bimodal fitting fails
     is_null_or_false = (
         modes is ro.rinterface.NULL
         or (hasattr(modes, "typeof") and str(modes.typeof) == "logical")
@@ -562,17 +569,11 @@ def _run_infercna(
 
     if is_null_or_false:
         logger.warning(
-            "inferCNA findMalignant() returned NULL/FALSE — bimodal fit "
-            "did not converge (likely unimodal CNA distribution).\n"
+            "inferCNA findMalignant() returned NULL/FALSE.\n"
             "All query cells labelled 'not.defined'.\n"
-            "Try lowering infercna_signal_threshold (e.g. 0.75) or "
-            "infercna_n (e.g. 3000)."
+            "Try: infercna_signal_threshold=0.75"
         )
-        return pd.Series(
-            "not.defined",
-            index=q_barcodes,
-            name="infercna_prediction",
-        )
+        return pd.Series("not.defined", index=q_barcodes, name="infercna_prediction")
 
     label_map = {}
     for key in list(modes.names):
@@ -597,21 +598,16 @@ def _run_infercna(
 def run_preprocessing_pipeline(
     adata=None,
     popv_path=None,
-    # QC
     min_genes=200,
     max_mt=40.0,
-    # DEG  (FIX 3: pvals_adj)
     log2fc_threshold=1.0,
     pval_adj_threshold=0.05,
-    # paths (all auto-detected if not given)
     reference_h5ad=None,
     tumor_h5ad=None,
     save_dir=None,
     scmalignant_model_dir=None,
     surfaceome_path=None,
-    # malignancy logic
     malignant_strategy="union",
-    # inferCNA parameters
     infercna_genome="hg19",
     infercna_n=5000,
     infercna_noise=0.1,
@@ -624,55 +620,33 @@ def run_preprocessing_pipeline(
     Parameters
     ----------
     adata : AnnData or None
-        If None, auto-loads from popv_path or
-        'popv_results/final_popv_annotated.h5ad'.
+        If None, auto-loads from popv_results/final_popv_annotated.h5ad.
     popv_path : str or None
-        Explicit path to the PopV output h5ad.
+        Explicit path to the PopV output h5ad (overrides auto-detection).
     min_genes : int        Minimum genes per cell (QC). Default 200.
-    max_mt : float         Maximum mitochondrial % (QC). Default 40.
-    log2fc_threshold : float
-        Log2FC cutoff for DEG (default 1.0 = 2-fold change).
-    pval_adj_threshold : float
-        BH-adjusted p-value cutoff for DEG (default 0.05).
-        If 0 DEGs result, try 0.10 or lower log2fc_threshold.
+    max_mt : float         Maximum mitochondrial %. Default 40.
+    log2fc_threshold : float   Log2FC cutoff for DEG. Default 1.0.
+    pval_adj_threshold : float BH-adjusted p-value cutoff. Default 0.05.
     reference_h5ad : str or None
-        Tabula Sapiens tissue-matched reference for inferCNA.
-        Same file used in the PopV module works fine.
-        If None, inferCNA is skipped.
+        Tabula Sapiens reference for inferCNA. inferCNA skipped if None.
     tumor_h5ad : str or None
-        Path to the original Module 1 output h5ad (e.g. GSE158937_tumor.h5ad).
-        Used by Route A-rescue to recover the full ~33k gene space for
-        scMalignantFinder without re-running Module 2.
-        Auto-detected from the current directory if not given.
-    save_dir : str or None
-        Output directory. Defaults to 'preprocessing_results/' in cwd.
-    scmalignant_model_dir : str or None
-        Auto-detected from SCART package if not given.
-    surfaceome_path : str or None
-        Auto-detected from SCART package if not given.
+        Module 1 output h5ad for Route A-rescue full-gene space.
+        OPTIONAL — auto-detected from cwd and GSE_data/ if not given.
+        Leave the GSE*_tumor.h5ad in the working directory and this
+        parameter does not need to be set at all.
+    save_dir : str or None    Output dir. Default 'preprocessing_results/'.
+    scmalignant_model_dir : str or None   Auto-detected from SCART.
+    surfaceome_path : str or None         Auto-detected from SCART.
     malignant_strategy : str
         'union' | 'intersection' | 'scMalignant' | 'infercna'
-    infercna_genome : str
-        'hg19' (default, bundled in R package) or 'hg38'.
-        This is a string KEY — not a file path.
-    infercna_n : int
-        Most-variable genes to retain before CNA inference (default 5000).
-    infercna_noise : float
-        Exclude genes with expression range < noise (default 0.1).
-    infercna_signal_threshold : float
-        Top fraction for cnaSignal/cnaCor (default 0.9).
-        Lower to 0.75 if findMalignant() returns not.defined for all cells.
-    infercna_ref_max_cells : int
-        Maximum reference epithelial cells passed to R (default 2000).
-        Reduces memory and runtime; 2000 cells gives a stable baseline.
-
-    Returns
-    -------
-    AnnData  Binary expression matrix over surfaceome DEGs.
+    infercna_genome : str   'hg19' (default) or 'hg38'. String key, not file.
+    infercna_n : int        Top genes for CNA. Default 5000. Auto-capped.
+    infercna_noise : float  Noise floor. Default 0.1.
+    infercna_signal_threshold : float  Default 0.9. Lower to 0.75 if needed.
+    infercna_ref_max_cells : int  Reference cells passed to R. Default 2000.
     """
     print("\n========== START ==========\n")
 
-    # --- Resolve paths ------------------------------------------------------
     if save_dir is None:
         save_dir = os.path.join(os.getcwd(), "preprocessing_results")
     os.makedirs(save_dir, exist_ok=True)
@@ -686,60 +660,54 @@ def run_preprocessing_pipeline(
         surfaceome_path = _auto_surfaceome_path()
     logger.info(f"Surfaceome path: {surfaceome_path}")
 
-    # Auto-detect Module 1 tumor h5ad for Route A-rescue
-    if tumor_h5ad is None:
-        tumor_h5ad = _auto_tumor_h5ad()
-        if tumor_h5ad is not None:
-            logger.info(f"Auto-detected tumor h5ad for Route A-rescue: {tumor_h5ad}")
-        else:
-            logger.info(
-                "No tumor h5ad found in current directory. "
-                "Route A-rescue disabled. Pass tumor_h5ad= to enable it."
-            )
-
-    # --- Auto-load adata ----------------------------------------------------
+    # Auto-load PopV output
     if adata is None:
-        for path in [popv_path,
-                     "popv_results/final_popv_annotated.h5ad",
-                     "final_popv_annotated.h5ad"]:
-            if path and os.path.exists(path):
+        candidates = []
+        if popv_path:
+            candidates.append(popv_path)
+        auto = _auto_popv_h5ad()
+        if auto:
+            candidates.append(auto)
+        for path in candidates:
+            if os.path.exists(path):
                 print(f"Loading PopV output: {path}")
                 adata = sc.read_h5ad(path)
                 break
         if adata is None:
             raise FileNotFoundError(
-                "Could not auto-detect PopV output. "
-                "Pass adata= or popv_path= explicitly."
+                "Could not auto-detect PopV output.\n"
+                "Expected: popv_results/final_popv_annotated.h5ad\n"
+                "Pass adata= or popv_path= explicitly if file is elsewhere."
             )
 
     # Report gene-space status
-    if tumor_h5ad and os.path.exists(tumor_h5ad):
-        print(f"Route A-rescue enabled: {tumor_h5ad}")
-    elif "full_counts" in adata.layers:
-        print(f"Route A-new available: layers['full_counts']")
-    elif adata.raw is not None:
-        print(f"Route A-old available: adata.raw ({adata.raw.n_vars} genes)")
+    if "full_counts" in adata.layers and \
+            adata.uns.get("full_counts_var_names") is not None:
+        n_full = len(adata.uns["full_counts_var_names"])
+        print(f"Route A-new: layers['full_counts'] ({n_full} genes from Module 2 FIX 8)")
     else:
-        print(
-            "WARNING: No full-gene source found.\n"
-            "  scMalignantFinder will fall back to 4000 HVGs (~19% overlap).\n"
-            "  Add  tumor_h5ad='GSE158937_tumor.h5ad'  to the calling script."
-        )
+        rescue = tumor_h5ad or _auto_tumor_h5ad()
+        if rescue and os.path.exists(rescue):
+            print(f"Route A-rescue: {rescue} (auto-detected Module 1 h5ad)")
+        elif adata.raw is not None:
+            print(f"Route A-old: adata.raw ({adata.raw.n_vars} genes)")
+        else:
+            print(
+                "WARNING: No full-gene source found.\n"
+                "  scMalignantFinder will use 4000 HVGs (~19% overlap).\n"
+                "  Ensure GSE*_tumor.h5ad is in cwd, or update Module 2 to FIX 8."
+            )
 
     print(f"Initial cells: {adata.n_obs}")
 
-    # ------------------------------------------------------------------
     # 1. Select epithelial cells
-    # ------------------------------------------------------------------
     labels  = adata.obs["popv_majority_vote_prediction"].astype(str)
     ep_mask = labels.str.endswith("epithelial cell")
     adata   = adata[ep_mask].copy()
     print(f"Epithelial cells retained: {adata.n_obs}")
     print(f"Cells removed:             {(~ep_mask).sum()}\n")
 
-    # ------------------------------------------------------------------
-    # 2. Quality control
-    # ------------------------------------------------------------------
+    # 2. QC
     adata.var["mt"] = adata.var_names.str.startswith("MT-")
     sc.pp.calculate_qc_metrics(adata, qc_vars=["mt"], inplace=True)
     print(f"Mean MT% BEFORE QC: {adata.obs['pct_counts_mt'].mean():.2f}")
@@ -752,9 +720,7 @@ def run_preprocessing_pipeline(
     print(f"Cells removed:      {before_qc - adata.n_obs}")
     print(f"Mean MT% AFTER QC:  {adata.obs['pct_counts_mt'].mean():.2f}\n")
 
-    # ------------------------------------------------------------------
     # 3. Route raw counts into .X; snapshot for inferCNA
-    # ------------------------------------------------------------------
     print("Detecting raw count source...")
     for lyr in ("scvi_counts", "raw_counts", "counts"):
         if lyr in adata.layers:
@@ -769,14 +735,11 @@ def run_preprocessing_pipeline(
             print("No raw layer — assuming adata.X is raw counts.")
 
     adata.var_names_make_unique()
-    adata.layers["raw_for_cna"] = adata.X.copy()   # snapshot before log-norm
-
+    adata.layers["raw_for_cna"] = adata.X.copy()
     sc.pp.normalize_total(adata, target_sum=1e4)
     sc.pp.log1p(adata)
 
-    # ------------------------------------------------------------------
     # 4. scMalignantFinder
-    # ------------------------------------------------------------------
     print("Running scMalignantFinder ...")
     feature_tsv = os.path.join(scmalignant_model_dir, "ordered_feature.tsv")
     print("  Building full-gene matrix ...")
@@ -792,17 +755,25 @@ def run_preprocessing_pipeline(
     )
     model.load()
     result_scm = model.predict()
-    adata.obs["scMalignantFinder_prediction"] = (
-        result_scm.obs["scMalignantFinder_prediction"].values
-    )
+
+    # FIX 6 - align by obs_names
+    scm_pred_col = "scMalignantFinder_prediction"
+    if result_scm.obs_names.equals(adata.obs_names):
+        adata.obs[scm_pred_col] = result_scm.obs[scm_pred_col].values
+    else:
+        logger.warning("scMalignantFinder obs_names differ — aligning by index.")
+        adata.obs[scm_pred_col] = (
+            result_scm.obs[scm_pred_col]
+            .reindex(adata.obs_names)
+            .fillna("Unknown")
+            .values
+        )
+
     print("scMalignantFinder completed.")
-    print(adata.obs["scMalignantFinder_prediction"].value_counts().to_string(), "\n")
+    print(adata.obs[scm_pred_col].value_counts().to_string(), "\n")
 
-    # ------------------------------------------------------------------
     # 5. inferCNA
-    # ------------------------------------------------------------------
     infercna_available = False
-
     if malignant_strategy in ("infercna", "union", "intersection"):
         if reference_h5ad is None:
             print(
@@ -813,7 +784,8 @@ def run_preprocessing_pipeline(
         else:
             print(
                 f"Running inferCNA "
-                f"(reference subsampled to {infercna_ref_max_cells} cells) ..."
+                f"(reference subsampled to <=|{infercna_ref_max_cells} cells, "
+                f"n auto-capped) ..."
             )
             try:
                 adata_raw_cna   = adata.copy()
@@ -842,11 +814,8 @@ def run_preprocessing_pipeline(
                 logger.exception("inferCNA error details:")
                 malignant_strategy = "scMalignant"
 
-    # ------------------------------------------------------------------
-    # 6. Combine malignancy calls → final_malignant
-    # ------------------------------------------------------------------
-    scm_mal = adata.obs["scMalignantFinder_prediction"].str.lower() == "malignant"
-
+    # 6. Combine malignancy calls
+    scm_mal = adata.obs[scm_pred_col].str.lower() == "malignant"
     if infercna_available:
         cna_mal = adata.obs["infercna_prediction"].str.lower() == "malignant"
         if malignant_strategy == "union":
@@ -865,46 +834,31 @@ def run_preprocessing_pipeline(
         malignant_mask = scm_mal
         strategy_label = "scMalignantFinder only"
 
-    adata.obs["final_malignant"] = malignant_mask.map(
-        {True: "malignant", False: "normal"}
-    )
+    adata.obs["final_malignant"] = malignant_mask.map({True: "malignant", False: "normal"})
     print(f"Malignancy strategy: {strategy_label}")
     print(f"  Malignant: {malignant_mask.sum()} | Normal: {(~malignant_mask).sum()}\n")
 
-    # ------------------------------------------------------------------
     # 7. Surfaceome filter
-    # ------------------------------------------------------------------
     surfaceome = pd.read_csv(surfaceome_path)
     surfaceome.columns = surfaceome.columns.str.strip()
     surf_genes = surfaceome["Gene"].astype(str).tolist()
     adata      = adata[:, adata.var_names.intersection(surf_genes)].copy()
     print(f"Surfaceome genes retained: {adata.n_vars}\n")
 
-    # ------------------------------------------------------------------
-    # 8. DEG (malignant vs normal, pvals_adj BH-corrected)
-    # ------------------------------------------------------------------
-    # Guard: Wilcoxon requires at least 2 cells per group.
-    # If scMalignantFinder classified almost everything as malignant
-    # (e.g. 6604 malignant / 6 normal), DEG has no statistical power.
-    # In that case we skip Wilcoxon and save all surfaceome genes as
-    # candidates so downstream modules are not blocked.
+    # 8. DEG
     group_counts = adata.obs["final_malignant"].value_counts()
     min_group    = group_counts.min()
     print(f"Malignant/normal cell counts for DEG: {dict(group_counts)}")
-
-    MIN_CELLS_FOR_DEG = 10  # minimum cells needed in the smaller group
+    MIN_CELLS_FOR_DEG = 10
 
     if min_group < MIN_CELLS_FOR_DEG:
         print(
             f"WARNING: Smallest group has only {min_group} cells "
             f"(need >= {MIN_CELLS_FOR_DEG} for reliable Wilcoxon DEG).\n"
-            "  Possible cause: scMalignantFinder classified almost all cells "
-            "as malignant because it was run on 4000 HVGs (19% model overlap).\n"
-            "  All surfaceome genes are saved as candidates. Re-run with\n"
-            "  tumor_h5ad= supplied to get full-gene scMalignantFinder results."
+            "  All surfaceome genes saved as candidates.\n"
+            "  Enable inferCNA (provide reference_h5ad=) to improve the split."
         )
-        # Use all surfaceome genes present in data as the DEG candidate list
-        all_surf = adata.var_names.tolist()
+        all_surf     = adata.var_names.tolist()
         filtered_deg = pd.DataFrame({"names": all_surf, "group": "malignant"})
         deg          = filtered_deg.copy()
     else:
@@ -918,17 +872,14 @@ def run_preprocessing_pipeline(
             f"Applying filters: log2FC > {log2fc_threshold}, "
             f"pvals_adj < {pval_adj_threshold}"
         )
-
         filtered_deg = deg[
             (deg["logfoldchanges"] > log2fc_threshold) &
             (deg["pvals_adj"]      < pval_adj_threshold)
         ]
-
         if filtered_deg.shape[0] == 0:
             print(
                 "WARNING: 0 DEGs passed the filter.\n"
-                "  Try: log2fc_threshold=0.5 or pval_adj_threshold=0.10\n"
-                "  Also check malignant/normal balance above."
+                "  Try: log2fc_threshold=0.5 or pval_adj_threshold=0.10"
             )
 
     adata.uns["filtered_deg"] = filtered_deg
@@ -940,15 +891,11 @@ def run_preprocessing_pipeline(
     }
     print(f"Final DE genes retained: {filtered_deg.shape[0]}\n")
 
-    # ------------------------------------------------------------------
     # 9. Binarise
-    # ------------------------------------------------------------------
     adata.X = (adata.X > 0).astype(int)
     print("Expression converted to binary (0/1).\n")
 
-    # ------------------------------------------------------------------
     # 10. Save
-    # ------------------------------------------------------------------
     for col in adata.obs.columns:
         if adata.obs[col].dtype == object:
             adata.obs[col] = adata.obs[col].astype(str)
