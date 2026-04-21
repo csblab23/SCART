@@ -54,35 +54,41 @@ class SampleAnnotator:
     *inputs : str
         One or more GEO accession IDs (e.g. "GSE158937") or paths to
         existing .h5ad files.
-    min_genes : int, optional
+    min_genes : int or None, optional
         Minimum number of genes detected per cell used for QC filtering in
         Module 3 (preprocessing).  The value is stored in
         ``adata.uns['qc_params']`` of every h5ad written by this module so
         that Module 3 can read it automatically.
-        Default: 200.
-    max_mt : float, optional
+        If not provided (default: None), the QC step is skipped in Module 3.
+    max_mt : float or None, optional
         Maximum mitochondrial gene percentage per cell used for QC filtering
         in Module 3.  Stored alongside ``min_genes`` in
         ``adata.uns['qc_params']``.
-        Default: 40.0.
+        If not provided (default: None), the QC step is skipped in Module 3.
 
     Usage
     -----
-    # Default QC thresholds (min_genes=200, max_mt=40)
+    # QC disabled entirely (default) — Module 3 will skip QC filtering
     annotator = SampleAnnotator("GSE158937")
 
-    # Custom QC thresholds passed through to Module 3
-    annotator = SampleAnnotator("GSE158937", min_genes=300, max_mt=25)
+    # Both QC thresholds set
+    annotator = SampleAnnotator("GSE158937", min_genes=200, max_mt=40)
+
+    # Only gene count threshold
+    annotator = SampleAnnotator("GSE158937", min_genes=300)
+
+    # Only MT threshold
+    annotator = SampleAnnotator("GSE158937", max_mt=25)
 
     normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = annotator.run()
     """
 
-    def __init__(self, *inputs, min_genes: int = 200, max_mt: float = 40.0):
+    def __init__(self, *inputs, min_genes: int = None, max_mt: float = None):
 
         self.inputs    = list(inputs)
         self.base_dir  = "GSE_data"
 
-        # ── QC parameters stored here and written into every h5ad ──────────
+        # ── QC parameters: None means "user did not set this → skip QC" ───
         self.min_genes = min_genes
         self.max_mt    = max_mt
 
@@ -103,11 +109,19 @@ class SampleAnnotator:
 
     def _store_qc_params(self, adata):
         """
-        Write QC thresholds into adata.uns['qc_params'] so that Module 3
-        can read them without the user having to re-specify them.
+        Write QC thresholds into adata.uns['qc_params'] only when the user
+        has explicitly provided at least one threshold.
+
+        If neither min_genes nor max_mt was set, the key is removed (or
+        never written) so that Module 3 knows to skip QC entirely.
         """
+        if self.min_genes is None and self.max_mt is None:
+            # Ensure the key does not exist (e.g. from a previous run)
+            adata.uns.pop("qc_params", None)
+            return
+
         adata.uns["qc_params"] = {
-            "min_genes": self.min_genes,
+            "min_genes": self.min_genes,   # may still be None for one field
             "max_mt":    self.max_mt,
         }
 
@@ -187,7 +201,7 @@ class SampleAnnotator:
             adata.layers["counts"] = adata.X.copy()
             adata.raw = adata
 
-            # Store QC params in user-supplied h5ad too
+            # Store QC params in user-supplied h5ad too (only if user set them)
             self._store_qc_params(adata)
 
             tumor_adatas.append(adata)
@@ -213,15 +227,22 @@ class SampleAnnotator:
                 adata    = tumor_adatas[0]
                 filename = "input_tumor.h5ad"
 
-                # QC params already stored by the loop above
+                # QC params already handled by _store_qc_params above
                 adata.write(filename)
 
                 print("\n========== h5ad created ==========")
                 print(f"{filename} is created successfully")
-                print(
-                    f"QC params stored → "
-                    f"min_genes={self.min_genes}, max_mt={self.max_mt}"
-                )
+
+                if self.min_genes is not None or self.max_mt is not None:
+                    print(
+                        f"QC params stored → "
+                        f"min_genes={self.min_genes}, max_mt={self.max_mt}"
+                    )
+                else:
+                    print(
+                        "QC step disabled "
+                        "(no min_genes / max_mt provided — will be skipped in Module 3)"
+                    )
 
                 query_h5ad = filename
                 key        = self.h5ad_inputs[0]
@@ -235,17 +256,24 @@ class SampleAnnotator:
             combined.layers["counts"] = combined.X.copy()
             combined.raw = combined
 
-            # Store QC params in the combined h5ad
+            # Store QC params in the combined h5ad (only if user set them)
             self._store_qc_params(combined)
 
             combined.write("combined_tumor.h5ad")
 
             print("\n========== h5ad created ==========")
             print("combined_tumor.h5ad is created successfully")
-            print(
-                f"QC params stored → "
-                f"min_genes={self.min_genes}, max_mt={self.max_mt}"
-            )
+
+            if self.min_genes is not None or self.max_mt is not None:
+                print(
+                    f"QC params stored → "
+                    f"min_genes={self.min_genes}, max_mt={self.max_mt}"
+                )
+            else:
+                print(
+                    "QC step disabled "
+                    "(no min_genes / max_mt provided — will be skipped in Module 3)"
+                )
 
             query_h5ad = "combined_tumor.h5ad"
 
@@ -514,12 +542,19 @@ class SampleAnnotator:
             combined.uns["cancer_type"] = cancer_type
             print(f"... stored cancer_type in h5ad: {cancer_type}")
 
-        # ── Store QC params so Module 3 can read them automatically ────────
+        # ── Store QC params only when user explicitly provided them ────────
         self._store_qc_params(combined)
-        print(
-            f"... stored qc_params in h5ad: "
-            f"min_genes={self.min_genes}, max_mt={self.max_mt}"
-        )
+
+        if self.min_genes is not None or self.max_mt is not None:
+            print(
+                f"... stored qc_params in h5ad: "
+                f"min_genes={self.min_genes}, max_mt={self.max_mt}"
+            )
+        else:
+            print(
+                "... qc_params not stored "
+                "(QC disabled — Module 3 will skip QC filtering)"
+            )
 
         if save_single:
 
