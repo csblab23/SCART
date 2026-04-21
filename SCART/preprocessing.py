@@ -9,10 +9,12 @@ CORRECT BIOLOGICAL PIPELINE DESIGN
 Step 1  Load the full PopV-annotated h5ad (all cell types, e.g. 15202 cells).
         Save this as adata_full — it is the complete dataset.
 
-Step 2  Extract epithelial cells only from adata_full → apply QC filters.
+Step 2  Extract epithelial cells only from adata_full → apply QC filters
+        (only if QC thresholds were set in Module 1).
         QC thresholds (min_genes, max_mt) are read automatically from
         adata.uns['qc_params'] written by Module 1 (geo_fetcher.py).
-        These are the cells we want to classify as malignant or not.
+        If 'qc_params' is absent (user did not set thresholds), QC is
+        skipped entirely and all epithelial cells proceed.
 
 Step 3  Run scMalignantFinder + inferCNA on the epithelial cells.
         Combine predictions → final_malignant column on the epithelial adata.
@@ -35,18 +37,19 @@ QC PARAMETER FLOW
 ═══════════════════════════════════════════════════════════════════════════════
 
 Module 1 (geo_fetcher.py)
-  SampleAnnotator("GSE…", min_genes=200, max_mt=40) stores QC thresholds in
-  adata.uns['qc_params'] = {"min_genes": 200, "max_mt": 40.0} of every h5ad
-  it writes.
+  SampleAnnotator("GSE…")                        → QC disabled, key absent
+  SampleAnnotator("GSE…", min_genes=200)          → only gene count filter
+  SampleAnnotator("GSE…", max_mt=40)              → only MT filter
+  SampleAnnotator("GSE…", min_genes=200, max_mt=40) → both filters active
 
 Module 2 (popv_annotation.py)
   Passes the h5ad through — uns keys including 'qc_params' are preserved.
 
 Module 3 (this file)
   Reads adata.uns['qc_params'] automatically.
-  Logs which values it will use so the user can verify them.
-  Falls back to defaults (min_genes=200, max_mt=40) if the key is absent
-  (e.g. when adata was passed directly without going through Module 1).
+  If the key is ABSENT  → QC step is SKIPPED (all epithelial cells kept).
+  If the key is PRESENT → only the thresholds that are not None are applied.
+  Logs clearly which path was taken.
 
 ═══════════════════════════════════════════════════════════════════════════════
 DATA FLOW ACROSS MODULES
@@ -57,7 +60,7 @@ Module 1 (geo_fetcher.py)
   Contains: adata.layers['counts']          raw integer counts, full gene space
             adata.raw = adata               same data frozen
             adata.uns['cancer_type']
-            adata.uns['qc_params']          {"min_genes": …, "max_mt": …}
+            adata.uns['qc_params']          only present when user set thresholds
 
 Module 2 (popv_annotation.py)
   Reads:  GSE*_tumor.h5ad
@@ -112,9 +115,9 @@ FIX 9   CORRECT DEG DESIGN:
 
 QC FIX  min_genes and max_mt removed from the public API of
         run_preprocessing_pipeline().  Both values are read from
-        adata.uns['qc_params'] (written by Module 1).  Sensible defaults
-        (200 / 40) are used as a fallback so the pipeline still works when
-        an h5ad was not produced by Module 1.
+        adata.uns['qc_params'] (written by Module 1).
+        If the key is absent the QC step is SKIPPED ENTIRELY — no defaults
+        are applied.  This makes the user's choice in Module 1 authoritative.
 """
 
 import os
@@ -128,10 +131,6 @@ import scipy.sparse as sp
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# ── QC fallback defaults (used only when uns['qc_params'] is absent) ───────
-_DEFAULT_MIN_GENES = 200
-_DEFAULT_MAX_MT    = 40.0
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -210,32 +209,55 @@ def _read_qc_params(adata):
     """
     Read QC thresholds from adata.uns['qc_params'] (written by Module 1).
 
-    Falls back to package defaults if the key is absent so the pipeline
-    works even when adata was not produced by Module 1.
-
     Returns
     -------
-    min_genes : int
-    max_mt    : float
-    source    : str   Human-readable description of where the values came from.
+    min_genes : int or None
+        None  → do not apply a gene-count filter.
+    max_mt    : float or None
+        None  → do not apply an MT-percentage filter.
+    qc_active : bool
+        True  → at least one filter will be applied.
+        False → QC step is skipped entirely.
+    source    : str
+        Human-readable description of where the values came from.
     """
     qc = adata.uns.get("qc_params", None)
 
-    if qc is not None:
-        min_genes = int(qc.get("min_genes", _DEFAULT_MIN_GENES))
-        max_mt    = float(qc.get("max_mt",    _DEFAULT_MAX_MT))
-        source    = "adata.uns['qc_params'] (set by Module 1)"
-    else:
-        min_genes = _DEFAULT_MIN_GENES
-        max_mt    = _DEFAULT_MAX_MT
-        source    = (
-            f"package defaults ({_DEFAULT_MIN_GENES} / {_DEFAULT_MAX_MT}) — "
-            "'qc_params' key not found in adata.uns. "
+    if qc is None:
+        return (
+            None, None, False,
+            "SKIPPED — 'qc_params' not found in adata.uns. "
             "Re-run Module 1 with SampleAnnotator(min_genes=…, max_mt=…) "
-            "to propagate custom thresholds automatically."
+            "to enable QC filtering."
         )
 
-    return min_genes, max_mt, source
+    min_genes = qc.get("min_genes", None)
+    max_mt    = qc.get("max_mt",    None)
+
+    # Normalise types if values are present
+    if min_genes is not None:
+        min_genes = int(min_genes)
+    if max_mt is not None:
+        max_mt = float(max_mt)
+
+    qc_active = (min_genes is not None) or (max_mt is not None)
+
+    if qc_active:
+        parts = []
+        if min_genes is not None:
+            parts.append(f"min_genes={min_genes}")
+        if max_mt is not None:
+            parts.append(f"max_mt={max_mt}")
+        source = (
+            "adata.uns['qc_params'] (set by Module 1) — "
+            + ", ".join(parts)
+        )
+    else:
+        source = (
+            "'qc_params' key present but both values are None — QC SKIPPED."
+        )
+
+    return min_genes, max_mt, qc_active, source
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -718,24 +740,31 @@ def run_preprocessing_pipeline(
 
     QC THRESHOLDS (min_genes, max_mt)
     ----------------------------------
-    These are NO LONGER parameters of this function.  They are set once in
-    Module 1::
+    These are NOT parameters of this function.  They are set once in Module 1::
 
+        # QC disabled (default) — all epithelial cells pass through
+        annotator = SampleAnnotator("GSE…")
+
+        # Both thresholds
         annotator = SampleAnnotator("GSE…", min_genes=200, max_mt=40)
 
-    Module 1 stores them in ``adata.uns['qc_params']`` of every h5ad it
-    writes.  Module 3 reads them from that key automatically, so you never
-    need to repeat them here.
+        # Gene count only
+        annotator = SampleAnnotator("GSE…", min_genes=300)
 
-    If ``qc_params`` is absent (e.g. you supplied an h5ad that did not come
-    from Module 1), the pipeline falls back to ``min_genes=200, max_mt=40``
-    and prints a warning.
+        # MT only
+        annotator = SampleAnnotator("GSE…", max_mt=25)
+
+    Module 1 stores them in ``adata.uns['qc_params']`` of every h5ad it
+    writes.  Module 3 reads that key automatically.
+
+    If ``qc_params`` is absent, the QC filtering step is SKIPPED ENTIRELY —
+    no default values are silently applied.
 
     PIPELINE FLOW
     -------------
     1.  Load full PopV h5ad (all cell types)  → adata_full
     2.  Read QC thresholds from adata.uns['qc_params']
-    3.  Extract epithelial cells → QC
+    3.  Extract epithelial cells → apply QC if thresholds are set
     4.  scMalignantFinder + inferCNA on epithelial cells
     5.  Keep ONLY malignant epithelial cells (non-malignant dropped)
     6.  adata_full non-epithelial cells → "rest" comparison group
@@ -775,7 +804,7 @@ def run_preprocessing_pipeline(
     AnnData  Malignant epithelial cells only, surfaceome-filtered, binarised.
              DEG stored in adata.uns['filtered_deg'] and adata.uns['all_deg'].
              inferCNA full results in adata.uns['infercna_results'].
-             QC params echoed in adata.uns['qc_params'].
+             QC params echoed in adata.uns['qc_params'] (None if QC skipped).
     """
     print("\n========== START ==========\n")
 
@@ -823,40 +852,50 @@ def run_preprocessing_pipeline(
     # ------------------------------------------------------------------
     # STEP 2 — Read QC thresholds written by Module 1
     # ------------------------------------------------------------------
-    min_genes, max_mt, qc_source = _read_qc_params(adata_full)
+    min_genes, max_mt, qc_active, qc_source = _read_qc_params(adata_full)
 
-    print(f"\n--- Step 2: QC thresholds ---")
-    print(f"  Source    : {qc_source}")
-    print(f"  min_genes : {min_genes}")
-    print(f"  max_mt    : {max_mt}")
+    print(f"\n--- Step 2: QC configuration ---")
+    print(f"  {qc_source}")
 
     # ------------------------------------------------------------------
-    # STEP 3 — Extract epithelial cells → QC
+    # STEP 3 — Extract epithelial cells → QC (conditional)
     # ------------------------------------------------------------------
-    print("\n--- Step 3: Epithelial selection + QC ---")
+    print("\n--- Step 3: Epithelial selection" +
+          (" + QC ---" if qc_active else " (QC skipped) ---"))
+
     labels  = adata_full.obs["popv_majority_vote_prediction"].astype(str)
     ep_mask = labels.str.endswith("epithelial cell")
     print(f"Epithelial cells: {ep_mask.sum()} / {adata_full.n_obs} total")
-    print(
-        f"Non-epithelial cells (will be 'rest' group for DEG): {(~ep_mask).sum()}"
-    )
+    print(f"Non-epithelial cells (will be 'rest' group for DEG): {(~ep_mask).sum()}")
 
     adata_epi = adata_full[ep_mask].copy()
-
-    adata_epi.var["mt"] = adata_epi.var_names.str.startswith("MT-")
-    sc.pp.calculate_qc_metrics(adata_epi, qc_vars=["mt"], inplace=True)
-    print(f"Mean MT% BEFORE QC: {adata_epi.obs['pct_counts_mt'].mean():.2f}")
     before_qc = adata_epi.n_obs
-    adata_epi = adata_epi[
-        (adata_epi.obs["n_genes_by_counts"] > min_genes) &
-        (adata_epi.obs["pct_counts_mt"]     < max_mt)
-    ].copy()
-    print(
-        f"Epithelial cells after QC: {adata_epi.n_obs}  "
-        f"(removed {before_qc - adata_epi.n_obs}  |  "
-        f"min_genes>{min_genes}, max_mt<{max_mt})"
-    )
-    print(f"Mean MT% AFTER QC:  {adata_epi.obs['pct_counts_mt'].mean():.2f}\n")
+
+    if qc_active:
+        adata_epi.var["mt"] = adata_epi.var_names.str.startswith("MT-")
+        sc.pp.calculate_qc_metrics(adata_epi, qc_vars=["mt"], inplace=True)
+        print(f"Mean MT% BEFORE QC: {adata_epi.obs['pct_counts_mt'].mean():.2f}")
+
+        # Build filter: apply only the thresholds that are not None
+        filters = np.ones(adata_epi.n_obs, dtype=bool)
+        if min_genes is not None:
+            filters &= adata_epi.obs["n_genes_by_counts"] > min_genes
+        if max_mt is not None:
+            filters &= adata_epi.obs["pct_counts_mt"] < max_mt
+
+        adata_epi = adata_epi[filters].copy()
+
+        filter_desc = "  ".join(
+            ([f"min_genes>{min_genes}"] if min_genes is not None else []) +
+            ([f"max_mt<{max_mt}"]       if max_mt    is not None else [])
+        )
+        print(
+            f"Epithelial cells after QC: {adata_epi.n_obs}  "
+            f"(removed {before_qc - adata_epi.n_obs}  |  {filter_desc})"
+        )
+        print(f"Mean MT% AFTER QC:  {adata_epi.obs['pct_counts_mt'].mean():.2f}\n")
+    else:
+        print(f"QC filtering SKIPPED — all {adata_epi.n_obs} epithelial cells proceed.\n")
 
     # Route raw counts → .X; snapshot for inferCNA
     print("Detecting raw count source for epithelial cells...")
@@ -1190,8 +1229,11 @@ def run_preprocessing_pipeline(
         "n_filtered_deg"     : int(filtered_deg.shape[0]),
     }
 
-    # Echo the QC params used so they stay with the output file
-    adata_mal.uns["qc_params"] = {"min_genes": min_genes, "max_mt": max_mt}
+    # Echo QC params — store None if QC was skipped so downstream knows
+    adata_mal.uns["qc_params"] = (
+        {"min_genes": min_genes, "max_mt": max_mt}
+        if qc_active else None
+    )
 
     # FIX 8 — store full inferCNA results
     if infercna_result_df is not None:
@@ -1227,6 +1269,20 @@ def run_preprocessing_pipeline(
     # ------------------------------------------------------------------
     # Final summary report
     # ------------------------------------------------------------------
+    # Build QC summary line for report
+    if qc_active:
+        qc_summary = (
+            "  ".join(
+                ([f"min_genes>{min_genes}"] if min_genes is not None else []) +
+                ([f"max_mt<{max_mt}"]       if max_mt    is not None else [])
+            )
+            + f"  [{qc_source.split(' —')[0]}]"
+        )
+        epi_after_qc_str = str(adata_epi.n_obs)
+    else:
+        qc_summary       = "SKIPPED (no thresholds set in Module 1)"
+        epi_after_qc_str = f"{before_qc} (unchanged)"
+
     print(f"\nFinal object saved to: {final_path}")
     print(
         f"\n{'═'*60}\n"
@@ -1234,8 +1290,8 @@ def run_preprocessing_pipeline(
         f"{'═'*60}\n"
         f"Full dataset (Module 2 output):    {adata_full.n_obs} cells\n"
         f"Epithelial cells (pre-QC):         {ep_mask.sum()}\n"
-        f"Epithelial cells (post-QC):        {before_qc}  →  {adata_epi.n_obs}\n"
-        f"  QC: min_genes>{min_genes}, max_mt<{max_mt}  [{qc_source}]\n"
+        f"Epithelial cells (post-QC):        {epi_after_qc_str}\n"
+        f"  QC: {qc_summary}\n"
         f"Malignant epithelial (kept):       {adata_mal.n_obs}\n"
         f"Non-malignant epithelial (removed):{(~malignant_mask).sum()}\n"
         f"Non-epithelial rest (DEG ref):     {adata_rest.n_obs}\n"
