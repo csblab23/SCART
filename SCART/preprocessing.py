@@ -854,9 +854,6 @@ def run_preprocessing_pipeline(
     # ------------------------------------------------------------------
     min_genes, max_mt, qc_active, qc_source = _read_qc_params(adata_full)
 
-    print(f"\n--- Step 2: QC configuration ---")
-    print(f"  {qc_source}")
-
     # ------------------------------------------------------------------
     # STEP 3 — Extract epithelial cells → QC (conditional)
     # ------------------------------------------------------------------
@@ -1031,16 +1028,6 @@ def run_preprocessing_pipeline(
                 print("\ninferCNA completed.")
                 print("  Prediction counts:")
                 print(adata_epi.obs["infercna_prediction"].value_counts().to_string())
-                print(
-                    f"\n  cna_signal stats:  "
-                    f"mean={adata_epi.obs['infercna_cna_signal'].mean():.4f}  "
-                    f"std={adata_epi.obs['infercna_cna_signal'].std():.4f}"
-                )
-                print(
-                    f"  cna_cor stats:     "
-                    f"mean={adata_epi.obs['infercna_cna_cor'].mean():.4f}  "
-                    f"std={adata_epi.obs['infercna_cna_cor'].std():.4f}"
-                )
 
             except Exception as exc:
                 print(
@@ -1099,13 +1086,6 @@ def run_preprocessing_pipeline(
     rest_mask  = ~ep_mask    # non-epithelial cells from the full dataset
     adata_rest = adata_full[rest_mask].copy()
     print(f"Non-epithelial 'rest' cells: {adata_rest.n_obs}")
-    print("  Cell types in rest group:")
-    print(
-        adata_rest.obs["popv_majority_vote_prediction"]
-        .value_counts()
-        .head(15)
-        .to_string()
-    )
 
     # Normalise the rest group for DEG
     for lyr in ("scvi_counts", "raw_counts", "counts"):
@@ -1266,46 +1246,6 @@ def run_preprocessing_pipeline(
     final_path = os.path.join(save_dir, "final_tumor.h5ad")
     adata_mal.write(final_path)
 
-    # ------------------------------------------------------------------
-    # Final summary report
-    # ------------------------------------------------------------------
-    # Build QC summary line for report
-    if qc_active:
-        qc_summary = (
-            "  ".join(
-                ([f"min_genes>{min_genes}"] if min_genes is not None else []) +
-                ([f"max_mt<{max_mt}"]       if max_mt    is not None else [])
-            )
-            + f"  [{qc_source.split(' —')[0]}]"
-        )
-        epi_after_qc_str = str(adata_epi.n_obs)
-    else:
-        qc_summary       = "SKIPPED (no thresholds set in Module 1)"
-        epi_after_qc_str = f"{before_qc} (unchanged)"
-
     print(f"\nFinal object saved to: {final_path}")
-    print(
-        f"\n{'═'*60}\n"
-        f"PIPELINE SUMMARY\n"
-        f"{'═'*60}\n"
-        f"Full dataset (Module 2 output):    {adata_full.n_obs} cells\n"
-        f"Epithelial cells (pre-QC):         {ep_mask.sum()}\n"
-        f"Epithelial cells (post-QC):        {epi_after_qc_str}\n"
-        f"  QC: {qc_summary}\n"
-        f"Malignant epithelial (kept):       {adata_mal.n_obs}\n"
-        f"Non-malignant epithelial (removed):{(~malignant_mask).sum()}\n"
-        f"Non-epithelial rest (DEG ref):     {adata_rest.n_obs}\n"
-        f"{'─'*60}\n"
-        f"Malignancy strategy:               {strategy_label}\n"
-        f"Surfaceome genes (GESP):           {len(surf_genes)} → {len(surf_common)} common\n"
-        f"DEG comparison:                    malignant epithelial vs non-epithelial rest\n"
-        f"DEGs passing filter:               {filtered_deg.shape[0]}\n"
-        f"{'─'*60}\n"
-        f"Saved adata shape:                 {adata_mal.shape}\n"
-        f"  obs columns: {list(adata_mal.obs.columns)}\n"
-        f"  uns keys:    {list(adata_mal.uns.keys())}\n"
-        f"  layers:      {list(adata_mal.layers.keys())}\n"
-        f"{'═'*60}"
-    )
     print("\n========== PREPROCESSING COMPLETED ==========\n")
     return adata_mal
