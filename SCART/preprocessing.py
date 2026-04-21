@@ -381,8 +381,6 @@ def _run_infercna(
     try:
         import rpy2.robjects as ro
         from rpy2.robjects.packages import importr
-        from rpy2.robjects.conversion import localconverter
-        from rpy2.robjects import default_converter, numpy2ri
     except ImportError as exc:
         raise ImportError(
             "rpy2 is required to run inferCNA.\n"
@@ -454,6 +452,14 @@ def _run_infercna(
             "Check that both use HGNC gene symbols."
         )
 
+    if len(common) < 2000:
+        logger.warning(
+            f"Only {len(common)} common genes found. "
+            "The reference may be HVG-filtered (e.g. scvi_counts has only 4000 genes). "
+            "inferCNA works best with 5000+ genes. "
+            "The reference's raw counts will be used if available via adata.raw."
+        )
+
     q_idx = np.where(np.isin(q_genes, common))[0]
     r_idx = np.where(np.isin(r_genes, common))[0]
 
@@ -471,18 +477,21 @@ def _run_infercna(
     )
 
     # ------------------------------------------------------------------
-    # Pass data to R and run inferCNA steps via a single R block
-    # (avoids repeated Python↔R round-trips and rpy2 version issues)
+    # Pass data to R.
+    #
+    # rpy2 compatibility: assigning a numpy ndarray to ro.globalenv[]
+    # raises NotImplementedError in rpy2 >= 3.5 unless a numpy converter
+    # is active.  The safest approach that works across ALL rpy2 versions
+    # is to use only native rpy2 scalar types (FloatVector, StrVector,
+    # IntVector) which never require a converter.
+    # The numpy array is flattened to a plain Python list via .tolist()
+    # before wrapping in FloatVector -- no converter needed at all.
     # ------------------------------------------------------------------
-    with localconverter(default_converter + numpy2ri.converter):
-        r_mat = ro.r.matrix(
-            ro.FloatVector(mat_combined.flatten(order="F")),
-            nrow=mat_combined.shape[0],
-            ncol=mat_combined.shape[1],
-        )
+    logger.info("inferCNA: transferring matrix to R ...")
 
-    # Assign to R global environment so the inline R block can see them
-    ro.globalenv["r_mat"]        = r_mat
+    ro.globalenv["mat_flat"]     = ro.FloatVector(mat_combined.flatten(order="F").tolist())
+    ro.globalenv["n_rows"]       = ro.IntVector([mat_combined.shape[0]])
+    ro.globalenv["n_cols"]       = ro.IntVector([mat_combined.shape[1]])
     ro.globalenv["all_barcodes"] = ro.StrVector(all_barcodes.tolist())
     ro.globalenv["ref_barcodes"] = ro.StrVector(ref_barcodes.tolist())
     ro.globalenv["gene_names"]   = ro.StrVector(sub_genes.tolist())
@@ -491,18 +500,20 @@ def _run_infercna(
     ro.globalenv["sig_thresh"]   = ro.FloatVector([signal_threshold])
     ro.globalenv["genome_name"]  = ro.StrVector([genome])
 
-    # All four tutorial steps in one R call
+    logger.info("inferCNA: running R steps ...")
+
     ro.r("""
         library(infercna)
 
-        # STEP 1 — useGenome
-        useGenome(genome_name)
-
-        # Attach row/col names to the matrix
+        # Reconstruct matrix from flat vector (avoids numpy converter)
+        r_mat <- matrix(mat_flat, nrow=n_rows, ncol=n_cols)
         rownames(r_mat) <- gene_names
         colnames(r_mat) <- all_barcodes
 
-        # STEP 2 — infercna on combined matrix (query + ref)
+        # STEP 1: useGenome -- built-in string key, NOT a file path
+        useGenome(genome_name)
+
+        # STEP 2: infercna on combined matrix (query + ref cells)
         cna <- infercna(
             m        = r_mat,
             refCells = list(normal_ref = ref_barcodes),
@@ -512,21 +523,22 @@ def _run_infercna(
             verbose  = FALSE
         )
 
-        # STEP 3 — strip reference columns -> cnaM (query cells only)
+        # STEP 3: strip reference columns -> cnaM (query only)
         cnaM <- cna[, !colnames(cna) %in% ref_barcodes, drop = FALSE]
 
-        # STEP 4 — findMalignant on FULL cna
-        # samples = per-cell vector; excludeFromAvg = ref barcodes
-        n_query <- ncol(cna) - length(ref_barcodes)
-        n_ref   <- length(ref_barcodes)
+        # STEP 4: findMalignant on FULL cna
+        # samples = per-cell label vector aligned to all columns of cna
+        # excludeFromAvg = ref barcodes so they don't bias tumour average
+        n_query    <- ncol(cna) - length(ref_barcodes)
+        n_ref      <- length(ref_barcodes)
         sample_vec <- c(rep("tumor", n_query), rep("normal", n_ref))
 
         modes <- tryCatch(
             findMalignant(
-                cna            = cna,
+                cna              = cna,
                 signal.threshold = sig_thresh,
-                samples        = sample_vec,
-                excludeFromAvg = ref_barcodes
+                samples          = sample_vec,
+                excludeFromAvg   = ref_barcodes
             ),
             error = function(e) {
                 message("findMalignant error: ", conditionMessage(e))
@@ -869,29 +881,55 @@ def run_preprocessing_pipeline(
     print(f"Surfaceome genes retained: {adata.n_vars}\n")
 
     # ------------------------------------------------------------------
-    # 8. DEG  (FIX 3: pvals_adj not raw pvals)
+    # 8. DEG (malignant vs normal, pvals_adj BH-corrected)
     # ------------------------------------------------------------------
-    sc.tl.rank_genes_groups(
-        adata, groupby="final_malignant", method="wilcoxon",
-        key_added="rank_genes_groups",
-    )
-    deg = sc.get.rank_genes_groups_df(adata, group=None)
-    print(f"Total DEG candidates: {deg.shape[0]}")
-    print(
-        f"Applying filters: log2FC > {log2fc_threshold}, "
-        f"pvals_adj < {pval_adj_threshold}"
-    )
+    # Guard: Wilcoxon requires at least 2 cells per group.
+    # If scMalignantFinder classified almost everything as malignant
+    # (e.g. 6604 malignant / 6 normal), DEG has no statistical power.
+    # In that case we skip Wilcoxon and save all surfaceome genes as
+    # candidates so downstream modules are not blocked.
+    group_counts = adata.obs["final_malignant"].value_counts()
+    min_group    = group_counts.min()
+    print(f"Malignant/normal cell counts for DEG: {dict(group_counts)}")
 
-    filtered_deg = deg[
-        (deg["logfoldchanges"] > log2fc_threshold) &
-        (deg["pvals_adj"]      < pval_adj_threshold)
-    ]
+    MIN_CELLS_FOR_DEG = 10  # minimum cells needed in the smaller group
 
-    if filtered_deg.shape[0] == 0:
+    if min_group < MIN_CELLS_FOR_DEG:
         print(
-            "WARNING: 0 DEGs passed the filter.\n"
-            "  Try: log2fc_threshold=0.5 or pval_adj_threshold=0.10"
+            f"WARNING: Smallest group has only {min_group} cells "
+            f"(need >= {MIN_CELLS_FOR_DEG} for reliable Wilcoxon DEG).\n"
+            "  Possible cause: scMalignantFinder classified almost all cells "
+            "as malignant because it was run on 4000 HVGs (19% model overlap).\n"
+            "  All surfaceome genes are saved as candidates. Re-run with\n"
+            "  tumor_h5ad= supplied to get full-gene scMalignantFinder results."
         )
+        # Use all surfaceome genes present in data as the DEG candidate list
+        all_surf = adata.var_names.tolist()
+        filtered_deg = pd.DataFrame({"names": all_surf, "group": "malignant"})
+        deg          = filtered_deg.copy()
+    else:
+        sc.tl.rank_genes_groups(
+            adata, groupby="final_malignant", method="wilcoxon",
+            key_added="rank_genes_groups",
+        )
+        deg = sc.get.rank_genes_groups_df(adata, group=None)
+        print(f"Total DEG candidates: {deg.shape[0]}")
+        print(
+            f"Applying filters: log2FC > {log2fc_threshold}, "
+            f"pvals_adj < {pval_adj_threshold}"
+        )
+
+        filtered_deg = deg[
+            (deg["logfoldchanges"] > log2fc_threshold) &
+            (deg["pvals_adj"]      < pval_adj_threshold)
+        ]
+
+        if filtered_deg.shape[0] == 0:
+            print(
+                "WARNING: 0 DEGs passed the filter.\n"
+                "  Try: log2fc_threshold=0.5 or pval_adj_threshold=0.10\n"
+                "  Also check malignant/normal balance above."
+            )
 
     adata.uns["filtered_deg"] = filtered_deg
     adata.uns["all_deg"]      = deg
