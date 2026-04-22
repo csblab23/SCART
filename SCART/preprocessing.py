@@ -903,7 +903,7 @@ def run_preprocessing_pipeline(
     # STEP 3 — Extract epithelial cells → QC (conditional)
     # ------------------------------------------------------------------
     print("\n--- Step 3: Epithelial selection" +
-          (" + QC ---" if qc_active else " (QC skipped) ---"))
+          (" + QC ---" if qc_active else " ---"))
 
     labels  = adata_full.obs["popv_majority_vote_prediction"].astype(str)
     ep_mask = labels.str.endswith("epithelial cell")
