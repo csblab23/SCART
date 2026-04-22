@@ -9,7 +9,12 @@
 - [Overview](#overview)
 - [Pipeline Architecture](#pipeline-architecture)
 - [Installation](#installation)
-- [SCART — Quick Start](#SCART — Quick Start)
+- [Quick Start](#quick-start)
+  - [Module 1 — Data Acquisition](#module-1--data-acquisition)
+  - [Module 2 — Cell-Type Annotation](#module-2--cell-type-annotation)
+  - [Module 3 — Preprocessing & Malignancy Detection](#module-3--preprocessing--malignancy-detection)
+  - [Module 4a — Single-Gene Scoring](#module-4a--single-gene-scoring)
+  - [Module 4b — Two-Gene Logic-Gate Scoring](#module-4b--two-gene-logic-gate-scoring)
 - [Module Reference](#module-reference)
   - [Module 1 — Data Acquisition](#module-1--data-acquisition-geo_fetcherpy)
   - [Module 2 — Cell-Type Annotation](#module-2--cell-type-annotation-popv_annotationpy)
@@ -36,6 +41,7 @@ CAR-T therapy requires surface targets that are highly expressed on tumour cells
 ## Pipeline Architecture
 
 To be added
+
 ---
 
 ## Installation
@@ -100,11 +106,9 @@ jupyter notebook
 
 ---
 
-# SCART — Quick Start
+## Quick Start
 
----
-
-## Module 1 — Data Acquisition
+### Module 1 — Data Acquisition
 
 ```python
 from SCART.geo_fetcher import SampleAnnotator
@@ -154,7 +158,7 @@ normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = 
 
 ---
 
-## Module 2 — Cell-Type Annotation
+### Module 2 — Cell-Type Annotation
 
 ```python
 from SCART import popv_annotation
@@ -210,7 +214,7 @@ adata = popv_annotation.auto_run_popv(
 
 ---
 
-## Module 3 — Preprocessing & Malignancy Detection
+### Module 3 — Preprocessing & Malignancy Detection
 
 ```python
 from SCART import preprocessing
@@ -291,7 +295,7 @@ print(adata_preprocessed.uns["filtered_deg"].head(10))
 
 ---
 
-## Module 4a — Single-Gene Scoring
+### Module 4a — Single-Gene Scoring
 
 ```python
 from SCART.gene_combination_predictor import one_gene_combination
@@ -347,7 +351,7 @@ print(df_filtered.head(10))
 
 ---
 
-## Module 4b — Two-Gene Logic-Gate Scoring
+### Module 4b — Two-Gene Logic-Gate Scoring
 
 ```python
 from SCART.gene_combination_predictor import two_gene_combination
