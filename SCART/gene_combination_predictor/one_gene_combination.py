@@ -28,14 +28,30 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────────────────────────────────
 # Paths
 # ──────────────────────────────────────────────────────────────────────────
-PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
-BASE_DIR    = os.path.abspath(os.path.join(PACKAGE_DIR, "..", ".."))
+HPA_ZIP_URL = "https://www.proteinatlas.org/download/tsv/rna_single_cell_read_count.zip"
+HPA_CACHE   = os.path.join(os.getcwd(), "hpa_cache", "rna_single_cell_read_count.tsv")
 
-TUMOR_PATH   = os.path.join(BASE_DIR, "preprocessed_input", "final_tumor.h5ad")
-HEALTHY_PATH = os.path.join(BASE_DIR, "preprocessed_input", "final_healthy.h5ad")
 
-HPA_ZIP_URL  = "https://www.proteinatlas.org/download/tsv/rna_single_cell_read_count.zip"
-HPA_CACHE    = os.path.join(BASE_DIR, "hpa_cache", "rna_single_cell_read_count.tsv")
+def _auto_tumor_h5ad() -> str:
+    """
+    Auto-detect final_tumor.h5ad produced by Module 3.
+    Searches cwd and common output subdirectories.
+    """
+    search = [
+        os.path.join(os.getcwd(), "preprocessing_results", "final_tumor.h5ad"),
+        os.path.join(os.getcwd(), "final_tumor.h5ad"),
+    ]
+    for path in search:
+        if os.path.exists(path):
+            logger.info(f"Auto-detected tumour h5ad: {path}")
+            return path
+    raise FileNotFoundError(
+        "Could not auto-detect final_tumor.h5ad.\n"
+        "Expected locations:\n"
+        "  <cwd>/preprocessing_results/final_tumor.h5ad\n"
+        "  <cwd>/final_tumor.h5ad\n"
+        "Pass tumor_path= explicitly if saved elsewhere."
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -153,13 +169,16 @@ def _load_healthy_matrix(hpa_path=None):
         matrix, genes, _ = _hpa_tsv_to_binary_matrix(tsv)
         return matrix, genes, "auto-downloaded HPA"
 
-    # Option 4 — legacy fallback
-    if os.path.exists(HEALTHY_PATH):
-        print(f"Using legacy healthy h5ad: {HEALTHY_PATH}")
-        adata = sc.read_h5ad(HEALTHY_PATH)
-        X = adata.X.toarray() if not isinstance(adata.X, np.ndarray) else adata.X
-        matrix = (X > 0).astype(np.int8)
-        return matrix, list(adata.var_names), f"legacy: {HEALTHY_PATH}"
+    # Option 4 — legacy fallback: look for final_healthy.h5ad near cwd
+    for legacy in [
+        os.path.join(os.getcwd(), "preprocessing_results", "final_healthy.h5ad"),
+        os.path.join(os.getcwd(), "final_healthy.h5ad"),
+    ]:
+        if os.path.exists(legacy):
+            print(f"Using legacy healthy h5ad: {legacy}")
+            adata = sc.read_h5ad(legacy)
+            X = adata.X.toarray() if not isinstance(adata.X, np.ndarray) else adata.X
+            return (X > 0).astype(np.int8), list(adata.var_names), f"legacy: {legacy}"
 
     raise FileNotFoundError(
         "No healthy/HPA matrix available.\n"
@@ -210,9 +229,7 @@ def run(
     pd.DataFrame  columns: Gene, Efficacy, Safety, ObjectiveScore
     """
     # ── Load tumour matrix ─────────────────────────────────────────────
-    t_path = tumor_path or TUMOR_PATH
-    if not os.path.exists(t_path):
-        raise FileNotFoundError(f"Tumour h5ad not found: {t_path}")
+    t_path = tumor_path or _auto_tumor_h5ad()
     print(f"Loading tumour matrix: {t_path}")
     adata_tumor = sc.read_h5ad(t_path)
 
