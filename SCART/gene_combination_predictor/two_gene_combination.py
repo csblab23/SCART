@@ -133,12 +133,48 @@ def _hpa_tsv_to_binary_matrix(tsv_path: str):
     return matrix, genes, cells
 
 
-def _load_healthy_matrix(hpa_path=None):
+def _load_h5ad_subset(h5ad_path: str, target_genes: list = None):
+    """
+    Memory-safe h5ad loader — loads only target_genes from disk.
+    Avoids OOM on large reference files (e.g. HPA 664k × 19k = 98 GB).
+    Returns: matrix (int8 ndarray), genes (list[str])
+    """
+    if target_genes is None:
+        adata = sc.read_h5ad(h5ad_path)
+        X = adata.X.toarray() if not isinstance(adata.X, np.ndarray) else adata.X
+        return (X > 0).astype(np.int8), list(adata.var_names)
+
+    adata_backed = sc.read_h5ad(h5ad_path, backed="r")
+    all_genes    = list(adata_backed.var_names)
+    common       = [g for g in target_genes if g in set(all_genes)]
+
+    if len(common) == 0:
+        adata_backed.file.close()
+        raise ValueError(
+            f"No overlap between target genes and h5ad var_names in {h5ad_path}.\n"
+            "Check that both datasets use the same gene symbol convention (HGNC)."
+        )
+
+    print(f"  HPA h5ad has {len(all_genes)} genes — "
+          f"loading only {len(common)} that overlap with tumour matrix.")
+
+    adata_sub = adata_backed[:, common].to_memory()
+    adata_backed.file.close()
+
+    X = adata_sub.X.toarray() if not isinstance(adata_sub.X, np.ndarray) else adata_sub.X
+    return (X > 0).astype(np.int8), list(adata_sub.var_names)
+
+
+def _load_healthy_matrix(hpa_path=None, target_genes=None):
     """
     Load and binarise the healthy/normal expression matrix.
 
+    target_genes : list[str] or None
+        When provided, only these genes are loaded from h5ad files —
+        avoids OOM on large reference files like HPA (98 GB full size).
+
     Priority:
-      1. hpa_path ends with .h5ad  → read as AnnData
+      1. hpa_path ends with .h5ad  → memory-safe backed-mode load
       2. hpa_path ends with .tsv   → parse as HPA TSV
       3. hpa_path = None           → auto-download HPA TSV
       4. Fallback                  → legacy final_healthy.h5ad
@@ -149,9 +185,8 @@ def _load_healthy_matrix(hpa_path=None):
         if not os.path.exists(hpa_path):
             raise FileNotFoundError(f"Provided HPA h5ad not found: {hpa_path}")
         print(f"Loading user-supplied healthy h5ad: {hpa_path}")
-        adata = sc.read_h5ad(hpa_path)
-        X = adata.X.toarray() if not isinstance(adata.X, np.ndarray) else adata.X
-        return (X > 0).astype(np.int8), list(adata.var_names), f"user h5ad: {hpa_path}"
+        matrix, genes = _load_h5ad_subset(hpa_path, target_genes)
+        return matrix, genes, f"user h5ad: {hpa_path}"
 
     if hpa_path and (hpa_path.endswith(".tsv") or hpa_path.endswith(".tsv.gz")):
         if not os.path.exists(hpa_path):
@@ -171,9 +206,8 @@ def _load_healthy_matrix(hpa_path=None):
     ]:
         if os.path.exists(legacy):
             print(f"Using legacy healthy h5ad: {legacy}")
-            adata = sc.read_h5ad(legacy)
-            X = adata.X.toarray() if not isinstance(adata.X, np.ndarray) else adata.X
-            return (X > 0).astype(np.int8), list(adata.var_names), f"legacy: {legacy}"
+            matrix, genes = _load_h5ad_subset(legacy, target_genes)
+            return matrix, genes, f"legacy: {legacy}"
 
     raise FileNotFoundError(
         "No healthy/HPA matrix available.\n"
@@ -440,14 +474,16 @@ def run(
     # ── Load tumour matrix ─────────────────────────────────────────────
     t_path = tumor_path or _auto_tumor_h5ad()
     print(f"Loading tumour matrix: {t_path}")
-    adata_tumor = sc.read_h5ad(t_path)
+    adata_tumor  = sc.read_h5ad(t_path)
+    tumor_genes  = list(adata_tumor.var_names)
 
-    # ── Load healthy matrix ────────────────────────────────────────────
-    healthy_matrix_full, healthy_genes, healthy_source = _load_healthy_matrix(hpa_path)
+    # ── Load healthy matrix (pass tumour genes for memory-safe slicing) ─
+    healthy_matrix_full, healthy_genes, healthy_source = _load_healthy_matrix(
+        hpa_path, target_genes=tumor_genes
+    )
     print(f"Healthy matrix source: {healthy_source}")
 
     # ── Align gene spaces ──────────────────────────────────────────────
-    tumor_genes  = list(adata_tumor.var_names)
     common_genes = sorted(set(tumor_genes) & set(healthy_genes))
 
     if len(common_genes) == 0:
