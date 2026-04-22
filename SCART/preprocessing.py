@@ -452,10 +452,14 @@ def _python_find_malignant(cna_df, q_barcodes, signal_threshold=0.9):
             "conda install -c conda-forge scikit-learn"
         )
 
+    # Filter to only the barcodes that actually appear as columns in the CNA matrix
     q_cols    = [c for c in q_barcodes if c in cna_df.columns]
-    cna_query = cna_df[q_cols].values      # genes × cells
+    # Subset CNA matrix to query cells only, as a raw NumPy array (genes × cells)
+    cna_query = cna_df[q_cols].values
+    # Store dimensions for use in downstream calculations
     n_genes, n_cells = cna_query.shape
 
+    # Pre-build a safe fallback DataFrame returned if anything goes wrong
     empty_row = pd.DataFrame({
         "barcode"             : list(q_barcodes),
         "cna_signal"          : np.nan,
@@ -464,39 +468,54 @@ def _python_find_malignant(cna_df, q_barcodes, signal_threshold=0.9):
         "infercna_prediction" : "not.defined",
     })
 
+    # Early exit if none of the query barcodes were found in the CNA matrix
     if n_cells == 0:
         logger.warning("GMM: no query barcodes in CNA matrix.")
         return empty_row
 
     # Step 1 — cnaSignal
+    # Compute how many top genes to use: (1 - signal_threshold) fraction, minimum 1
     top_k      = max(1, int(n_genes * (1.0 - signal_threshold)))
+    # Take absolute CNA values so both gains and losses contribute equally
     abs_cna    = np.abs(cna_query)
+    # Sort genes ascending per cell and slice the last top_k rows to get the highest values
     top_vals   = np.sort(abs_cna, axis=0)[-top_k:, :]
+    # Average the top values per cell to produce one CNA activity score per cell
     cna_signal = top_vals.mean(axis=0)           # (n_cells,)
 
     # Step 2 — cnaCor
+    # Compute the mean CNA profile across all query cells as a representative tumour baseline
     tumour_mean = cna_query.mean(axis=1)          # (n_genes,)
+    # Compute Pearson correlation of each cell's CNA profile against the tumour mean profile
     cna_cor     = np.array([
         np.corrcoef(cna_query[:, i], tumour_mean)[0, 1]
         for i in range(n_cells)
     ])
+    # Replace any NaN correlations (from zero-variance cells) with 0
     cna_cor = np.nan_to_num(cna_cor, nan=0.0)
 
     # Step 3 — GMM
+    # Stack cnaSignal and cnaCor into a 2D feature matrix (n_cells × 2) for GMM input
     X_gmm = np.column_stack([cna_signal, cna_cor])
     try:
+        # Fit a 2-component full-covariance GMM on the (cnaSignal, cnaCor) feature space
         gmm    = GaussianMixture(n_components=2, covariance_type="full",
                                  random_state=42, max_iter=300)
         gmm.fit(X_gmm)
+        # Assign each cell to one of the two GMM clusters
         labels = gmm.predict(X_gmm)
 
         # Step 4 — higher mean cnaSignal → malignant
+        # Compute mean cnaSignal for each cluster to identify which one is malignant
         mean0       = cna_signal[labels == 0].mean()
         mean1       = cna_signal[labels == 1].mean()
+        # The cluster with higher average CNA activity is designated as malignant
         mal_cluster = 1 if mean1 > mean0 else 0
 
+        # Map numeric cluster labels to human-readable malignancy strings
         pred_labels = np.where(labels == mal_cluster, "malignant", "non-malignant")
 
+        # Build per-cell result DataFrame for cells found in the CNA matrix
         result_df = pd.DataFrame({
             "barcode"             : q_cols,
             "cna_signal"          : cna_signal,
@@ -505,12 +524,15 @@ def _python_find_malignant(cna_df, q_barcodes, signal_threshold=0.9):
             "infercna_prediction" : pred_labels,
         })
 
-        # Reindex to match all q_barcodes (some may be missing from CNA cols)
+        # Start from all original barcodes to ensure no cell is silently dropped
         result_full = pd.DataFrame({"barcode": list(q_barcodes)})
+        # Left-merge so barcodes missing from the CNA matrix get NaN rows
         result_full = result_full.merge(result_df, on="barcode", how="left")
+        # Fill missing predictions with "not.defined" for barcodes absent from CNA matrix
         result_full["infercna_prediction"] = (
             result_full["infercna_prediction"].fillna("not.defined")
         )
+        # Fill missing GMM labels with -1 sentinel value for barcodes absent from CNA matrix
         result_full["gmm_label"] = result_full["gmm_label"].fillna(-1).astype(int)
 
         logger.info(
@@ -556,6 +578,7 @@ def _run_infercna(
         from rpy2.robjects.packages import importr
     except ImportError as exc:
         err = str(exc)
+        # Detect known rpy2/R version mismatch signatures and give a targeted fix message
         if any(s in err for s in ("R_getVar", "undefined symbol", "R_ClosureEnv")):
             raise ImportError(
                 "rpy2/R version mismatch.\n"
@@ -580,24 +603,33 @@ def _run_infercna(
         "glandular epithelial cell",
         "ovarian surface epithelial cell",
     }
+    # Subset reference to normal epithelial cells only for the most relevant CNA baseline
     if "cell_ontology_class" in adata_ref.obs.columns:
         ep_mask      = adata_ref.obs["cell_ontology_class"].str.lower().isin(EPITHELIAL)
+        # Fall back to full reference if no epithelial cells are found in the reference
         adata_ref_ep = adata_ref[ep_mask].copy() if ep_mask.any() else adata_ref.copy()
         logger.info(f"inferCNA reference epithelial cells: {adata_ref_ep.n_obs}")
     else:
+        # No ontology column present — use the entire reference as-is
         adata_ref_ep = adata_ref.copy()
 
+    # Randomly subsample the reference down to ref_max_cells to prevent memory blowup
     if adata_ref_ep.n_obs > ref_max_cells:
         rng = np.random.default_rng(seed=42)
         idx = rng.choice(adata_ref_ep.n_obs, size=ref_max_cells, replace=False)
+        # Sort indices to preserve original cell order after subsampling
         adata_ref_ep = adata_ref_ep[np.sort(idx)].copy()
         logger.info(f"Reference subsampled to {ref_max_cells} cells.")
 
     # Log-CPM matrices (FIX 5)
     def _to_log_cpm(obj):
+        # Extract raw integer counts, preferring adata.raw over HVG layers
         X  = _get_raw_matrix(obj)
+        # Compute per-cell library size for CPM normalisation
         rs = X.sum(axis=1, keepdims=True)
+        # Guard against division-by-zero for empty cells
         rs[rs == 0] = 1
+        # Apply log1p(CPM) and transpose to genes × cells as inferCNA expects
         return np.log1p(X / rs * 1e6).T   # genes × cells
 
     logger.info("inferCNA: building query log-CPM ...")
@@ -606,6 +638,7 @@ def _run_infercna(
     mat_ref   = _to_log_cpm(adata_ref_ep)
 
     q_genes = np.array(adata_query.var_names)
+    # Prefer adata.raw gene names for the reference if it covers more genes than any layer
     r_genes = (
         np.array(adata_ref_ep.raw.var_names)
         if adata_ref_ep.raw is not None
@@ -618,29 +651,36 @@ def _run_infercna(
         else np.array(adata_ref_ep.var_names)
     )
 
+    # Find genes present in both query and reference for a shared CNA feature space
     common   = np.intersect1d(q_genes, r_genes)
     n_common = len(common)
     logger.info(f"inferCNA common genes: {n_common}")
 
+    # Raise hard error if overlap is too small for meaningful CNA inference
     if n_common < 200:
         raise ValueError(
             f"Only {n_common} common genes. Need >= 200.\n"
             "Both datasets must use HGNC gene symbols."
         )
+    # Warn if overlap is below the recommended threshold for reliable inference
     if n_common < 2000:
         logger.warning(f"Only {n_common} common genes — inferCNA prefers 5000+.")
 
     # FIX 4 — auto-cap n
+    # Cap n to (n_common - 1) to prevent an internal R error inside infercna()
     n_safe = min(n, n_common - 1)
     if n_safe < n:
         logger.warning(f"FIX 4: n capped {n} → {n_safe} (n_common={n_common}).")
 
+    # Get positional indices of common genes in query and reference gene arrays
     q_idx = np.where(np.isin(q_genes, common))[0]
     r_idx = np.where(np.isin(r_genes, common))[0]
 
+    # Horizontally stack query and reference matrices (query first) on common genes only
     mat_combined = np.hstack([mat_query[q_idx, :], mat_ref[r_idx, :]])
     sub_genes    = q_genes[q_idx]
     q_barcodes   = np.array(adata_query.obs_names)
+    # Prefix reference barcodes with "REF_" so inferCNA can distinguish them from query cells
     ref_barcodes = np.array(["REF_" + b for b in adata_ref_ep.obs_names])
     all_barcodes = np.concatenate([q_barcodes, ref_barcodes])
 
@@ -651,6 +691,7 @@ def _run_infercna(
 
     # Transfer to R and run infercna() ONLY — NOT findMalignant() (FIX 7)
     logger.info("inferCNA: transferring to R ...")
+    # Flatten in Fortran (column-major) order to match R's matrix memory layout
     ro.globalenv["mat_flat"]     = ro.FloatVector(mat_combined.flatten(order="F").tolist())
     ro.globalenv["n_rows"]       = ro.IntVector([mat_combined.shape[0]])
     ro.globalenv["n_cols"]       = ro.IntVector([mat_combined.shape[1]])
@@ -685,7 +726,9 @@ def _run_infercna(
     try:
         cna_cols   = list(cna_r.colnames)
         cna_rows   = list(cna_r.rownames)
+        # Reshape using Fortran order to correctly unpack R's column-major matrix
         cna_values = np.array(cna_r).reshape(len(cna_rows), len(cna_cols), order="F")
+        # Wrap in DataFrame with gene names as index and cell barcodes as columns
         cna_df     = pd.DataFrame(cna_values, index=cna_rows, columns=cna_cols)
         logger.info(
             f"CNA matrix retrieved: {cna_df.shape[0]} genes × {cna_df.shape[1]} cells"
@@ -701,6 +744,8 @@ def _run_infercna(
         })
 
     # FIX 7 — Python GMM replaces findMalignant()
+    # Run Python-side GMM on the CNA matrix — reference cells are ignored as their
+    # barcodes are prefixed with "REF_" and will not match q_barcodes
     logger.info("FIX 7: Python-side GMM findMalignant replacement ...")
     result_df = _python_find_malignant(cna_df, q_barcodes, signal_threshold)
     logger.info(
