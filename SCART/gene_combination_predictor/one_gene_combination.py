@@ -5,12 +5,25 @@ one_gene_combination.py
 Module 4a — Single-gene CAR-T target evaluation
 
 Evaluates every surface gene individually against tumour and healthy cells.
-Healthy matrix source (in priority order):
-  1. User-supplied HPA TSV/h5ad file  (hpa_path=)
-  2. Auto-downloaded HPA single-cell read-count TSV from proteinatlas.org
-  3. Legacy final_healthy.h5ad  (kept for backward compatibility)
 
-HPA matrix is binarised: 0 = not expressed, 1 = any expression detected.
+Healthy matrix source (priority order):
+  1. User-supplied HPA file  (hpa_path=)  .h5ad or .tsv/.tsv.gz
+  2. Auto-downloaded HPA single-cell read-count TSV from proteinatlas.org
+  3. Legacy final_healthy.h5ad  (backward compatibility)
+
+HPA matrix binarised: 0 = not expressed, 1 = any expression detected.
+
+Fix applied
+-----------
+_load_h5ad_subset: h5py dense-dataset fancy indexing requires col_indices in
+STRICTLY INCREASING order.  The original code passed indices in the order of
+target_genes (caller order), which is almost never sorted.  h5py raised:
+  TypeError: Indexing elements must be in increasing order
+
+Fix: sort col_indices before h5py read, then un-permute columns to restore
+the caller's gene order.  Sparse (CSR/CSC) paths are unaffected — scipy
+sparse accepts unsorted column indices — but they also explicitly use the
+raw (unsorted) indices for correctness.
 """
 
 import os
@@ -25,18 +38,11 @@ import scanpy as sc
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ──────────────────────────────────────────────────────────────────────────
-# Paths
-# ──────────────────────────────────────────────────────────────────────────
 HPA_ZIP_URL = "https://www.proteinatlas.org/download/tsv/rna_single_cell_read_count.zip"
 HPA_CACHE   = os.path.join(os.getcwd(), "hpa_cache", "rna_single_cell_read_count.tsv")
 
 
 def _auto_tumor_h5ad() -> str:
-    """
-    Auto-detect final_tumor.h5ad produced by Module 3.
-    Searches cwd and common output subdirectories.
-    """
     search = [
         os.path.join(os.getcwd(), "preprocessing_results", "final_tumor.h5ad"),
         os.path.join(os.getcwd(), "final_tumor.h5ad"),
@@ -47,19 +53,14 @@ def _auto_tumor_h5ad() -> str:
             return path
     raise FileNotFoundError(
         "Could not auto-detect final_tumor.h5ad.\n"
-        "Expected locations:\n"
+        "Expected:\n"
         "  <cwd>/preprocessing_results/final_tumor.h5ad\n"
         "  <cwd>/final_tumor.h5ad\n"
         "Pass tumor_path= explicitly if saved elsewhere."
     )
 
 
-# ──────────────────────────────────────────────────────────────────────────
-# HPA helpers
-# ──────────────────────────────────────────────────────────────────────────
-
 def _download_hpa(cache_path: str) -> str:
-    """Download and unzip the HPA single-cell TSV, return path to TSV."""
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     zip_path = cache_path.replace(".tsv", ".zip")
 
@@ -86,29 +87,16 @@ def _download_hpa(cache_path: str) -> str:
 
 
 def _hpa_tsv_to_binary_matrix(tsv_path: str):
-    """
-    Parse HPA single-cell TSV → binary (cells × genes) numpy array.
-
-    Expected HPA TSV columns: Gene, Cell type, Read count
-    Pivots to (cell_type × gene) then binarises: 0 → 0, >0 → 1.
-
-    Returns
-    -------
-    matrix : np.ndarray  shape (n_cell_types, n_genes), dtype int8
-    genes  : list[str]
-    cells  : list[str]   cell-type labels used as pseudo-cells
-    """
     print(f"Reading HPA TSV: {tsv_path}")
     df = pd.read_csv(tsv_path, sep="\t")
-
-    # Normalise column names — HPA occasionally changes capitalisation
     df.columns = df.columns.str.strip()
-    col_map = {c.lower(): c for c in df.columns}
+    col_map   = {c.lower(): c for c in df.columns}
     gene_col  = col_map.get("gene name", col_map.get("gene", None))
     cell_col  = col_map.get("cell type", col_map.get("cell_type", None))
     count_col = col_map.get("read count", col_map.get("tpm", col_map.get("ntpm", None)))
 
-    missing = [n for n, c in [("Gene", gene_col), ("Cell type", cell_col), ("Read count", count_col)] if c is None]
+    missing = [n for n, c in [("Gene", gene_col), ("Cell type", cell_col),
+                               ("Read count", count_col)] if c is None]
     if missing:
         raise ValueError(
             f"HPA TSV missing expected columns: {missing}\n"
@@ -119,42 +107,26 @@ def _hpa_tsv_to_binary_matrix(tsv_path: str):
     df.columns = ["gene", "cell_type", "count"]
     df["count"] = pd.to_numeric(df["count"], errors="coerce").fillna(0)
 
-    pivot = df.pivot_table(index="cell_type", columns="gene", values="count",
-                           aggfunc="sum", fill_value=0)
+    pivot  = df.pivot_table(index="cell_type", columns="gene", values="count",
+                            aggfunc="sum", fill_value=0)
     matrix = (pivot.values > 0).astype(np.int8)
     genes  = list(pivot.columns)
     cells  = list(pivot.index)
 
-    print(f"HPA matrix built: {len(cells)} cell types × {len(genes)} genes")
+    print(f"HPA matrix built: {len(cells)} cell types x {len(genes)} genes")
     return matrix, genes, cells
 
 
-def _load_healthy_matrix(hpa_path=None):
-    """
-    Load healthy/normal expression matrix.
-
-    Priority:
-      1. hpa_path provided and ends with .h5ad → read as AnnData
-      2. hpa_path provided and ends with .tsv / .tsv.gz → parse as HPA TSV
-      3. hpa_path = None → auto-download HPA TSV
-      4. Fallback → legacy final_healthy.h5ad
-
-    Returns
-    -------
-    matrix : np.ndarray  int8, shape (n_samples, n_genes)
-    genes  : list[str]
-    source : str         human-readable description
-    """
 def _load_h5ad_subset(h5ad_path: str, target_genes: list = None):
     """
     Fast, memory-safe h5ad loader.
 
-    Uses h5py directly to read only the required gene columns from the X
-    matrix — avoids loading the full matrix into RAM and avoids the slow
-    backed-mode AnnData slice.
+    Reads only the required gene columns from the X matrix via h5py —
+    avoids loading the full matrix into RAM.
 
-    For a 664k × 19k HPA file this reduces load time from minutes to seconds
-    by reading only 651 column indices instead of the full matrix.
+    FIX: col_indices are sorted before h5py indexing (h5py requires strictly
+    increasing order for dense datasets), then columns are un-permuted to
+    restore the caller's gene order.
 
     Returns: matrix (int8 ndarray), genes (list[str])
     """
@@ -168,10 +140,9 @@ def _load_h5ad_subset(h5ad_path: str, target_genes: list = None):
 
     with h5py.File(h5ad_path, "r") as f:
 
-        # ── Read var names ────────────────────────────────────────────
+        # Read var names
         if "var" in f:
             var_grp = f["var"]
-            # var index may be stored as _index or the first dataset
             if "_index" in var_grp:
                 all_genes = [g.decode() if isinstance(g, bytes) else g
                              for g in var_grp["_index"][:]]
@@ -182,53 +153,59 @@ def _load_h5ad_subset(h5ad_path: str, target_genes: list = None):
         else:
             raise ValueError(f"No 'var' group found in {h5ad_path}")
 
-        gene_set    = set(all_genes)
-        gene_index  = {g: i for i, g in enumerate(all_genes)}
-        common      = [g for g in target_genes if g in gene_set]
+        gene_set   = set(all_genes)
+        gene_index = {g: i for i, g in enumerate(all_genes)}
+        common     = [g for g in target_genes if g in gene_set]
 
         if len(common) == 0:
             raise ValueError(
                 f"No overlap between target genes and h5ad var_names in {h5ad_path}.\n"
-                "Check that both datasets use the same gene symbol convention (HGNC)."
+                "Check both datasets use HGNC gene symbols."
             )
 
-        col_indices = np.array([gene_index[g] for g in common], dtype=np.int32)
+        # Raw indices — in caller's (target_genes) order
+        raw_col_indices = np.array([gene_index[g] for g in common], dtype=np.int32)
+
+        # FIX: sort for h5py dense indexing; track permutation to restore order
+        sort_order     = np.argsort(raw_col_indices)
+        sorted_indices = raw_col_indices[sort_order]    # strictly increasing
+        restore_order  = np.argsort(sort_order)         # inverse permutation
+
         print(f"  HPA h5ad: {len(all_genes)} genes total — "
               f"extracting {len(common)} overlapping genes directly via h5py.")
 
-        # ── Read X — handle both dense and CSR sparse formats ────────
         x_grp = f["X"]
 
         if isinstance(x_grp, h5py.Dataset):
-            # Dense array — read only needed columns
-            X_sub = x_grp[:, col_indices]
+            # Dense dataset — MUST use sorted indices
+            X_sorted = x_grp[:, sorted_indices]
+            X_sub    = X_sorted[:, restore_order]       # restore caller order
 
         elif isinstance(x_grp, h5py.Group):
-            # Sparse CSR format (most common for h5ad)
             encoding = x_grp.attrs.get("encoding-type", b"").decode() \
                 if isinstance(x_grp.attrs.get("encoding-type", ""), bytes) \
                 else x_grp.attrs.get("encoding-type", "")
 
             if "csr" in encoding or all(k in x_grp for k in ("data", "indices", "indptr")):
                 data    = x_grp["data"][:]
-                indices = x_grp["indices"][:]   # column indices
+                indices = x_grp["indices"][:]
                 indptr  = x_grp["indptr"][:]
                 shape   = tuple(x_grp.attrs["shape"])
                 full    = _sp.csr_matrix((data, indices, indptr), shape=shape)
-                X_sub   = full[:, col_indices].toarray()
+                # scipy sparse accepts unsorted column indices
+                X_sub   = full[:, raw_col_indices].toarray()
 
-            elif "csc" in encoding or all(k in x_grp for k in ("data", "indices", "indptr")):
+            elif "csc" in encoding:
                 data    = x_grp["data"][:]
                 indices = x_grp["indices"][:]
                 indptr  = x_grp["indptr"][:]
                 shape   = tuple(x_grp.attrs["shape"])
                 full    = _sp.csc_matrix((data, indices, indptr), shape=shape)
-                X_sub   = full[:, col_indices].toarray()
+                X_sub   = full[:, raw_col_indices].toarray()
 
             else:
-                # Unknown sparse format — fall back to scanpy backed slice
                 logger.warning(
-                    "Unknown X encoding in h5ad — falling back to scanpy backed mode."
+                    "Unknown X encoding — falling back to scanpy backed mode."
                 )
                 adata_backed = sc.read_h5ad(h5ad_path, backed="r")
                 adata_sub    = adata_backed[:, common].to_memory()
@@ -241,24 +218,22 @@ def _load_h5ad_subset(h5ad_path: str, target_genes: list = None):
     return (X_sub > 0).astype(np.int8), common
 
 
-
 def _load_healthy_matrix(hpa_path=None, target_genes=None):
     """
     Load and binarise the healthy/normal expression matrix.
 
-    target_genes : list[str] or None
+    target_genes: list[str] or None
         When provided, only these genes are loaded from h5ad files —
-        avoids OOM on large reference files like HPA (98 GB full size).
+        avoids OOM on large reference files.
 
     Priority:
-      1. hpa_path ends with .h5ad  → memory-safe backed-mode load
-      2. hpa_path ends with .tsv   → parse as HPA TSV
-      3. hpa_path = None           → auto-download HPA TSV
-      4. Fallback                  → legacy final_healthy.h5ad
+      1. hpa_path ends with .h5ad  -> memory-safe load
+      2. hpa_path ends with .tsv   -> parse as HPA TSV
+      3. hpa_path = None           -> auto-download HPA TSV
+      4. Fallback                  -> legacy final_healthy.h5ad
 
     Returns: matrix (int8), genes (list[str]), source (str)
     """
-    # Option 1 — user supplied h5ad (memory-safe)
     if hpa_path and hpa_path.endswith(".h5ad"):
         if not os.path.exists(hpa_path):
             raise FileNotFoundError(f"Provided HPA h5ad not found: {hpa_path}")
@@ -266,21 +241,18 @@ def _load_healthy_matrix(hpa_path=None, target_genes=None):
         matrix, genes = _load_h5ad_subset(hpa_path, target_genes)
         return matrix, genes, f"user h5ad: {hpa_path}"
 
-    # Option 2 — user supplied TSV
     if hpa_path and (hpa_path.endswith(".tsv") or hpa_path.endswith(".tsv.gz")):
         if not os.path.exists(hpa_path):
             raise FileNotFoundError(f"Provided HPA TSV not found: {hpa_path}")
         matrix, genes, _ = _hpa_tsv_to_binary_matrix(hpa_path)
         return matrix, genes, f"user TSV: {hpa_path}"
 
-    # Option 3 — auto-download HPA
     if hpa_path is None:
         print("No HPA file provided — downloading from proteinatlas.org ...")
-        tsv = _download_hpa(HPA_CACHE)
+        tsv    = _download_hpa(HPA_CACHE)
         matrix, genes, _ = _hpa_tsv_to_binary_matrix(tsv)
         return matrix, genes, "auto-downloaded HPA"
 
-    # Option 4 — legacy fallback: look for final_healthy.h5ad near cwd
     for legacy in [
         os.path.join(os.getcwd(), "preprocessing_results", "final_healthy.h5ad"),
         os.path.join(os.getcwd(), "final_healthy.h5ad"),
@@ -297,21 +269,13 @@ def _load_healthy_matrix(hpa_path=None, target_genes=None):
     )
 
 
-# ──────────────────────────────────────────────────────────────────────────
-# Single-gene evaluator
-# ──────────────────────────────────────────────────────────────────────────
-
 def evaluate_single_gene(gene_idx, tumor_matrix, healthy_matrix):
     tumor_expr   = tumor_matrix[:, gene_idx]
     healthy_expr = healthy_matrix[:, gene_idx]
-    efficacy = np.sum(tumor_expr)   / len(tumor_expr)
-    safety   = np.sum(healthy_expr == 0) / len(healthy_expr)
+    efficacy = np.sum(tumor_expr)            / len(tumor_expr)
+    safety   = np.sum(healthy_expr == 0)     / len(healthy_expr)
     return efficacy, safety
 
-
-# ──────────────────────────────────────────────────────────────────────────
-# Public entry-point
-# ──────────────────────────────────────────────────────────────────────────
 
 def run(
     safety_threshold: float = 0.9,
@@ -325,60 +289,53 @@ def run(
     ----------
     safety_threshold : float
         Minimum fraction of healthy cells that must NOT express the gene.
-        Range 0–1. Default 0.9 (90% of healthy cells must be negative).
-        Higher → safer but fewer candidates.
-        Lower  → more candidates but higher off-tumour risk.
+        Range 0-1. Default 0.9. Higher = safer but fewer candidates.
     hpa_path : str or None
-        Path to a user-supplied HPA file (.h5ad or .tsv/.tsv.gz).
+        Path to user-supplied HPA file (.h5ad or .tsv/.tsv.gz).
         If None, HPA data is auto-downloaded from proteinatlas.org.
     tumor_path : str or None
-        Path to the tumour h5ad (Module 3 output).
-        If None, auto-detected from the SCART package directory.
+        Path to tumour h5ad (Module 3 output).
+        If None, auto-detected from preprocessing_results/.
 
     Returns
     -------
     pd.DataFrame  columns: Gene, Efficacy, Safety, ObjectiveScore
     """
-    # ── Load tumour matrix ─────────────────────────────────────────────
     t_path = tumor_path or _auto_tumor_h5ad()
     print(f"Loading tumour matrix: {t_path}")
-    adata_tumor  = sc.read_h5ad(t_path)
-    tumor_genes  = list(adata_tumor.var_names)
+    adata_tumor = sc.read_h5ad(t_path)
+    tumor_genes = list(adata_tumor.var_names)
 
-    # ── Load healthy matrix (pass tumour genes for memory-safe slicing) ─
     healthy_matrix_full, healthy_genes, healthy_source = _load_healthy_matrix(
         hpa_path, target_genes=tumor_genes
     )
     print(f"Healthy matrix source: {healthy_source}")
 
-    # ── Align gene spaces ──────────────────────────────────────────────
-    common_genes  = sorted(set(tumor_genes) & set(healthy_genes))
-
+    common_genes = sorted(set(tumor_genes) & set(healthy_genes))
     if len(common_genes) == 0:
         raise ValueError(
             "No common genes between tumour and healthy matrices.\n"
-            "Check that both use the same gene symbol convention (HGNC)."
+            "Check both datasets use HGNC gene symbols."
         )
     print(f"Common genes: {len(common_genes)}")
 
     # Tumour subset
-    adata_tumor = adata_tumor[:, common_genes].copy()
-    X_tumor = adata_tumor.X.toarray() if not isinstance(adata_tumor.X, np.ndarray) else adata_tumor.X
+    adata_tumor  = adata_tumor[:, common_genes].copy()
+    X_tumor      = adata_tumor.X.toarray() if not isinstance(adata_tumor.X, np.ndarray) else adata_tumor.X
     tumor_matrix = (X_tumor > 0).astype(np.int8)
 
-    # Healthy subset — reindex columns to match common_genes order
-    hg_idx = {g: i for i, g in enumerate(healthy_genes)}
-    col_idx = np.array([hg_idx[g] for g in common_genes])
+    # Healthy subset — reindex to common_genes order
+    hg_idx         = {g: i for i, g in enumerate(healthy_genes)}
+    col_idx        = np.array([hg_idx[g] for g in common_genes])
     healthy_matrix = healthy_matrix_full[:, col_idx]
 
     n_genes    = len(common_genes)
     gene_names = common_genes
 
-    print(f"Tumour matrix  : {tumor_matrix.shape[0]} cells × {n_genes} genes")
-    print(f"Healthy matrix : {healthy_matrix.shape[0]} samples × {n_genes} genes")
+    print(f"Tumour matrix  : {tumor_matrix.shape[0]} cells x {n_genes} genes")
+    print(f"Healthy matrix : {healthy_matrix.shape[0]} samples x {n_genes} genes")
     print("Starting single-gene analysis...")
 
-    # ── Evaluate every gene ────────────────────────────────────────────
     results = []
     tick    = max(1, n_genes // 100)
 
@@ -391,17 +348,13 @@ def run(
 
     print("\nAnalysis completed!")
 
-    # ── Build output DataFrame ─────────────────────────────────────────
-    df_results = pd.DataFrame(
-        results, columns=["Gene", "Efficacy", "Safety", "ObjectiveScore"]
-    )
+    df_results  = pd.DataFrame(results, columns=["Gene", "Efficacy", "Safety", "ObjectiveScore"])
     output_file = os.path.join(os.getcwd(), "single_gene_results.csv")
     df_results[["Gene", "Efficacy", "Safety"]].to_csv(
         output_file, index=False, header=["gene", "efficacy", "safety"]
     )
     print(f"Results saved to: {output_file}")
 
-    # ── Print top 10 ───────────────────────────────────────────────────
     df_top = (
         df_results[df_results["Safety"] >= safety_threshold]
         .sort_values(by="Efficacy", ascending=False)
