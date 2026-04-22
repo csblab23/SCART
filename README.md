@@ -9,7 +9,7 @@
 - [Overview](#overview)
 - [Pipeline Architecture](#pipeline-architecture)
 - [Installation](#installation)
-- [Quick Start](#quick-start)
+- [Quick Start](#SCART — Quick Start)
 - [Module Reference](#module-reference)
   - [Module 1 — Data Acquisition](#module-1--data-acquisition-geo_fetcherpy)
   - [Module 2 — Cell-Type Annotation](#module-2--cell-type-annotation-popv_annotationpy)
