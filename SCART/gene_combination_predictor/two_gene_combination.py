@@ -1,218 +1,526 @@
 #!/usr/bin/env python
 # coding: utf-8
+"""
+two_gene_combination.py
+Module 4b — Two-gene logic-gate CAR-T target evaluation (Genetic Algorithm)
+
+Searches over all (geneA, geneB, logic_gate) combinations using a Genetic
+Algorithm (DEAP) to find pairs that maximise tumour killing (efficacy) while
+sparing healthy tissue (safety).
+
+Logic gates evaluated:
+  A & B   — both genes must be expressed  (AND)
+  A | B   — either gene expressed         (OR)
+  A & !B  — A expressed, B NOT expressed  (NOT-B gate)
+
+Healthy matrix source (in priority order):
+  1. User-supplied HPA file  (hpa_path=)  → .h5ad  or  .tsv/.tsv.gz
+  2. Auto-downloaded HPA single-cell read-count TSV from proteinatlas.org
+  3. Legacy final_healthy.h5ad  (backward compatibility)
+
+HPA matrix binarised: 0 = not expressed, 1 = any expression present.
+"""
+
+import os
+import zipfile
+import urllib.request
+import logging
+import random
+import multiprocessing as mp
 
 import numpy as np
-import random
 import pandas as pd
 import scanpy as sc
 from deap import base, creator, tools, algorithms
-import multiprocessing as mp
-import os
 
-# =====================
-# Top-level function for multiprocessing
-# =====================
-def evaluate_individual(ind):
-    ind.fitness.values = toolbox.evaluate(ind)
-    return ind
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# =====================
-# Main module function
-# =====================
-def run(
-    safety_threshold=0.9,
-    pop_size=1000,
-    Gmax=100,
-    Ggap=10,
-    Rrep=0.1,
-    patience=50,
-    n_cpus=40
-):
+# ──────────────────────────────────────────────────────────────────────────
+# Paths
+# ──────────────────────────────────────────────────────────────────────────
+PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR    = os.path.abspath(os.path.join(PACKAGE_DIR, "..", ".."))
 
-    # =====================
-    # File paths
-    # =====================
-    PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
-    BASE_DIR = os.path.abspath(os.path.join(PACKAGE_DIR, "..", ".."))
+TUMOR_PATH   = os.path.join(BASE_DIR, "preprocessed_input", "final_tumor.h5ad")
+HEALTHY_PATH = os.path.join(BASE_DIR, "preprocessed_input", "final_healthy.h5ad")
 
-    TUMOR_PATH = os.path.join(BASE_DIR, "preprocessed_input", "final_tumor.h5ad")
-    HEALTHY_PATH = os.path.join(BASE_DIR, "preprocessed_input", "final_healthy.h5ad")
+HPA_ZIP_URL  = "https://www.proteinatlas.org/download/tsv/rna_single_cell_read_count.zip"
+HPA_CACHE    = os.path.join(BASE_DIR, "hpa_cache", "rna_single_cell_read_count.tsv")
 
-    OUTPUT_DIR = os.path.join(BASE_DIR, "scT-CAR_Designer", "tumor_h5ad_out")
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+# ──────────────────────────────────────────────────────────────────────────
+# HPA helpers  (shared with one_gene_combination)
+# ──────────────────────────────────────────────────────────────────────────
 
-    # =====================
-    # Load matrices
-    # =====================
-    adata_tumor = sc.read_h5ad(TUMOR_PATH)
-    adata_healthy = sc.read_h5ad(HEALTHY_PATH)
+def _download_hpa(cache_path: str) -> str:
+    """Download and unzip the HPA single-cell TSV, return local path."""
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    zip_path = cache_path.replace(".tsv", ".zip")
 
-    tumor_matrix = adata_tumor.X.toarray() if not isinstance(adata_tumor.X, np.ndarray) else adata_tumor.X
-    tumor_matrix = (tumor_matrix > 0).astype(int)
+    if os.path.exists(cache_path):
+        logger.info(f"HPA cache found: {cache_path}")
+        return cache_path
 
-    healthy_matrix = adata_healthy.X.toarray() if not isinstance(adata_healthy.X, np.ndarray) else adata_healthy.X
-    healthy_matrix = (healthy_matrix > 0).astype(int)
+    print(f"Downloading HPA single-cell read counts from:\n  {HPA_ZIP_URL}")
+    urllib.request.urlretrieve(HPA_ZIP_URL, zip_path)
+    print("Download complete. Extracting...")
 
-    gene_names = adata_tumor.var_names.tolist()
-    n_genes = len(gene_names)
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        tsv_names = [n for n in zf.namelist() if n.endswith(".tsv")]
+        if not tsv_names:
+            raise FileNotFoundError("No TSV found inside HPA zip archive.")
+        zf.extract(tsv_names[0], os.path.dirname(cache_path))
+        extracted = os.path.join(os.path.dirname(cache_path), tsv_names[0])
+        if extracted != cache_path:
+            os.rename(extracted, cache_path)
 
-    # =====================
-    # Logic Gates
-    # =====================
-    logic_gates = ['A & B', 'A | B', 'A & !B']
+    os.remove(zip_path)
+    print(f"HPA TSV saved to: {cache_path}")
+    return cache_path
 
-    def evaluate_gate(expression, A, B):
-        if expression == 'A & B':
-            return A & B
-        elif expression == 'A | B':
-            return A | B
-        elif expression == 'A & !B':
-            return A & (~B.astype(bool))
-        else:
-            raise ValueError(f"Unsupported logic expression: {expression}")
 
-    def evaluate_fitness(individual, gate_list=logic_gates):
-        geneA_idx, geneB_idx, gate_type_idx = individual
-        gate_type = gate_list[gate_type_idx]
+def _hpa_tsv_to_binary_matrix(tsv_path: str):
+    """
+    Parse HPA single-cell TSV → binary (cell_types × genes) numpy array.
 
-        A_tumor = tumor_matrix[:, geneA_idx]
-        B_tumor = tumor_matrix[:, geneB_idx]
-        A_healthy = healthy_matrix[:, geneA_idx]
-        B_healthy = healthy_matrix[:, geneB_idx]
+    Expected columns: Gene [name], Cell type, Read count
+    Returns: matrix (int8), genes (list), cells (list)
+    """
+    print(f"Reading HPA TSV: {tsv_path}")
+    df = pd.read_csv(tsv_path, sep="\t")
+    df.columns = df.columns.str.strip()
 
-        output_tumor = evaluate_gate(gate_type, A_tumor, B_tumor)
-        output_healthy = evaluate_gate(gate_type, A_healthy, B_healthy)
+    col_map   = {c.lower(): c for c in df.columns}
+    gene_col  = col_map.get("gene name", col_map.get("gene", None))
+    cell_col  = col_map.get("cell type", col_map.get("cell_type", None))
+    count_col = col_map.get("read count", col_map.get("tpm", col_map.get("ntpm", None)))
 
-        efficacy = np.sum(output_tumor) / len(output_tumor)
-        safety = np.sum(output_healthy == 0) / len(output_healthy)
+    missing = [n for n, c in [("Gene", gene_col), ("Cell type", cell_col),
+                               ("Read count", count_col)] if c is None]
+    if missing:
+        raise ValueError(
+            f"HPA TSV missing expected columns: {missing}\n"
+            f"Found columns: {list(df.columns)}"
+        )
 
-        individual.safety = safety
-        return (efficacy if safety >= safety_threshold else 0,)
+    df = df[[gene_col, cell_col, count_col]].copy()
+    df.columns = ["gene", "cell_type", "count"]
+    df["count"] = pd.to_numeric(df["count"], errors="coerce").fillna(0)
 
-    # =====================
-    # DEAP setup
-    # =====================
+    pivot  = df.pivot_table(index="cell_type", columns="gene", values="count",
+                             aggfunc="sum", fill_value=0)
+    matrix = (pivot.values > 0).astype(np.int8)
+    genes  = list(pivot.columns)
+    cells  = list(pivot.index)
+
+    print(f"HPA matrix built: {len(cells)} cell types × {len(genes)} genes")
+    return matrix, genes, cells
+
+
+def _load_healthy_matrix(hpa_path=None):
+    """
+    Load and binarise the healthy/normal expression matrix.
+
+    Priority:
+      1. hpa_path ends with .h5ad  → read as AnnData
+      2. hpa_path ends with .tsv   → parse as HPA TSV
+      3. hpa_path = None           → auto-download HPA TSV
+      4. Fallback                  → legacy final_healthy.h5ad
+
+    Returns: matrix (int8), genes (list[str]), source (str)
+    """
+    if hpa_path and hpa_path.endswith(".h5ad"):
+        if not os.path.exists(hpa_path):
+            raise FileNotFoundError(f"Provided HPA h5ad not found: {hpa_path}")
+        print(f"Loading user-supplied healthy h5ad: {hpa_path}")
+        adata = sc.read_h5ad(hpa_path)
+        X = adata.X.toarray() if not isinstance(adata.X, np.ndarray) else adata.X
+        return (X > 0).astype(np.int8), list(adata.var_names), f"user h5ad: {hpa_path}"
+
+    if hpa_path and (hpa_path.endswith(".tsv") or hpa_path.endswith(".tsv.gz")):
+        if not os.path.exists(hpa_path):
+            raise FileNotFoundError(f"Provided HPA TSV not found: {hpa_path}")
+        matrix, genes, _ = _hpa_tsv_to_binary_matrix(hpa_path)
+        return matrix, genes, f"user TSV: {hpa_path}"
+
+    if hpa_path is None:
+        print("No HPA file provided — downloading from proteinatlas.org ...")
+        tsv    = _download_hpa(HPA_CACHE)
+        matrix, genes, _ = _hpa_tsv_to_binary_matrix(tsv)
+        return matrix, genes, "auto-downloaded HPA"
+
+    if os.path.exists(HEALTHY_PATH):
+        print(f"Using legacy healthy h5ad: {HEALTHY_PATH}")
+        adata = sc.read_h5ad(HEALTHY_PATH)
+        X = adata.X.toarray() if not isinstance(adata.X, np.ndarray) else adata.X
+        return (X > 0).astype(np.int8), list(adata.var_names), f"legacy: {HEALTHY_PATH}"
+
+    raise FileNotFoundError(
+        "No healthy/HPA matrix available.\n"
+        "Provide hpa_path= or ensure final_healthy.h5ad exists."
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Logic gates
+# ──────────────────────────────────────────────────────────────────────────
+
+LOGIC_GATES = ["A & B", "A | B", "A & !B"]
+
+
+def evaluate_gate(expression: str, A: np.ndarray, B: np.ndarray) -> np.ndarray:
+    if expression == "A & B":
+        return A & B
+    elif expression == "A | B":
+        return A | B
+    elif expression == "A & !B":
+        return A & (~B.astype(bool))
+    raise ValueError(f"Unsupported logic expression: {expression}")
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Module-level matrices (set inside run() before multiprocessing starts)
+# ──────────────────────────────────────────────────────────────────────────
+_tumor_matrix   = None
+_healthy_matrix = None
+_gene_names     = None
+_n_genes        = None
+_safety_thresh  = 0.9
+_logic_gates    = LOGIC_GATES
+
+# DEAP toolbox — module-level so multiprocessing workers can access it
+toolbox = None
+
+
+def _init_deap(n_genes: int, safety_threshold: float):
+    """Initialise DEAP creators and toolbox."""
     global toolbox
+
     if "FitnessMax" not in creator.__dict__:
         creator.create("FitnessMax", base.Fitness, weights=(1.0,))
     if "Individual" not in creator.__dict__:
         creator.create("Individual", list, fitness=creator.FitnessMax)
 
     toolbox = base.Toolbox()
-    toolbox.register("geneA", random.randrange, n_genes)
-    toolbox.register("geneB", random.randrange, n_genes)
-    toolbox.register("gate", random.randrange, len(logic_gates))
+    toolbox.register("geneA",      random.randrange, n_genes)
+    toolbox.register("geneB",      random.randrange, n_genes)
+    toolbox.register("gate",       random.randrange, len(LOGIC_GATES))
     toolbox.register("individual", tools.initCycle, creator.Individual,
                      (toolbox.geneA, toolbox.geneB, toolbox.gate), n=1)
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
-    toolbox.register("evaluate", evaluate_fitness)
-    toolbox.register("mate", tools.cxOnePoint)
-    toolbox.register("mutate", tools.mutUniformInt,
+    toolbox.register("evaluate",   _evaluate_fitness)
+    toolbox.register("mate",       tools.cxOnePoint)
+    toolbox.register("mutate",     tools.mutUniformInt,
                      low=[0, 0, 0],
-                     up=[n_genes - 1, n_genes - 1, len(logic_gates) - 1],
+                     up=[n_genes - 1, n_genes - 1, len(LOGIC_GATES) - 1],
                      indpb=0.2)
-    toolbox.register("select", tools.selTournament, tournsize=2)
+    toolbox.register("select",     tools.selTournament, tournsize=2)
 
-    # =====================
-    # Run GA for one seed
-    # =====================
-    def run_ga(seed):
-        random.seed(seed)
-        np.random.seed(seed)
 
-        pop = toolbox.population(n=pop_size)
-        hof = tools.HallOfFame(100)
+def _evaluate_fitness(individual):
+    """Fitness function — uses module-level matrices."""
+    geneA_idx, geneB_idx, gate_type_idx = individual
+    gate_type = _logic_gates[gate_type_idx]
 
-        max_fitness = 0
-        generations_without_improvement = 0
-        all_results = []
+    A_tumor   = _tumor_matrix[:, geneA_idx]
+    B_tumor   = _tumor_matrix[:, geneB_idx]
+    A_healthy = _healthy_matrix[:, geneA_idx]
+    B_healthy = _healthy_matrix[:, geneB_idx]
 
-        for gen in range(Gmax):
-            offspring = algorithms.varAnd(pop, toolbox, cxpb=0.5, mutpb=0.2)
+    output_tumor   = evaluate_gate(gate_type, A_tumor,   B_tumor)
+    output_healthy = evaluate_gate(gate_type, A_healthy, B_healthy)
 
-            with mp.Pool(processes=n_cpus) as pool:
-                offspring = pool.map(evaluate_individual, offspring)
+    efficacy = np.sum(output_tumor)        / len(output_tumor)
+    safety   = np.sum(output_healthy == 0) / len(output_healthy)
 
-            for ind in offspring:
-                gA, gB, gT = ind
-                logic_gate = logic_gates[gT]
-                gene_pair = [gene_names[gA], gene_names[gB]]
-                efficacy = ind.fitness.values[0]
-                safety = getattr(ind, "safety", None)
-                all_results.append([gen, logic_gate, gene_pair, efficacy, safety, seed])
-                ind.generation = gen
-                ind.seed_value = seed
+    individual.safety = safety
+    return (efficacy if safety >= _safety_thresh else 0,)
 
-            pop = toolbox.select(offspring, k=pop_size)
-            hof.update(pop)
 
-            final_generation = gen
-            progress = ((final_generation + 1) / Gmax) * 100
-            print(f"\rProgress: {progress:.1f}% completed", end="")
+def _evaluate_individual_mp(ind):
+    """Top-level wrapper for multiprocessing pool.map."""
+    ind.fitness.values = toolbox.evaluate(ind)
+    return ind
 
-            current_best = max(ind.fitness.values[0] for ind in pop)
-            if current_best > max_fitness:
-                max_fitness = current_best
-                generations_without_improvement = 0
-            else:
-                generations_without_improvement += 1
 
-            if generations_without_improvement >= patience:
-                print(f"Early stopping")
-                break
+# ──────────────────────────────────────────────────────────────────────────
+# Post-processing helpers
+# ──────────────────────────────────────────────────────────────────────────
 
-        return hof, all_results
+def _normalize_gene_pair(genes):
+    return tuple(sorted(genes))
 
-    # =====================
-    # Execute 10 seeds
-    # =====================
-    all_hof = []
+
+def _postprocess_results(df: pd.DataFrame) -> pd.DataFrame:
+    """Remove same-gene pairs, deduplicate by gene pair, sort by efficacy."""
+    if isinstance(df.iloc[0]["Genes"], str):
+        df["Genes"] = df["Genes"].apply(eval)
+
+    df = df[df["Genes"].apply(lambda g: g[0] != g[1])].copy()
+    df["GenePairKey"] = df["Genes"].apply(_normalize_gene_pair)
+    df = df.sort_values(by="Efficacy", ascending=False)
+    df = df.drop_duplicates(subset=["GenePairKey"], keep="first")
+    return df.drop(columns=["GenePairKey"]).reset_index(drop=True)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Single GA run
+# ──────────────────────────────────────────────────────────────────────────
+
+def _run_ga(
+    seed: int,
+    pop_size: int,
+    Gmax: int,
+    Ggap: int,
+    Rrep: float,
+    patience: int,
+    n_cpus: int,
+):
+    random.seed(seed)
+    np.random.seed(seed)
+
+    pop = toolbox.population(n=pop_size)
+    hof = tools.HallOfFame(100)
+
+    max_fitness                  = 0
+    generations_without_improve  = 0
+    all_results                  = []
+
+    for gen in range(Gmax):
+        offspring = algorithms.varAnd(pop, toolbox, cxpb=0.5, mutpb=0.2)
+
+        with mp.Pool(processes=n_cpus) as pool:
+            offspring = pool.map(_evaluate_individual_mp, offspring)
+
+        # Periodic random-immigrant injection
+        if gen > 0 and gen % Ggap == 0:
+            n_replace = int(Rrep * pop_size)
+            offspring.sort(key=lambda ind: ind.fitness.values[0])
+            for i in range(n_replace):
+                new_ind = toolbox.individual()
+                new_ind.fitness.values = toolbox.evaluate(new_ind)
+                gA, gB, gT = new_ind
+                new_ind.generation  = gen
+                new_ind.seed_value  = seed
+                all_results.append([
+                    gen, LOGIC_GATES[gT],
+                    [_gene_names[gA], _gene_names[gB]],
+                    new_ind.fitness.values[0],
+                    getattr(new_ind, "safety", None),
+                    seed,
+                ])
+                offspring[i] = new_ind
+
+        for ind in offspring:
+            gA, gB, gT = ind
+            ind.generation = gen
+            ind.seed_value = seed
+            all_results.append([
+                gen, LOGIC_GATES[gT],
+                [_gene_names[gA], _gene_names[gB]],
+                ind.fitness.values[0],
+                getattr(ind, "safety", None),
+                seed,
+            ])
+
+        pop = toolbox.select(offspring, k=pop_size)
+        hof.update(pop)
+
+        progress = (gen + 1) / Gmax * 100
+        print(f"\rProgress: {progress:.1f}% completed", end="")
+
+        current_best = max(ind.fitness.values[0] for ind in pop)
+        if current_best > max_fitness:
+            max_fitness                 = current_best
+            generations_without_improve = 0
+        else:
+            generations_without_improve += 1
+
+        if generations_without_improve >= patience:
+            print(f"\nEarly stopping at generation {gen}")
+            break
+
+    return hof, all_results
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Public entry-point
+# ──────────────────────────────────────────────────────────────────────────
+
+def run(
+    # Healthy matrix
+    hpa_path: str = None,
+    # Tumour matrix
+    tumor_path: str = None,
+    # Safety
+    safety_threshold: float = 0.9,
+    # GA parameters
+    pop_size: int  = 1000,
+    Gmax: int      = 100,
+    Ggap: int      = 10,
+    Rrep: float    = 0.1,
+    patience: int  = 50,
+    n_cpus: int    = 1,
+    n_runs: int    = 10,
+):
+    """
+    Run two-gene logic-gate CAR-T target search via Genetic Algorithm.
+
+    Results are saved as CSV files in the current working directory.
+
+    Parameters
+    ----------
+    hpa_path : str or None
+        Path to user-supplied healthy/HPA file (.h5ad or .tsv/.tsv.gz).
+        If None, HPA data is auto-downloaded from proteinatlas.org.
+    tumor_path : str or None
+        Path to tumour h5ad (Module 3 output).
+        If None, auto-detected from the SCART package directory.
+    safety_threshold : float
+        Fraction of healthy samples that must NOT express the gene combination.
+        Range 0–1. Default 0.9.
+        Higher → more stringent safety, fewer valid combinations.
+        Lower  → more candidates, higher off-tumour risk.
+    pop_size : int
+        GA population size per generation. Default 1000.
+        Larger = better exploration, slower per generation.
+        Typical range: 200–5000.
+    Gmax : int
+        Maximum number of generations. Default 100.
+        More generations = more thorough search, longer runtime.
+        Typical range: 50–500.
+    Ggap : int
+        Every Ggap generations, Rrep fraction of worst individuals are
+        replaced with fresh random ones (random immigrants).
+        Prevents premature convergence. Default 10.
+    Rrep : float
+        Fraction of population replaced at each Ggap interval.
+        Range 0.0–0.5. Default 0.1 (10%).
+    patience : int
+        Stop early if fitness does not improve for this many generations.
+        Default 50. Set to Gmax to disable early stopping.
+    n_cpus : int
+        CPU cores used for parallel fitness evaluation. Default 1.
+        Increase to speed up the GA (e.g. n_cpus=8 on a laptop,
+        n_cpus=40 on an HPC node).
+    n_runs : int
+        Number of independent GA runs with different random seeds.
+        Default 10. More runs = more diverse solutions but longer runtime.
+
+    Returns
+    -------
+    df_hof : pd.DataFrame   Hall-of-Fame results (best unique pairs)
+    df_all : pd.DataFrame   Complete results across all runs and generations
+    """
+    global _tumor_matrix, _healthy_matrix, _gene_names, _n_genes, _safety_thresh
+
+    # ── Resolve output directory (always cwd) ─────────────────────────
+    output_dir = os.getcwd()
+
+    # ── Load tumour matrix ─────────────────────────────────────────────
+    t_path = tumor_path or TUMOR_PATH
+    if not os.path.exists(t_path):
+        raise FileNotFoundError(f"Tumour h5ad not found: {t_path}")
+    print(f"Loading tumour matrix: {t_path}")
+    adata_tumor = sc.read_h5ad(t_path)
+
+    # ── Load healthy matrix ────────────────────────────────────────────
+    healthy_matrix_full, healthy_genes, healthy_source = _load_healthy_matrix(hpa_path)
+    print(f"Healthy matrix source: {healthy_source}")
+
+    # ── Align gene spaces ──────────────────────────────────────────────
+    tumor_genes  = list(adata_tumor.var_names)
+    common_genes = sorted(set(tumor_genes) & set(healthy_genes))
+
+    if len(common_genes) == 0:
+        raise ValueError(
+            "No common genes between tumour and healthy matrices.\n"
+            "Check that both use the same gene symbol convention (HGNC)."
+        )
+    print(f"Common genes: {len(common_genes)}")
+
+    # Tumour subset
+    adata_tumor = adata_tumor[:, common_genes].copy()
+    X_tumor = adata_tumor.X.toarray() if not isinstance(adata_tumor.X, np.ndarray) else adata_tumor.X
+    tumor_mat = (X_tumor > 0).astype(np.int8)
+
+    # Healthy subset — reindex to common_genes order
+    hg_idx  = {g: i for i, g in enumerate(healthy_genes)}
+    col_idx = np.array([hg_idx[g] for g in common_genes])
+    healthy_mat = healthy_matrix_full[:, col_idx]
+
+    print(f"Tumour matrix  : {tumor_mat.shape[0]} cells × {len(common_genes)} genes")
+    print(f"Healthy matrix : {healthy_mat.shape[0]} samples × {len(common_genes)} genes")
+
+    # ── Set module-level state for multiprocessing workers ────────────
+    _tumor_matrix   = tumor_mat
+    _healthy_matrix = healthy_mat
+    _gene_names     = common_genes
+    _n_genes        = len(common_genes)
+    _safety_thresh  = safety_threshold
+
+    # ── Initialise DEAP ────────────────────────────────────────────────
+    _init_deap(_n_genes, safety_threshold)
+
+    # ── Run GA for each seed ───────────────────────────────────────────
+    all_hof     = []
     all_results = []
 
-    for run_id in range(10):
-        print(f"\nStarting run {run_id + 1}/10")
+    for run_id in range(n_runs):
         seed = 42 + run_id
-        hof, results = run_ga(seed)
+        print(f"\nStarting run {run_id + 1}/{n_runs}  (seed={seed})")
 
-        df_results = pd.DataFrame(
+        hof, results = _run_ga(
+            seed=seed,
+            pop_size=pop_size,
+            Gmax=Gmax,
+            Ggap=Ggap,
+            Rrep=Rrep,
+            patience=patience,
+            n_cpus=n_cpus,
+        )
+
+        df_run = pd.DataFrame(
             results,
             columns=["generation", "LogicGates", "Genes", "Efficacy", "Safety", "seed_value"]
         )
-        df_results = df_results[["seed_value", "generation", "LogicGates", "Genes", "Efficacy", "Safety"]]
-        all_results.append(df_results)
+        df_run = df_run[["seed_value", "generation", "LogicGates", "Genes", "Efficacy", "Safety"]]
+        all_results.append(df_run)
         all_hof.extend(hof)
 
-    def normalize_gene_pair(genes):
-        return tuple(sorted(genes))
-
-    def postprocess_results(df):
-        df = df[df["Genes"].apply(lambda g: g[0] != g[1])].copy()
-        df["GenePairKey"] = df["Genes"].apply(normalize_gene_pair)
-        df = df.sort_values(by="Efficacy", ascending=False)
-        df = df.drop_duplicates(subset=["GenePairKey"], keep="first")
-        return df.drop(columns=["GenePairKey"]).reset_index(drop=True)
-
+    # ── Post-process complete results ──────────────────────────────────
     df_all = pd.concat(all_results, ignore_index=True)
-    df_all = postprocess_results(df_all)
-    df_all.to_csv(os.path.join(OUTPUT_DIR, "two_gene_complete.csv"), index=False)
+    df_all = _postprocess_results(df_all)
+    complete_csv = os.path.join(output_dir, "two_gene_complete.csv")
+    df_all.to_csv(complete_csv, index=False)
+    print(f"\nComplete results saved to: {complete_csv}")
 
+    # ── Post-process Hall of Fame ──────────────────────────────────────
     hof_data = []
     for ind in all_hof:
-        gA, gB, gT = ind
-        logic_gate = logic_gates[gT]
-        gene_pair = [gene_names[gA], gene_names[gB]]
-        efficacy = ind.fitness.values[0]
-        safety = getattr(ind, "safety", None)
-        generation = getattr(ind, "generation", None)
-        seed_value = getattr(ind, "seed_value", None)
-        hof_data.append([seed_value, generation, logic_gate, gene_pair, efficacy, safety])
+        try:
+            gA, gB, gT = ind
+            hof_data.append([
+                getattr(ind, "seed_value", None),
+                getattr(ind, "generation", None),
+                LOGIC_GATES[gT],
+                [common_genes[gA], common_genes[gB]],
+                ind.fitness.values[0],
+                getattr(ind, "safety", None),
+            ])
+        except Exception as e:
+            logger.warning(f"Skipping HOF individual: {e}")
 
     df_hof = pd.DataFrame(
         hof_data,
         columns=["seed_value", "generation", "LogicGates", "Genes", "Efficacy", "Safety"]
     )
-    df_hof = postprocess_results(df_hof)
-    df_hof.to_csv(os.path.join(OUTPUT_DIR, "two_gene_hof.csv"), index=False)
+    df_hof = _postprocess_results(df_hof)
+    hof_csv = os.path.join(output_dir, "two_gene_hof.csv")
+    df_hof.to_csv(hof_csv, index=False)
+    print(f"Hall of Fame saved to: {hof_csv}")
 
     print("\nTop 10 from Hall of Fame:")
-    print(df_hof.head(10))
+    print(df_hof.head(10).to_string(index=False))
+
+    return df_hof, df_all
