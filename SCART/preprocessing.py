@@ -137,6 +137,15 @@ QC FIX  min_genes and max_mt removed from the public API of
         run_preprocessing_pipeline().  Both values are read from
         adata.uns['qc_params'] (written by Module 1).
         If the key is absent the QC step is SKIPPED ENTIRELY.
+
+SCM FIX scMalignantFinder is shipped inside the SCART package tree, not
+        installed as a standalone importable package.  The parent directory
+        of the scMalignantFinder package (.../SCART/external) is inserted
+        into sys.path so that `from scMalignantFinder import classifier`
+        resolves correctly regardless of conda environment configuration.
+        scmalignant_model_dir  → .../SCART/external/scMalignantFinder/model
+        _scm_pkg_dir           → .../SCART/external/scMalignantFinder
+        _scm_parent_dir        → .../SCART/external   (added to sys.path)
 """
 
 import os
@@ -947,15 +956,14 @@ def run_preprocessing_pipeline(
     adata_scm = _build_fullgene_adata_for_scm(adata_epi, feature_tsv, tumor_h5ad)
     print(f"  Gene space used: {adata_scm.n_vars} genes")
 
-    # scMalignantFinder is shipped inside the SCART package tree, not installed
-    # as a standalone importable package.  Insert its parent directory into
-    # sys.path so that  `from scMalignantFinder import classifier`  resolves
-    # correctly regardless of how the conda environment is configured.
-    # scmalignant_model_dir is already resolved above, e.g.:
-    #   .../SCART/external/scMalignantFinder/model
-    # The importable package sits one level up:
-    #   .../SCART/external/scMalignantFinder
-    # and its *parent*  .../SCART/external  must be on sys.path.
+    # SCM FIX — insert scMalignantFinder package parent dirs into sys.path.
+    # scMalignantFinder is shipped inside the SCART package tree and is NOT
+    # installed as a standalone importable package.  We must add both:
+    #   _scm_parent_dir  (.../SCART/external)         so Python finds the
+    #                                                  scMalignantFinder folder
+    #   _scm_pkg_dir     (.../SCART/external/scMalignantFinder)  as a fallback
+    # This mirrors the fix present in the inferCNA version and resolves
+    # ModuleNotFoundError / ImportError for `from scMalignantFinder import classifier`.
     import sys as _sys
     _scm_pkg_dir    = os.path.dirname(scmalignant_model_dir)   # .../scMalignantFinder
     _scm_parent_dir = os.path.dirname(_scm_pkg_dir)            # .../external
