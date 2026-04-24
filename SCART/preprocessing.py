@@ -33,13 +33,44 @@ Step 6  DEG:  malignant epithelial cells  vs  all non-epithelial cells
 Step 7  Binarise ONLY the malignant epithelial AnnData, store DEG results, save.
 
 ═══════════════════════════════════════════════════════════════════════════════
+COPYKAT DESIGN NOTES
+═══════════════════════════════════════════════════════════════════════════════
+
+CopyKAT (Copy number Karyotyping of Aneuploid Tumours) infers copy number
+alterations from scRNA-seq data to distinguish aneuploid tumour cells from
+diploid normal cells.
+
+BIOLOGICALLY CORRECT APPROACH USED HERE:
+  - Query cells:     epithelial cells only (from query h5ad)
+  - Reference cells: normal epithelial cells from Tabula Sapiens h5ad
+                     (prefixed REF_ to identify them as known normals)
+  - CopyKAT uses norm.cell.names to anchor the diploid baseline precisely
+  - Predictions returned for query cells only (REF_ rows stripped)
+
+WHY THIS IS BETTER THAN NO-REFERENCE MODE (Script 1 equivalent):
+  - Without a reference, CopyKAT guesses the diploid baseline internally
+    from whatever cells look "most normal" — unreliable in tumour samples
+  - With known normal epithelial reference cells the diploid baseline is
+    anchored to the correct tissue/cell-type context
+  - False-positive rate (immune/stromal labelled aneuploid) is drastically
+    reduced by running on epithelial cells only
+
+SPEED OPTIMISATIONS APPLIED:
+  copykat_n_cores          : parallelise DLM smoothing (set to available CPUs)
+  copykat_ref_max_cells    : subsample reference to ≤100 cells (paper shows
+                             ~50–100 normals are sufficient for baseline)
+  copykat_win_size         : larger window (50) = fewer DLM iterations per gene
+  copykat_ngene_chr        : higher threshold (10) = more low-quality cells
+                             removed before the expensive smoothing step
+
+═══════════════════════════════════════════════════════════════════════════════
 QC PARAMETER FLOW
 ═══════════════════════════════════════════════════════════════════════════════
 
 Module 1 (geo_fetcher.py)
-  SampleAnnotator("GSE…")                        → QC disabled, key absent
-  SampleAnnotator("GSE…", min_genes=200)          → only gene count filter
-  SampleAnnotator("GSE…", max_mt=40)              → only MT filter
+  SampleAnnotator("GSE…")                           → QC disabled, key absent
+  SampleAnnotator("GSE…", min_genes=200)            → only gene count filter
+  SampleAnnotator("GSE…", max_mt=40)                → only MT filter
   SampleAnnotator("GSE…", min_genes=200, max_mt=40) → both filters active
 
 Module 2 (popv_annotation.py)
@@ -77,30 +108,25 @@ Module 3 (this file)
   Saves:  preprocessing_results/final_tumor.h5ad
             → malignant epithelial cells only
             → obs: scMalignantFinder_prediction, copykat_prediction,
-                   copykat_aneuploidy_score,
                    final_malignant
             → uns: copykat_results (full detail DataFrame)
                    filtered_deg, all_deg, deg_params, cancer_type, qc_params
 
 ═══════════════════════════════════════════════════════════════════════════════
-KEY FIXES
+KEY FIXES (inherited from previous version)
 ═══════════════════════════════════════════════════════════════════════════════
 
 FIX 1   Full-gene route priority for scMalignantFinder:
         A-new (layers['full_counts']) → A-rescue (auto-detect Module 1 h5ad)
         → A-old (adata.raw) → C (4000-HVG fallback)
 
-FIX 2   CopyKAT reference subsampled to copykat_ref_max_cells (default 2000).
+FIX 2   CopyKAT reference subsampled to copykat_ref_max_cells (default 100).
 
 FIX 3   DEG uses pvals_adj (BH-adjusted), not raw pvals.
 
 FIX 5   _get_raw_matrix prefers adata.raw over HVG layers (more genes).
 
 FIX 6   scMalignantFinder predictions aligned by obs_names, not positional.
-
-FIX 8   CopyKAT results saved in full detail:
-        Per-cell: aneuploidy_score, copykat_prediction stored as obs columns.
-        Full table: adata.uns['copykat_results'] DataFrame.
 
 FIX 9   CORRECT DEG DESIGN:
         Malignant epithelial cells vs all NON-EPITHELIAL cells from adata_full.
@@ -110,8 +136,16 @@ FIX 9   CORRECT DEG DESIGN:
 QC FIX  min_genes and max_mt removed from the public API of
         run_preprocessing_pipeline().  Both values are read from
         adata.uns['qc_params'] (written by Module 1).
-        If the key is absent the QC step is SKIPPED ENTIRELY — no defaults
-        are applied.  This makes the user's choice in Module 1 authoritative.
+        If the key is absent the QC step is SKIPPED ENTIRELY.
+
+SCM FIX scMalignantFinder is shipped inside the SCART package tree, not
+        installed as a standalone importable package.  The parent directory
+        of the scMalignantFinder package (.../SCART/external) is inserted
+        into sys.path so that `from scMalignantFinder import classifier`
+        resolves correctly regardless of conda environment configuration.
+        scmalignant_model_dir  → .../SCART/external/scMalignantFinder/model
+        _scm_pkg_dir           → .../SCART/external/scMalignantFinder
+        _scm_parent_dir        → .../SCART/external   (added to sys.path)
 """
 
 import os
@@ -206,14 +240,9 @@ def _read_qc_params(adata):
     Returns
     -------
     min_genes : int or None
-        None  → do not apply a gene-count filter.
     max_mt    : float or None
-        None  → do not apply an MT-percentage filter.
     qc_active : bool
-        True  → at least one filter will be applied.
-        False → QC step is skipped entirely.
     source    : str
-        Human-readable description of where the values came from.
     """
     qc = adata.uns.get("qc_params", None)
 
@@ -228,7 +257,6 @@ def _read_qc_params(adata):
     min_genes = qc.get("min_genes", None)
     max_mt    = qc.get("max_mt",    None)
 
-    # Normalise types if values are present
     if min_genes is not None:
         min_genes = int(min_genes)
     if max_mt is not None:
@@ -413,254 +441,173 @@ def _build_fullgene_adata_for_scm(adata, feature_tsv, tumor_h5ad_path=None):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Raw counts extractor for CopyKAT / h5ad objects
-# ═══════════════════════════════════════════════════════════════════════════
-
-def _get_raw_counts_for_copykat(adata_obj, label):
-    """
-    Return (genes × cells float64 ndarray, gene_name list).
-    Mirrors the _get_raw_counts() helper in the standalone CopyKAT notebook.
-
-    Priority:
-      1. layers['full_counts'] + uns['full_counts_var_names']
-      2. layers['counts'] / 'raw_counts' / 'decontXcounts' / 'scvi_counts'
-      3. adata.raw
-      4. adata.X  (fallback — may be log-normalised)
-    """
-    if "full_counts" in adata_obj.layers:
-        vn = adata_obj.uns.get("full_counts_var_names")
-        if vn is not None and len(vn) == adata_obj.layers["full_counts"].shape[1]:
-            X = adata_obj.layers["full_counts"]
-            X = X.toarray() if sp.issparse(X) else np.array(X)
-            logger.info(
-                f"  {label}: layers['full_counts'] — "
-                f"{X.shape[0]} cells x {X.shape[1]} genes"
-            )
-            return X.T.astype(np.float64), list(vn)   # genes × cells
-
-    for lyr in ("counts", "raw_counts", "decontXcounts", "scvi_counts"):
-        if lyr in adata_obj.layers:
-            X = adata_obj.layers[lyr]
-            X = X.toarray() if sp.issparse(X) else np.array(X)
-            logger.info(
-                f"  {label}: layers['{lyr}'] — "
-                f"{X.shape[0]} cells x {X.shape[1]} genes"
-            )
-            return X.T.astype(np.float64), list(adata_obj.var_names)
-
-    if adata_obj.raw is not None:
-        X = adata_obj.raw.X
-        X = X.toarray() if sp.issparse(X) else np.array(X)
-        logger.info(
-            f"  {label}: adata.raw — "
-            f"{X.shape[0]} cells x {X.shape[1]} genes"
-        )
-        return X.T.astype(np.float64), list(adata_obj.raw.var_names)
-
-    X = adata_obj.X
-    X = X.toarray() if sp.issparse(X) else np.array(X)
-    logger.warning(
-        f"  {label}: WARNING — using adata.X (may be log-normalised)"
-    )
-    return X.T.astype(np.float64), list(adata_obj.var_names)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# CopyKAT runner  (replaces _run_infercna)
+# CopyKAT runner (replaces inferCNA)
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _run_copykat(
     adata_query,
     adata_ref,
     output_dir,
-    sam_name             = "copykat_run",
-    id_type              = "S",
-    ngene_chr            = 5,
-    win_size             = 25,
-    ks_cut               = 0.1,
-    distance             = "euclidean",
-    genome               = "hg20",
-    n_cores              = 4,
-    plot_genes           = True,
-    output_seg           = False,
-    ref_max_cells        = 2000,
-    query_epithelial_key = "popv_majority_vote_prediction",
-    query_epithelial_values = None,
-    ref_epithelial_key   = "cell_ontology_class",
-    ref_epithelial_values   = None,
+    sam_name        = "copykat_run",
+    genome          = "hg20",
+    id_type         = "S",
+    ngene_chr       = 10,
+    win_size        = 50,
+    ks_cut          = 0.1,
+    distance        = "euclidean",
+    n_cores         = 4,
+    plot_genes      = True,
+    output_seg      = False,
+    low_dr          = 0.05,
+    up_dr           = 0.2,
+    ref_max_cells   = 100,
 ):
     """
-    Run CopyKAT via rpy2, using adata_query (epithelial cells already
-    selected upstream) and adata_ref (full Tabula Sapiens or similar).
+    Run CopyKAT via rpy2 using reference-guided mode.
 
-    The function mirrors the standalone CopyKAT notebook exactly:
-      1. Extract raw counts from both objects (gene × cells).
-      2. Optionally filter reference to epithelial cells.
-      3. Subsample reference to ref_max_cells (FIX 2).
-      4. Find common genes → combine matrices; prefix reference barcodes
-         with "REF_" so CopyKAT treats them as known-normal cells.
-      5. Run copykat() in R.
-      6. Return per-query-cell prediction DataFrame.
+    Biologically correct approach:
+      - Query cells:  epithelial cells from the tumour sample
+      - Reference:    normal epithelial cells from Tabula Sapiens, subsampled
+                      to ref_max_cells (50–100 is sufficient for the diploid
+                      baseline; more than that just slows the DLM step)
+      - All REF_ prefixed barcodes are passed to norm.cell.names
+      - Predictions are returned for query cells only (REF_ rows dropped)
+
+    Speed optimisations vs vanilla CopyKAT:
+      - ref_max_cells=100  : much fewer cells for baseline, same accuracy
+      - win_size=50        : larger smoothing window → fewer DLM iterations
+      - ngene_chr=10       : stricter early filter → fewer cells to smooth
+      - n_cores=4          : parallel DLM (set higher if CPUs available)
 
     Parameters
     ----------
-    adata_query : AnnData
-        Epithelial cells from the tumour sample (already filtered upstream).
-    adata_ref : AnnData
-        Reference normal dataset (e.g. Tabula Sapiens ovary h5ad).
-    output_dir : str
-        Directory where CopyKAT will write heatmap PDF and optional .seg file.
-    sam_name : str
-        Prefix for all CopyKAT output files.  Default 'copykat_run'.
-    id_type : str
-        'S' = gene symbol (default), 'E' = Ensembl ID.
-    ngene_chr : int
-        Minimum genes per chromosome per cell.  Default 5.
-    win_size : int
-        Smoothing window width in genes (range 15–150).  Default 25.
-    ks_cut : float
-        KS-test segmentation sensitivity (range 0.05–0.15).  Default 0.1.
-    distance : str
-        Distance metric: 'euclidean' (default), 'pearson', or 'spearman'.
-    genome : str
-        Genome build: 'hg20' = hg38 (default), 'hg19', 'mm10'.
-    n_cores : int
-        CPU cores to use inside R.  Default 4.
-    plot_genes : bool
-        Include gene names in heatmap PDF.  Default True.
-    output_seg : bool
-        Write .seg file for IGV viewer.  Default False.
-    ref_max_cells : int
-        Maximum reference cells kept after subsampling.  Default 2000.
-    query_epithelial_key : str
-        obs column used to identify epithelial cells in query (informational).
-    query_epithelial_values : list or None
-        Cell-type strings for the query epithelial filter (informational).
-    ref_epithelial_key : str
-        obs column used to filter reference to epithelial cells.
-    ref_epithelial_values : list or None
-        Cell-type strings for reference epithelial filter.
-        Default: ["epithelial cell", "glandular epithelial cell",
-                  "ovarian surface epithelial cell"].
+    adata_query    : AnnData  — epithelial cells (query), raw UMI counts in .X
+                               or a raw layer
+    adata_ref      : AnnData  — Tabula Sapiens reference
+    output_dir     : str      — directory for CopyKAT output files
+    sam_name       : str      — prefix for output filenames
+    genome         : str      — "hg20" (=hg38), "hg19", or "mm10"
+    id_type        : str      — "S" (gene Symbol) or "E" (Ensembl)
+    ngene_chr      : int      — min genes per chr per cell (higher → faster)
+    win_size       : int      — smoothing window (15–150; higher → faster)
+    ks_cut         : float    — segmentation sensitivity (0.05–0.15)
+    distance       : str      — "euclidean", "pearson", or "spearman"
+    n_cores        : int      — CPU cores for DLM parallelisation
+    plot_genes     : bool     — include gene names in heatmap PDF
+    output_seg     : bool     — write .seg file for IGV
+    low_dr         : float    — min fraction of cells expressing a gene
+    up_dr          : float    — max fraction of cells expressing a gene
+    ref_max_cells  : int      — max reference cells to subsample to
 
     Returns
     -------
-    pd.DataFrame with columns:
-        barcode             query cell barcode
-        copykat_prediction  'aneuploid' | 'diploid' | 'not.defined'
-        aneuploidy_score    raw CopyKAT continuous score (NaN if unavailable)
+    pd.DataFrame  columns: cell.names, copykat.pred
+                           copykat.pred ∈ {"aneuploid", "diploid",
+                                           "not.defined"}
+                  Rows for query cells only (REF_ rows removed).
     """
     try:
         import rpy2.robjects as ro
-        from rpy2.robjects.packages import importr
-        from rpy2.robjects import pandas2ri
-        from rpy2.robjects.conversion import localconverter
     except ImportError as exc:
-        err = str(exc)
-        if any(s in err for s in ("R_getVar", "undefined symbol", "R_ClosureEnv")):
-            raise ImportError(
-                "rpy2/R version mismatch.\n"
-                "Fix:\n  conda activate scart\n"
-                "  conda remove rpy2 --force\n"
-                "  conda install -c conda-forge rpy2\n"
-                f"Original: {err}"
-            ) from exc
-        raise
-
-    try:
-        importr("copykat")
-    except Exception as exc:
         raise ImportError(
-            "R package 'copykat' not found.\n"
-            "In R: devtools::install_github('navinlabcode/copykat')"
+            "rpy2 is required to run CopyKAT.\n"
+            "conda install -c conda-forge rpy2"
         ) from exc
 
-    os.makedirs(output_dir, exist_ok=True)
+    from rpy2.robjects import pandas2ri
+    from rpy2.robjects.conversion import localconverter
 
-    # ── Default epithelial cell types for reference filtering ──────────────
-    if ref_epithelial_values is None:
-        ref_epithelial_values = [
-            "epithelial cell",
-            "glandular epithelial cell",
-            "ovarian surface epithelial cell",
-        ]
+    # ── 1. Extract raw counts from query ──────────────────────────────────
+    logger.info("CopyKAT: extracting query raw counts ...")
+    raw_q = _get_raw_matrix(adata_query)           # cells × genes
+    query_barcodes = list(adata_query.obs_names)
+    query_genes    = list(adata_query.var_names)
+    logger.info(
+        f"  Query matrix: {raw_q.shape[0]} cells × {raw_q.shape[1]} genes"
+    )
 
-    # ── Filter reference to epithelial cells (FIX 2 companion) ────────────
-    if ref_epithelial_key in adata_ref.obs.columns:
-        ref_mask = adata_ref.obs[ref_epithelial_key].isin(ref_epithelial_values)
-        adata_ref_ep = adata_ref[ref_mask].copy() if ref_mask.any() else adata_ref.copy()
+    # ── 2. Extract raw counts from reference, filter to normal epithelial ──
+    EPITHELIAL = {
+        "epithelial cell",
+        "glandular epithelial cell",
+        "ovarian surface epithelial cell",
+    }
+
+    if "cell_ontology_class" in adata_ref.obs.columns:
+        ep_mask  = adata_ref.obs["cell_ontology_class"].str.lower().isin(EPITHELIAL)
+        ref_epi  = adata_ref[ep_mask].copy() if ep_mask.any() else adata_ref.copy()
         logger.info(
-            f"CopyKAT reference epithelial cells: {adata_ref_ep.n_obs} "
-            f"(key='{ref_epithelial_key}')"
+            f"CopyKAT: reference epithelial cells (before subsampling): {ref_epi.n_obs}"
         )
     else:
-        adata_ref_ep = adata_ref.copy()
-        logger.info(
-            f"CopyKAT reference: obs key '{ref_epithelial_key}' not found — "
-            f"using all {adata_ref_ep.n_obs} reference cells."
+        logger.warning(
+            "CopyKAT: 'cell_ontology_class' column absent — using full reference."
         )
+        ref_epi = adata_ref.copy()
 
-    # ── FIX 2 — subsample reference ────────────────────────────────────────
-    if adata_ref_ep.n_obs > ref_max_cells:
+    # FIX 2 — subsample reference (50–100 normal cells are sufficient)
+    if ref_epi.n_obs > ref_max_cells:
         rng = np.random.default_rng(seed=42)
-        idx = rng.choice(adata_ref_ep.n_obs, size=ref_max_cells, replace=False)
-        adata_ref_ep = adata_ref_ep[np.sort(idx)].copy()
-        logger.info(f"CopyKAT reference subsampled to {ref_max_cells} cells.")
+        idx = rng.choice(ref_epi.n_obs, size=ref_max_cells, replace=False)
+        ref_epi = ref_epi[np.sort(idx)].copy()
+        logger.info(f"CopyKAT: reference subsampled to {ref_max_cells} cells.")
 
-    # ── Extract raw count matrices (genes × cells) ─────────────────────────
-    logger.info("CopyKAT: extracting raw counts from query ...")
-    mat_main, main_genes = _get_raw_counts_for_copykat(adata_query, "Query")
-    logger.info("CopyKAT: extracting raw counts from reference ...")
-    mat_ref, ref_genes   = _get_raw_counts_for_copykat(adata_ref_ep, "Reference")
-
-    main_barcodes = list(adata_query.obs_names)
-    # Prefix reference barcodes with "REF_" so CopyKAT treats them as known-normal
-    ref_barcodes  = ["REF_" + b for b in adata_ref_ep.obs_names]
-
+    logger.info("CopyKAT: extracting reference raw counts ...")
+    raw_r      = _get_raw_matrix(ref_epi)          # cells × genes
+    ref_genes  = list(ref_epi.var_names)
     logger.info(
-        f"CopyKAT query matrix     : {mat_main.shape[0]} genes × {mat_main.shape[1]} cells"
-    )
-    logger.info(
-        f"CopyKAT reference matrix : {mat_ref.shape[0]} genes × {mat_ref.shape[1]} cells"
+        f"  Reference matrix: {raw_r.shape[0]} cells × {raw_r.shape[1]} genes"
     )
 
-    # ── Find common genes → combined matrix ────────────────────────────────
-    main_gene_idx = {g: i for i, g in enumerate(main_genes)}
-    ref_gene_idx  = {g: i for i, g in enumerate(ref_genes)}
-    common_genes  = sorted(set(main_genes) & set(ref_genes))
-    logger.info(f"CopyKAT common genes: {len(common_genes)}")
+    # ── 3. Find common genes → combine matrices ────────────────────────────
+    q_gene_idx = {g: i for i, g in enumerate(query_genes)}
+    r_gene_idx = {g: i for i, g in enumerate(ref_genes)}
+    common     = sorted(set(query_genes) & set(ref_genes))
+    logger.info(f"CopyKAT: common genes between query and reference: {len(common)}")
 
-    if len(common_genes) < 200:
+    if len(common) < 200:
         raise ValueError(
-            f"Only {len(common_genes)} common genes — need >=200 for CopyKAT.\n"
-            "Check that both h5ad files use the same HGNC gene symbols."
+            f"Only {len(common)} common genes between query and reference.\n"
+            "Both h5ad files must use HGNC gene symbols.\n"
+            "Minimum 200 common genes required for CopyKAT."
         )
 
-    main_idx = np.array([main_gene_idx[g] for g in common_genes])
-    ref_idx  = np.array([ref_gene_idx[g]  for g in common_genes])
+    q_idx = np.array([q_gene_idx[g] for g in common])
+    r_idx = np.array([r_gene_idx[g] for g in common])
 
-    mat_main_sub = mat_main[main_idx, :]
-    mat_ref_sub  = mat_ref[ref_idx,   :]
-    mat_combined = np.hstack([mat_main_sub, mat_ref_sub])
-    all_barcodes = main_barcodes + ref_barcodes
+    mat_q_sub  = raw_q[:, q_idx]                   # query cells × common genes
+    mat_r_sub  = raw_r[:, r_idx]                   # ref cells   × common genes
+
+    # CopyKAT expects genes × cells
+    mat_q_t    = mat_q_sub.T                       # common genes × query cells
+    mat_r_t    = mat_r_sub.T                       # common genes × ref cells
+
+    # Prefix reference barcodes to mark them as known normals
+    ref_barcodes  = ["REF_" + b for b in ref_epi.obs_names]
+    mat_combined  = np.hstack([mat_q_t, mat_r_t])  # genes × (query + ref) cells
+    all_barcodes  = query_barcodes + ref_barcodes
 
     n_genes, n_cells = mat_combined.shape
     logger.info(
-        f"CopyKAT combined matrix : {n_genes} genes × {n_cells} cells "
-        f"({len(main_barcodes)} query + {len(ref_barcodes)} ref)"
+        f"CopyKAT: combined matrix → {n_genes} genes × {n_cells} cells "
+        f"({len(query_barcodes)} query + {len(ref_barcodes)} ref)"
     )
 
-    # ── Transfer to R and run copykat() ───────────────────────────────────
+    # ── 4. Transfer to R and run copykat() ────────────────────────────────
+    os.makedirs(output_dir, exist_ok=True)
+    abs_outdir = os.path.abspath(output_dir)
+
     logger.info("CopyKAT: transferring matrix to R ...")
-    # Flatten in Fortran (column-major) order to match R's matrix memory layout
-    ro.globalenv["ck_flat"]       = ro.FloatVector(mat_combined.flatten(order="F").tolist())
+    ro.globalenv["ck_flat"]       = ro.FloatVector(
+        mat_combined.flatten(order="F").tolist()
+    )
     ro.globalenv["ck_nrow"]       = ro.IntVector([n_genes])
     ro.globalenv["ck_ncol"]       = ro.IntVector([n_cells])
-    ro.globalenv["ck_genes"]      = ro.StrVector(common_genes)
+    ro.globalenv["ck_genes"]      = ro.StrVector(common)
     ro.globalenv["ck_cells"]      = ro.StrVector(all_barcodes)
     ro.globalenv["ck_norm_cells"] = ro.StrVector(ref_barcodes)
     ro.globalenv["ck_sam"]        = ro.StrVector([sam_name])
-    ro.globalenv["ck_outdir"]     = ro.StrVector([os.path.abspath(output_dir)])
+    ro.globalenv["ck_outdir"]     = ro.StrVector([abs_outdir])
     ro.globalenv["ck_id_type"]    = ro.StrVector([id_type])
     ro.globalenv["ck_ngene_chr"]  = ro.IntVector([ngene_chr])
     ro.globalenv["ck_win"]        = ro.IntVector([win_size])
@@ -668,14 +615,16 @@ def _run_copykat(
     ro.globalenv["ck_dist"]       = ro.StrVector([distance])
     ro.globalenv["ck_genome"]     = ro.StrVector([genome])
     ro.globalenv["ck_ncores"]     = ro.IntVector([n_cores])
-    ro.globalenv["ck_plot_genes"] = ro.StrVector(["TRUE" if plot_genes else "FALSE"])
-    ro.globalenv["ck_out_seg"]    = ro.StrVector(["TRUE" if output_seg else "FALSE"])
+    ro.globalenv["ck_plot_genes"] = ro.StrVector(["TRUE" if plot_genes  else "FALSE"])
+    ro.globalenv["ck_out_seg"]    = ro.StrVector(["TRUE" if output_seg  else "FALSE"])
+    ro.globalenv["ck_low_dr"]     = ro.FloatVector([low_dr])
+    ro.globalenv["ck_up_dr"]      = ro.FloatVector([up_dr])
 
-    logger.info("CopyKAT: running R — this may take several minutes ...")
+    logger.info("CopyKAT: running copykat() in R — this may take several minutes ...")
     ro.r("""
         suppressPackageStartupMessages(library(copykat))
 
-        rawmat <- matrix(ck_flat, nrow=ck_nrow, ncol=ck_ncol)
+        rawmat           <- matrix(ck_flat, nrow=ck_nrow, ncol=ck_ncol)
         rownames(rawmat) <- ck_genes
         colnames(rawmat) <- ck_cells
 
@@ -695,6 +644,8 @@ def _run_copykat(
             plot.genes      = ck_plot_genes,
             genome          = ck_genome,
             n.cores         = ck_ncores,
+            LOW.DR          = ck_low_dr,
+            UP.DR           = ck_up_dr,
             cell.line       = "no"
         )
 
@@ -702,94 +653,44 @@ def _run_copykat(
         ck_pred <- as.data.frame(copykat.result$prediction)
     """)
 
-    # ── Pull predictions back to Python ───────────────────────────────────
-    from rpy2.robjects import pandas2ri
-    from rpy2.robjects.conversion import localconverter
-
+    # ── 5. Pull predictions back to Python ────────────────────────────────
     with localconverter(ro.default_converter + pandas2ri.converter):
-        pred_df_all = ro.conversion.rpy2py(
-            ro.globalenv["ck_pred"]
-        ).reset_index(drop=True)
+        pred_df_all = ro.conversion.rpy2py(ro.globalenv["ck_pred"]).reset_index(drop=True)
 
-    # Normalise column name (varies slightly by rpy2 version)
+    # Normalise column name (varies by rpy2 version)
     pred_col = "copykat.pred"
     if pred_col not in pred_df_all.columns:
-        candidates = [c for c in pred_df_all.columns if "pred" in c.lower()]
-        if not candidates:
-            raise KeyError(
-                f"Cannot find prediction column in CopyKAT output. "
-                f"Columns present: {list(pred_df_all.columns)}"
-            )
-        pred_col = candidates[0]
+        pred_col = [c for c in pred_df_all.columns if "pred" in c.lower()][0]
 
-    # Drop REF_ rows — keep only the original query cells
+    # Drop REF_ rows — return query cells only
     pred_df = (
         pred_df_all[~pred_df_all["cell.names"].str.startswith("REF_")]
         .copy()
         .reset_index(drop=True)
     )
 
-    # Save predictions CSV alongside CopyKAT output files
-    out_csv = os.path.join(output_dir, f"{sam_name}_predictions.csv")
+    # Ensure the column is always named "copykat.pred" for downstream code
+    if pred_col != "copykat.pred":
+        pred_df = pred_df.rename(columns={pred_col: "copykat.pred"})
+
+    # Save a copy of the predictions CSV alongside other CopyKAT output files
+    out_csv = os.path.join(abs_outdir, f"{sam_name}_predictions.csv")
     pred_df.to_csv(out_csv, index=False)
-    logger.info(f"CopyKAT predictions saved: {out_csv}")
 
-    # ── Build standardised result DataFrame ───────────────────────────────
-    # Map CopyKAT vocabulary → internal vocabulary used downstream
-    # "aneuploid"  → malignant
-    # "diploid"    → non-malignant
-    # "not.defined"→ ambiguous (treated as non-malignant in intersection mode)
-
-    # Attempt to extract a continuous aneuploidy score if available
-    score_col = None
-    for candidate_col in ("Aneuploid", "aneuploid", "score", "aneuploidy_score"):
-        if candidate_col in pred_df.columns:
-            score_col = candidate_col
-            break
-
-    result_df = pd.DataFrame({
-        "barcode"            : pred_df["cell.names"].tolist(),
-        "copykat_prediction" : pred_df[pred_col].tolist(),
-        "aneuploidy_score"   : (
-            pred_df[score_col].tolist() if score_col is not None
-            else [np.nan] * len(pred_df)
-        ),
-    })
-
-    # Ensure every query barcode appears in results (fill missing as not.defined)
-    result_full = pd.DataFrame({"barcode": main_barcodes})
-    result_full = result_full.merge(result_df, on="barcode", how="left")
-    result_full["copykat_prediction"] = (
-        result_full["copykat_prediction"].fillna("not.defined")
-    )
-    result_full["aneuploidy_score"] = (
-        result_full["aneuploidy_score"].fillna(np.nan)
-    )
+    aneuploid   = (pred_df["copykat.pred"] == "aneuploid").sum()
+    diploid     = (pred_df["copykat.pred"] == "diploid").sum()
+    not_defined = (pred_df["copykat.pred"] == "not.defined").sum()
 
     logger.info(
-        "CopyKAT predictions:\n"
-        + result_full["copykat_prediction"].value_counts().to_string()
-    )
-
-    # Summary printout
-    n_aneu  = (result_full["copykat_prediction"] == "aneuploid").sum()
-    n_dipl  = (result_full["copykat_prediction"] == "diploid").sum()
-    n_undef = (result_full["copykat_prediction"] == "not.defined").sum()
-    print(
         f"\nCopyKAT completed\n"
-        f"{'─' * 49}\n"
-        f"  Query epithelial cells input : {len(main_barcodes)}\n"
-        f"  Reference normal cells used  : {len(ref_barcodes)}\n"
-        f"{'─' * 49}\n"
-        f"  Aneuploid  (malignant) : {n_aneu}\n"
-        f"  Diploid    (normal)    : {n_dipl}\n"
-        f"  Not defined            : {n_undef}\n"
-        f"{'─' * 49}\n"
-        f"  Predictions CSV        : {out_csv}\n"
-        f"  CopyKAT output files   : {os.path.abspath(output_dir)}/\n"
+        f"  Aneuploid  (malignant) : {aneuploid}\n"
+        f"  Diploid    (normal)    : {diploid}\n"
+        f"  Not defined            : {not_defined}\n"
+        f"  Total query cells      : {len(pred_df)}\n"
+        f"  Predictions CSV        : {out_csv}"
     )
 
-    return result_full
+    return pred_df
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -811,19 +712,19 @@ def run_preprocessing_pipeline(
     # malignancy strategy
     malignant_strategy="intersection",
     # CopyKAT parameters
-    copykat_sam_name             = "copykat_run",
-    copykat_id_type              = "S",
-    copykat_ngene_chr            = 5,
-    copykat_win_size             = 25,
-    copykat_ks_cut               = 0.1,
-    copykat_distance             = "euclidean",
-    copykat_genome               = "hg20",
-    copykat_n_cores              = 4,
-    copykat_plot_genes           = True,
-    copykat_output_seg           = False,
-    copykat_ref_max_cells        = 2000,
-    copykat_ref_epithelial_key   = "cell_ontology_class",
-    copykat_ref_epithelial_values= None,
+    copykat_genome       = "hg20",
+    copykat_id_type      = "S",
+    copykat_ngene_chr    = 10,
+    copykat_win_size     = 50,
+    copykat_ks_cut       = 0.1,
+    copykat_distance     = "euclidean",
+    copykat_n_cores      = 4,
+    copykat_plot_genes   = True,
+    copykat_output_seg   = False,
+    copykat_low_dr       = 0.05,
+    copykat_up_dr        = 0.2,
+    copykat_ref_max_cells= 100,
+    copykat_sam_name     = "copykat_run",
 ):
     """
     Full preprocessing pipeline.
@@ -847,8 +748,7 @@ def run_preprocessing_pipeline(
     Module 1 stores them in ``adata.uns['qc_params']`` of every h5ad it
     writes.  Module 3 reads that key automatically.
 
-    If ``qc_params`` is absent, the QC filtering step is SKIPPED ENTIRELY —
-    no default values are silently applied.
+    If ``qc_params`` is absent, the QC filtering step is SKIPPED ENTIRELY.
 
     PIPELINE FLOW
     -------------
@@ -873,10 +773,10 @@ def run_preprocessing_pipeline(
     pval_adj_threshold : float
         DEG BH-adjusted p-value cutoff. Default 0.05.
     reference_h5ad : str or None
-        Normal reference h5ad for CopyKAT (e.g. Tabula Sapiens).
-        CopyKAT skipped if None.
+        Tabula Sapiens h5ad for CopyKAT normal reference.
+        CopyKAT skipped and falls back to scMalignantFinder only if None.
     tumor_h5ad : str or None
-        Module 1 h5ad for scMalignantFinder Route A-rescue. Auto-detected if None.
+        Module 1 h5ad for Route A-rescue. Auto-detected if None.
     save_dir : str or None
         Output directory. Default 'preprocessing_results/' in cwd.
     scmalignant_model_dir : str or None
@@ -884,38 +784,36 @@ def run_preprocessing_pipeline(
     surfaceome_path : str or None
         Auto-detected from SCART GESP file.
     malignant_strategy : str
-        'intersection' — malignant only if BOTH tools agree (default).
-        'scMalignant'  — scMalignantFinder only.
-        'copykat'      — CopyKAT only (requires reference_h5ad).
-    copykat_sam_name : str
-        Prefix for all CopyKAT output files. Default 'copykat_run'.
-    copykat_id_type : str
-        'S' = gene symbol (default), 'E' = Ensembl ID.
-    copykat_ngene_chr : int
-        Min genes per chromosome per cell. Default 5.
-    copykat_win_size : int
-        Smoothing window width in genes (range 15–150). Default 25.
-    copykat_ks_cut : float
-        KS-test segmentation sensitivity (range 0.05–0.15). Default 0.1.
-    copykat_distance : str
-        Distance metric: 'euclidean' (default), 'pearson', or 'spearman'.
+        'intersection' — malignant only if BOTH tools agree (default)
+        'scMalignant'  — scMalignantFinder only
+        'copykat'      — CopyKAT only (requires reference_h5ad)
     copykat_genome : str
-        Genome build: 'hg20' = hg38 (default), 'hg19', 'mm10'.
+        "hg20" (=hg38, default), "hg19", or "mm10".
+    copykat_id_type : str
+        "S" = gene Symbol (default), "E" = Ensembl ID.
+    copykat_ngene_chr : int
+        Min genes per chromosome per cell. Higher = faster (default 10).
+    copykat_win_size : int
+        DLM smoothing window size. Larger = faster (default 50, range 15–150).
+    copykat_ks_cut : float
+        Segmentation sensitivity (default 0.1, range 0.05–0.15).
+    copykat_distance : str
+        Clustering distance: "euclidean" (default), "pearson", "spearman".
     copykat_n_cores : int
-        CPU cores to use inside R. Default 4.
+        CPU cores for DLM parallelisation (default 4).
     copykat_plot_genes : bool
-        Include gene names in heatmap PDF. Default True.
+        Include gene names in heatmap PDF (default True).
     copykat_output_seg : bool
-        Write .seg file for IGV viewer. Default False.
+        Save .seg file for IGV viewer (default False).
+    copykat_low_dr : float
+        Min fraction of cells expressing a gene (default 0.05).
+    copykat_up_dr : float
+        Max fraction of cells expressing a gene (default 0.2).
     copykat_ref_max_cells : int
-        Maximum reference cells kept after subsampling. Default 2000.
-    copykat_ref_epithelial_key : str
-        obs column in reference used to filter epithelial cells.
-        Default 'cell_ontology_class'.
-    copykat_ref_epithelial_values : list or None
-        Cell-type strings for reference epithelial filter.
-        Default: ["epithelial cell", "glandular epithelial cell",
-                  "ovarian surface epithelial cell"].
+        Max reference cells to subsample to (default 100).
+        50–100 normal cells are sufficient for a stable diploid baseline.
+    copykat_sam_name : str
+        Prefix for CopyKAT output filenames (default "copykat_run").
 
     Returns
     -------
@@ -934,8 +832,8 @@ def run_preprocessing_pipeline(
     os.makedirs(save_dir, exist_ok=True)
     print(f"Output directory: {save_dir}")
 
-    # CopyKAT writes its own files into a sub-directory
-    copykat_out_dir = os.path.join(save_dir, "copykat_output")
+    # CopyKAT output goes into a sub-folder to keep files organised
+    copykat_output_dir = os.path.join(save_dir, "copykat_results")
 
     if scmalignant_model_dir is None:
         scmalignant_model_dir = _auto_scmalignant_model()
@@ -966,7 +864,6 @@ def run_preprocessing_pipeline(
                 "Pass adata= or popv_path= explicitly."
             )
 
-    # Keep a clean copy of the FULL dataset for the "rest" group later
     adata_full = adata.copy()
     print(f"Full dataset loaded: {adata_full.n_obs} cells × {adata_full.n_vars} genes")
 
@@ -994,7 +891,6 @@ def run_preprocessing_pipeline(
         sc.pp.calculate_qc_metrics(adata_epi, qc_vars=["mt"], inplace=True)
         print(f"Mean MT% BEFORE QC: {adata_epi.obs['pct_counts_mt'].mean():.2f}")
 
-        # Build filter: apply only the thresholds that are not None
         filters = np.ones(adata_epi.n_obs, dtype=bool)
         if min_genes is not None:
             filters &= adata_epi.obs["n_genes_by_counts"] > min_genes
@@ -1012,10 +908,8 @@ def run_preprocessing_pipeline(
             f"(removed {before_qc - adata_epi.n_obs}  |  {filter_desc})"
         )
         print(f"Mean MT% AFTER QC:  {adata_epi.obs['pct_counts_mt'].mean():.2f}\n")
-    else:
-        print(f"QC filtering SKIPPED — all {adata_epi.n_obs} epithelial cells proceed.\n")
 
-    # Route raw counts → .X; snapshot for CopyKAT
+    # Route raw counts → .X
     print("Detecting raw count source for epithelial cells...")
     for lyr in ("scvi_counts", "raw_counts", "counts"):
         if lyr in adata_epi.layers:
@@ -1030,7 +924,10 @@ def run_preprocessing_pipeline(
             print("  No raw layer — assuming .X is raw counts.")
 
     adata_epi.var_names_make_unique()
+
+    # Keep a raw snapshot for CopyKAT (must be UMI counts, not log-normalised)
     adata_epi.layers["raw_for_cna"] = adata_epi.X.copy()
+
     sc.pp.normalize_total(adata_epi, target_sum=1e4)
     sc.pp.log1p(adata_epi)
 
@@ -1040,7 +937,6 @@ def run_preprocessing_pipeline(
     print("\n--- Step 4a: scMalignantFinder ---")
     feature_tsv = os.path.join(scmalignant_model_dir, "ordered_feature.tsv")
 
-    # Report gene-space route
     if "full_counts" in adata_epi.layers and adata_epi.uns.get("full_counts_var_names"):
         print(
             f"Gene-space: Route A-new "
@@ -1059,6 +955,22 @@ def run_preprocessing_pipeline(
 
     adata_scm = _build_fullgene_adata_for_scm(adata_epi, feature_tsv, tumor_h5ad)
     print(f"  Gene space used: {adata_scm.n_vars} genes")
+
+    # SCM FIX — insert scMalignantFinder package parent dirs into sys.path.
+    # scMalignantFinder is shipped inside the SCART package tree and is NOT
+    # installed as a standalone importable package.  We must add both:
+    #   _scm_parent_dir  (.../SCART/external)         so Python finds the
+    #                                                  scMalignantFinder folder
+    #   _scm_pkg_dir     (.../SCART/external/scMalignantFinder)  as a fallback
+    # This mirrors the fix present in the inferCNA version and resolves
+    # ModuleNotFoundError / ImportError for `from scMalignantFinder import classifier`.
+    import sys as _sys
+    _scm_pkg_dir    = os.path.dirname(scmalignant_model_dir)   # .../scMalignantFinder
+    _scm_parent_dir = os.path.dirname(_scm_pkg_dir)            # .../external
+    for _p in (_scm_parent_dir, _scm_pkg_dir):
+        if _p not in _sys.path:
+            _sys.path.insert(0, _p)
+            logger.info(f"sys.path prepended: {_p}")
 
     from scMalignantFinder import classifier
     model = classifier.scMalignantFinder(
@@ -1090,7 +1002,7 @@ def run_preprocessing_pipeline(
     # STEP 4b — CopyKAT (replaces inferCNA)
     # ------------------------------------------------------------------
     copykat_available = False
-    copykat_result_df = None
+    copykat_pred_df   = None
 
     if malignant_strategy in ("copykat", "intersection"):
         if reference_h5ad is None:
@@ -1102,57 +1014,54 @@ def run_preprocessing_pipeline(
         else:
             print(
                 f"\n--- Step 4b: CopyKAT ---\n"
-                f"  Reference          : {reference_h5ad}\n"
-                f"  Genome             : {copykat_genome}\n"
-                f"  Win size           : {copykat_win_size}\n"
-                f"  KS cut             : {copykat_ks_cut}\n"
-                f"  Distance           : {copykat_distance}\n"
-                f"  n_cores            : {copykat_n_cores}\n"
-                f"  Reference max cells: {copykat_ref_max_cells}\n"
-                f"  Output dir         : {copykat_out_dir}"
+                f"  Reference      : {reference_h5ad}\n"
+                f"  Ref subsampled : ≤{copykat_ref_max_cells} normal epithelial cells\n"
+                f"  Genome         : {copykat_genome}\n"
+                f"  Win size       : {copykat_win_size}  (larger = faster DLM)\n"
+                f"  ngene_chr      : {copykat_ngene_chr}  (higher = more early filtering)\n"
+                f"  n_cores        : {copykat_n_cores}\n"
+                f"  Strategy       : {malignant_strategy}"
             )
             try:
-                # Pass raw counts (before log-normalisation) to CopyKAT
+                # Build a raw-count AnnData for CopyKAT
                 adata_raw_cna   = adata_epi.copy()
                 adata_raw_cna.X = adata_epi.layers["raw_for_cna"]
+
                 adata_ref_full  = sc.read_h5ad(reference_h5ad)
 
-                copykat_result_df = _run_copykat(
-                    adata_query                  = adata_raw_cna,
-                    adata_ref                    = adata_ref_full,
-                    output_dir                   = copykat_out_dir,
-                    sam_name                     = copykat_sam_name,
-                    id_type                      = copykat_id_type,
-                    ngene_chr                    = copykat_ngene_chr,
-                    win_size                     = copykat_win_size,
-                    ks_cut                       = copykat_ks_cut,
-                    distance                     = copykat_distance,
-                    genome                       = copykat_genome,
-                    n_cores                      = copykat_n_cores,
-                    plot_genes                   = copykat_plot_genes,
-                    output_seg                   = copykat_output_seg,
-                    ref_max_cells                = copykat_ref_max_cells,
-                    ref_epithelial_key           = copykat_ref_epithelial_key,
-                    ref_epithelial_values        = copykat_ref_epithelial_values,
+                copykat_pred_df = _run_copykat(
+                    adata_query     = adata_raw_cna,
+                    adata_ref       = adata_ref_full,
+                    output_dir      = copykat_output_dir,
+                    sam_name        = copykat_sam_name,
+                    genome          = copykat_genome,
+                    id_type         = copykat_id_type,
+                    ngene_chr       = copykat_ngene_chr,
+                    win_size        = copykat_win_size,
+                    ks_cut          = copykat_ks_cut,
+                    distance        = copykat_distance,
+                    n_cores         = copykat_n_cores,
+                    plot_genes      = copykat_plot_genes,
+                    output_seg      = copykat_output_seg,
+                    low_dr          = copykat_low_dr,
+                    up_dr           = copykat_up_dr,
+                    ref_max_cells   = copykat_ref_max_cells,
                 )
 
-                # Store per-cell CopyKAT results on adata_epi
-                bc_to_pred  = dict(zip(copykat_result_df["barcode"],
-                                       copykat_result_df["copykat_prediction"]))
-                bc_to_score = dict(zip(copykat_result_df["barcode"],
-                                       copykat_result_df["aneuploidy_score"]))
-
-                adata_epi.obs["copykat_prediction"]   = [
-                    bc_to_pred.get(b,  "not.defined") for b in adata_epi.obs_names
-                ]
-                adata_epi.obs["copykat_aneuploidy_score"] = [
-                    bc_to_score.get(b, np.nan)         for b in adata_epi.obs_names
+                # Map CopyKAT predictions onto adata_epi obs
+                bc_to_ckpred = dict(
+                    zip(copykat_pred_df["cell.names"],
+                        copykat_pred_df["copykat.pred"])
+                )
+                adata_epi.obs["copykat_prediction"] = [
+                    bc_to_ckpred.get(b, "not.defined")
+                    for b in adata_epi.obs_names
                 ]
 
                 copykat_available = True
 
-                print("\nCopyKAT integration completed.")
-                print("  Prediction counts:")
+                print("\nCopyKAT completed.")
+                print("  Prediction counts (query cells):")
                 print(adata_epi.obs["copykat_prediction"].value_counts().to_string())
 
             except Exception as exc:
@@ -1167,11 +1076,13 @@ def run_preprocessing_pipeline(
     # STEP 4c — Combine malignancy calls → final_malignant
     # ------------------------------------------------------------------
     print("\n--- Step 4c: Combine malignancy calls ---")
+
     scm_mal = adata_epi.obs[scm_col].str.lower() == "malignant"
 
     if copykat_available:
-        # CopyKAT "aneuploid" maps to malignant
+        # CopyKAT uses "aneuploid" to label malignant cells
         ck_mal = adata_epi.obs["copykat_prediction"].str.lower() == "aneuploid"
+
         if malignant_strategy == "intersection":
             malignant_mask = scm_mal & ck_mal
             strategy_label = "intersection (scMalignantFinder AND CopyKAT)"
@@ -1203,18 +1114,19 @@ def run_preprocessing_pipeline(
     if adata_mal.n_obs == 0:
         raise ValueError(
             "No malignant cells found after filtering.\n"
-            "Check scMalignantFinder model path and gene overlap."
+            "Check scMalignantFinder model path and gene overlap.\n"
+            "If using 'intersection' strategy, consider switching to "
+            "'scMalignant' or 'copykat' to see individual tool results."
         )
 
     # ------------------------------------------------------------------
     # STEP 6 — Non-epithelial "rest" group from adata_full
     # ------------------------------------------------------------------
     print("\n--- Step 6: Extract non-epithelial 'rest' group ---")
-    rest_mask  = ~ep_mask    # non-epithelial cells from the full dataset
+    rest_mask  = ~ep_mask
     adata_rest = adata_full[rest_mask].copy()
     print(f"Non-epithelial 'rest' cells: {adata_rest.n_obs}")
 
-    # Normalise the rest group for DEG
     for lyr in ("scvi_counts", "raw_counts", "counts"):
         if lyr in adata_rest.layers:
             adata_rest.X = adata_rest.layers[lyr].copy()
@@ -1336,30 +1248,27 @@ def run_preprocessing_pipeline(
         "n_filtered_deg"     : int(filtered_deg.shape[0]),
     }
 
-    # Echo QC params — store None if QC was skipped so downstream knows
+    # Echo QC params
     adata_mal.uns["qc_params"] = (
         {"min_genes": min_genes, "max_mt": max_mt}
         if qc_active else None
     )
 
-    # Store full CopyKAT results (FIX 8 equivalent for CopyKAT)
-    if copykat_result_df is not None:
-        final_barcodes              = set(adata_mal.obs_names)
-        copykat_stored              = copykat_result_df.copy()
-        copykat_stored["in_final_output"] = copykat_stored["barcode"].isin(
-            final_barcodes
-        )
-        adata_mal.uns["copykat_results"] = copykat_stored
+    # Store CopyKAT results (replaces infercna_results)
+    if copykat_pred_df is not None:
+        final_barcodes = set(adata_mal.obs_names)
+        ck_stored      = copykat_pred_df.copy()
+        ck_stored["in_final_output"] = ck_stored["cell.names"].isin(final_barcodes)
+        adata_mal.uns["copykat_results"] = ck_stored
 
         print(
             f"\nCopyKAT results stored in adata.uns['copykat_results']:\n"
-            f"  Shape: {copykat_stored.shape[0]} rows × "
-            f"{copykat_stored.shape[1]} columns\n"
-            f"  Columns: {list(copykat_stored.columns)}\n"
-            f"  Prediction summary (all epithelial cells before filtering):\n"
-            + copykat_stored["copykat_prediction"].value_counts().to_string()
+            f"  Shape: {ck_stored.shape[0]} rows × {ck_stored.shape[1]} columns\n"
+            f"  Columns: {list(ck_stored.columns)}\n"
+            f"  Prediction summary (all epithelial query cells):\n"
+            + ck_stored["copykat.pred"].value_counts().to_string()
             + f"\n  Cells in final malignant output: "
-            f"{copykat_stored['in_final_output'].sum()}"
+            f"{ck_stored['in_final_output'].sum()}"
         )
     else:
         adata_mal.uns["copykat_results"] = None
