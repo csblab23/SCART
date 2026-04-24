@@ -899,8 +899,6 @@ def run_preprocessing_pipeline(
             f"(removed {before_qc - adata_epi.n_obs}  |  {filter_desc})"
         )
         print(f"Mean MT% AFTER QC:  {adata_epi.obs['pct_counts_mt'].mean():.2f}\n")
-    else:
-        print(f"QC filtering SKIPPED — all {adata_epi.n_obs} epithelial cells proceed.\n")
 
     # Route raw counts → .X
     print("Detecting raw count source for epithelial cells...")
@@ -948,6 +946,23 @@ def run_preprocessing_pipeline(
 
     adata_scm = _build_fullgene_adata_for_scm(adata_epi, feature_tsv, tumor_h5ad)
     print(f"  Gene space used: {adata_scm.n_vars} genes")
+
+    # scMalignantFinder is shipped inside the SCART package tree, not installed
+    # as a standalone importable package.  Insert its parent directory into
+    # sys.path so that  `from scMalignantFinder import classifier`  resolves
+    # correctly regardless of how the conda environment is configured.
+    # scmalignant_model_dir is already resolved above, e.g.:
+    #   .../SCART/external/scMalignantFinder/model
+    # The importable package sits one level up:
+    #   .../SCART/external/scMalignantFinder
+    # and its *parent*  .../SCART/external  must be on sys.path.
+    import sys as _sys
+    _scm_pkg_dir    = os.path.dirname(scmalignant_model_dir)   # .../scMalignantFinder
+    _scm_parent_dir = os.path.dirname(_scm_pkg_dir)            # .../external
+    for _p in (_scm_parent_dir, _scm_pkg_dir):
+        if _p not in _sys.path:
+            _sys.path.insert(0, _p)
+            logger.info(f"sys.path prepended: {_p}")
 
     from scMalignantFinder import classifier
     model = classifier.scMalignantFinder(
