@@ -143,29 +143,12 @@ def _find_scart_resource(relative_path):
 
 
 def _auto_scmalignant_model():
-    """
-    Return the absolute path to the bundled scMalignantFinder model directory:
-        <scart_root>/external/scMalignantFinder/model/
-
-    scMalignantFinder is NOT installed via pip — its source lives inside the
-    SCART package tree at:
-        <scart_root>/external/scMalignantFinder/
-
-    _load_scmalignant_classifier() uses the parent of this model dir to put
-    the bundled source on sys.path at import time.
-    """
     path = _find_scart_resource("external/scMalignantFinder/model")
     if path is None:
         raise FileNotFoundError(
-            "Could not auto-detect scMalignantFinder model directory.\n"
-            "Expected layout inside the installed SCART package:\n"
-            "  <scart_root>/external/scMalignantFinder/model/\n"
-            "  <scart_root>/external/scMalignantFinder/scMalignantFinder/  "
-            "← Python source\n\n"
-            "Pass scmalignant_model_dir= explicitly if your layout differs.\n"
-            "Example:\n"
-            "  scmalignant_model_dir="
-            "'/path/to/SCART/external/scMalignantFinder/model'"
+            "Could not auto-detect scMalignantFinder model.\n"
+            "Pass scmalignant_model_dir= explicitly.\n"
+            "Expected: <scart_root>/external/scMalignantFinder/model/"
         )
     return path
 
