@@ -106,6 +106,13 @@ FIX 9   CORRECT DEG DESIGN:
         Both groups surfaceome-filtered before DEG.
         Non-malignant epithelial cells are REMOVED (not used in any group).
 
+FIX 10  CopyKAT runs via a fresh Rscript subprocess instead of rpy2.
+        This bypasses the R_HOME lock-in bug where rpy2 binds to a different
+        conda environment's R before SCART is imported.
+        Data transfer: numpy binary → RDS (via prep.R) → copykat → CSV → pandas.
+        Rscript binary is resolved via CONDA_PREFIX then sys.executable dir,
+        NOT via PATH, so the correct environment's R is always used.
+
 QC FIX  min_genes and max_mt removed from the public API of
         run_preprocessing_pipeline().  Both values are read from
         adata.uns['qc_params'] (written by Module 1).
@@ -114,8 +121,12 @@ QC FIX  min_genes and max_mt removed from the public API of
 """
 
 import os
+import sys
 import glob
+import shutil
 import logging
+import tempfile
+import subprocess
 
 import numpy as np
 import pandas as pd
@@ -205,14 +216,9 @@ def _read_qc_params(adata):
     Returns
     -------
     min_genes : int or None
-        None  → do not apply a gene-count filter.
     max_mt    : float or None
-        None  → do not apply an MT-percentage filter.
     qc_active : bool
-        True  → at least one filter will be applied.
-        False → QC step is skipped entirely.
     source    : str
-        Human-readable description of where the values came from.
     """
     qc = adata.uns.get("qc_params", None)
 
@@ -227,7 +233,6 @@ def _read_qc_params(adata):
     min_genes = qc.get("min_genes", None)
     max_mt    = qc.get("max_mt",    None)
 
-    # Normalise types if values are present
     if min_genes is not None:
         min_genes = int(min_genes)
     if max_mt is not None:
@@ -412,7 +417,87 @@ def _build_fullgene_adata_for_scm(adata, feature_tsv, tumor_h5ad_path=None):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# CopyKAT runner
+# FIX 10 — Rscript resolver
+# Finds the Rscript binary belonging to the ACTIVE conda environment,
+# not whatever happens to be first on PATH.
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _find_rscript():
+    """
+    Return the absolute path to Rscript in the active conda environment.
+
+    Search order:
+      1. $CONDA_PREFIX/bin/Rscript          — most reliable when env is active
+      2. dirname(sys.executable)/Rscript    — works inside Jupyter kernels
+      3. shutil.which("Rscript")            — PATH fallback (may be wrong env)
+
+    Returns None if Rscript cannot be found anywhere.
+    """
+    # 1. CONDA_PREFIX
+    conda_prefix = os.environ.get("CONDA_PREFIX", "")
+    if conda_prefix:
+        candidate = os.path.join(conda_prefix, "bin", "Rscript")
+        if os.path.isfile(candidate):
+            logger.info(f"Rscript found via CONDA_PREFIX: {candidate}")
+            return candidate
+
+    # 2. Same directory as the Python interpreter (covers Jupyter kernels)
+    py_bin_dir = os.path.dirname(sys.executable)
+    candidate  = os.path.join(py_bin_dir, "Rscript")
+    if os.path.isfile(candidate):
+        logger.info(f"Rscript found via sys.executable dir: {candidate}")
+        return candidate
+
+    # 3. PATH fallback — warn because this may pick the wrong env
+    candidate = shutil.which("Rscript")
+    if candidate:
+        logger.warning(
+            f"Rscript found via PATH — may belong to a different conda env: {candidate}\n"
+            "Set CONDA_PREFIX or activate the correct env if CopyKAT fails."
+        )
+        return candidate
+
+    return None
+
+
+def _get_r_home(rscript_bin):
+    """
+    Ask the given Rscript binary where its R home directory is.
+    Returns the path string, or None on failure.
+    """
+    try:
+        r_home = subprocess.check_output(
+            [rscript_bin, "--vanilla", "-e", "cat(R.home())"],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+        return r_home
+    except Exception as exc:
+        logger.warning(f"Could not determine R_HOME from {rscript_bin}: {exc}")
+        return None
+
+
+def _build_r_env(r_home):
+    """
+    Build a subprocess environment dict with R_HOME and LD_LIBRARY_PATH
+    set to point at r_home, inheriting everything else from os.environ.
+    """
+    env = os.environ.copy()
+    if r_home:
+        env["R_HOME"] = r_home
+        r_lib = os.path.join(r_home, "lib")
+        existing_ld = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = (
+            r_lib + (os.pathsep + existing_ld if existing_ld else "")
+        )
+        logger.info(f"Subprocess R_HOME → {r_home}")
+    return env
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FIX 10 — CopyKAT subprocess runner
+# Replaces the rpy2-based _run_copykat entirely.
+# R is invoked in a fresh process so the parent Python session's
+# already-initialised R (from a different conda env) cannot interfere.
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _run_copykat(
@@ -433,99 +518,115 @@ def _run_copykat(
     ref_epithelial_values=None,
 ):
     """
-    Run CopyKAT via rpy2 to identify aneuploid (malignant) cells.
+    Run CopyKAT via a fresh Rscript subprocess (FIX 10).
 
-    Mirrors the sample workflow from copykat_sample_code.odt:
-      1. Filter reference to epithelial cells (normal reference).
-      2. Subsample reference to ref_max_cells (FIX 2).
-      3. Extract raw counts from both query and reference.
-      4. Find common genes; build combined genes × cells matrix.
-      5. Prefix reference barcodes with "REF_" to avoid collision.
-      6. Run copykat() in R with user-controlled parameters.
-      7. Parse aneuploid.pred output → per-cell prediction DataFrame.
+    Data flow:
+      Python → numpy .npy + text files → prep.R (builds RDS) →
+      run_copykat.R (runs copykat, writes CSV) → pandas DataFrame
 
-    Parameters
+    This is fully independent of whatever rpy2/R state the parent Python
+    process has already initialised, fixing the R_HOME lock-in bug.
+
+    Parameters  (identical to the original rpy2-based version)
     ----------
-    adata_query : AnnData
-        Epithelial cells (query / tumour candidates).
-    adata_ref : AnnData
-        Tabula Sapiens (or other normal reference) h5ad.
-    genome : str
-        Genome version passed to copykat(). Default "hg20".
-    id_type : str
-        Gene ID type: "S" (symbol) or "E" (Ensembl). Default "S".
-    ngene_chr : int
-        Minimum genes per chromosome. Default 10.
-    win_size : int
-        Sliding window size for smoothing. Default 50.
-    ks_cut : float
-        KS statistic cut-off for classifying aneuploid vs diploid. Default 0.1.
-    distance : str
-        Distance metric for hierarchical clustering. Default "euclidean".
-    n_cores : int
-        Number of parallel cores for copykat. Default 2.
-    plot_genes : bool
-        Whether copykat should produce gene-level plots. Default True.
-    output_seg : bool
-        Whether copykat should write segment files. Default False.
-    ref_max_cells : int
-        Maximum normal reference cells (FIX 2). Default 100.
-    sam_name : str
-        Sample name prefix for copykat output files. Default "copykat_run".
-    ref_epithelial_key : str
-        obs column in adata_ref used to identify normal epithelial cells.
-        Default "cell_ontology_class".
-    ref_epithelial_values : list of str or None
-        Values in ref_epithelial_key that mark normal epithelial cells.
-        Default ["epithelial cell"].
+    adata_query          : AnnData  epithelial cells (query / tumour candidates)
+    adata_ref            : AnnData  normal reference h5ad
+    genome               : str      copykat genome version (default "hg20")
+    id_type              : str      "S" (symbol) or "E" (Ensembl)
+    ngene_chr            : int      min genes per chromosome
+    win_size             : int      smoothing window size
+    ks_cut               : float    KS cut-off for aneuploid/diploid
+    distance             : str      hierarchical clustering distance
+    n_cores              : int      parallel cores for copykat
+    plot_genes           : bool     whether copykat produces gene plots
+    output_seg           : bool     whether copykat writes segment files
+    ref_max_cells        : int      max normal reference cells (FIX 2)
+    sam_name             : str      copykat output file prefix
+    ref_epithelial_key   : str      obs column to identify normal epithelial cells
+    ref_epithelial_values: list     values marking normal epithelial cells
 
     Returns
     -------
     pd.DataFrame  columns: barcode, copykat_prediction
                            (values: "aneuploid" | "diploid" | "not.defined")
-                  All query barcodes are present; missing ones get "not.defined".
+                  All query barcodes present; missing ones get "not.defined".
     """
     if ref_epithelial_values is None:
         ref_epithelial_values = ["epithelial cell"]
 
-    try:
-        import rpy2.robjects as ro
-        from rpy2.robjects.packages import importr
-    except ImportError as exc:
-        err = str(exc)
-        if any(s in err for s in ("R_getVar", "undefined symbol", "R_ClosureEnv")):
-            raise ImportError(
-                "rpy2/R version mismatch.\n"
-                "Fix:\n  conda activate scart\n"
-                "  conda remove rpy2 --force\n"
-                "  conda install -c conda-forge rpy2\n"
-                f"Original: {err}"
-            ) from exc
-        raise
-
-    try:
-        importr("copykat")
-    except Exception as exc:
-        raise ImportError(
-            "R package 'copykat' not found.\n"
-            "In R: devtools::install_github('navinlabcode/copykat')"
-        ) from exc
-
-    q_barcodes = np.array(adata_query.obs_names)
-
-    # Pre-build safe fallback DataFrame returned on any critical failure
+    q_barcodes   = np.array(adata_query.obs_names)
     empty_result = pd.DataFrame({
         "barcode"            : list(q_barcodes),
         "copykat_prediction" : "not.defined",
     })
 
     # ------------------------------------------------------------------
+    # Locate Rscript in the active conda environment
+    # ------------------------------------------------------------------
+    rscript_bin = _find_rscript()
+    if rscript_bin is None:
+        logger.error(
+            "Rscript not found in active environment.\n"
+            "Ensure R is installed in the copykat_env conda environment.\n"
+            "CopyKAT skipped."
+        )
+        return empty_result
+
+    r_home  = _get_r_home(rscript_bin)
+    sub_env = _build_r_env(r_home)
+
+    # ------------------------------------------------------------------
+    # Verify copykat is installed in THIS R (not some other env's R)
+    # ------------------------------------------------------------------
+    try:
+        check = subprocess.run(
+            [
+                rscript_bin, "--vanilla", "-e",
+                "if (!requireNamespace('copykat', quietly=TRUE)) "
+                "{ cat('NOT_INSTALLED'); quit(status=1) } else { cat('OK') }",
+            ],
+            capture_output=True, text=True, env=sub_env,
+        )
+        if "NOT_INSTALLED" in check.stdout or check.returncode != 0:
+            raise ImportError(
+                f"R package 'copykat' is not installed in the R used by:\n"
+                f"  {rscript_bin}\n"
+                f"R home: {r_home}\n"
+                f"Install it from inside that R:\n"
+                f"  {rscript_bin} -e \"devtools::install_github('navinlabcode/copykat')\""
+            )
+        logger.info(f"copykat verified OK in {rscript_bin}")
+    except ImportError:
+        raise
+    except Exception as exc:
+        logger.error(f"copykat verification subprocess failed: {exc}")
+        return empty_result
+
+    # ------------------------------------------------------------------
+    # Locate SCART's bundled run_copykat.R
+    # ------------------------------------------------------------------
+    runner_script = _find_scart_resource("external/run_copykat.R")
+    if runner_script is None:
+        # Try relative to this file as a fallback
+        runner_script = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "external", "run_copykat.R",
+        )
+    if not os.path.isfile(runner_script):
+        raise FileNotFoundError(
+            f"CopyKAT runner script not found.\n"
+            f"Expected: SCART/external/run_copykat.R\n"
+            f"Checked:  {runner_script}"
+        )
+    logger.info(f"CopyKAT runner script: {runner_script}")
+
+    # ------------------------------------------------------------------
     # FIX 2 — filter reference to normal epithelial cells and subsample
     # ------------------------------------------------------------------
     if ref_epithelial_key in adata_ref.obs.columns:
         ref_vals_lower = [v.lower() for v in ref_epithelial_values]
-        ep_mask = adata_ref.obs[ref_epithelial_key].str.lower().isin(ref_vals_lower)
-        adata_ref_ep = adata_ref[ep_mask].copy() if ep_mask.any() else adata_ref.copy()
+        ep_mask        = adata_ref.obs[ref_epithelial_key].str.lower().isin(ref_vals_lower)
+        adata_ref_ep   = adata_ref[ep_mask].copy() if ep_mask.any() else adata_ref.copy()
         logger.info(
             f"CopyKAT reference epithelial cells: {adata_ref_ep.n_obs} "
             f"(key='{ref_epithelial_key}', values={ref_epithelial_values})"
@@ -544,75 +645,56 @@ def _run_copykat(
         logger.info(f"CopyKAT reference subsampled to {ref_max_cells} cells.")
 
     if adata_ref_ep.n_obs == 0:
-        logger.warning("CopyKAT: no reference cells found after filtering. Skipping.")
+        logger.warning("CopyKAT: no reference cells after filtering. Skipping.")
         return empty_result
 
     # ------------------------------------------------------------------
-    # Extract raw integer count matrices  (cells × genes → transpose → genes × cells)
+    # Build combined genes × cells matrix
     # ------------------------------------------------------------------
     logger.info("CopyKAT: extracting raw counts from query ...")
-    mat_query = _get_raw_matrix(adata_query)      # cells × genes
-    mat_query = mat_query.T                        # genes × cells
+    mat_query = _get_raw_matrix(adata_query).T    # genes × cells
 
     logger.info("CopyKAT: extracting raw counts from reference ...")
-    mat_ref = _get_raw_matrix(adata_ref_ep)        # cells × genes
-    mat_ref = mat_ref.T                            # genes × cells
+    mat_ref   = _get_raw_matrix(adata_ref_ep).T   # genes × cells
 
-    # Gene names
     q_genes = np.array(adata_query.var_names)
     r_genes = (
         np.array(adata_ref_ep.raw.var_names)
         if adata_ref_ep.raw is not None
-        and adata_ref_ep.raw.n_vars > max(
-            (adata_ref_ep.layers[l].shape[1]
-             for l in ("scvi_counts", "raw_counts", "counts")
-             if l in adata_ref_ep.layers),
-            default=0,
-        )
+        and adata_ref_ep.raw.n_vars >= mat_ref.shape[0]
         else np.array(adata_ref_ep.var_names)
     )
-
-    # Align mat_ref rows to r_genes if raw was used
-    if adata_ref_ep.raw is not None and adata_ref_ep.raw.n_vars == mat_ref.shape[0]:
-        pass   # already aligned
-    # If _get_raw_matrix returned adata.raw but r_genes is var_names, realign
+    # Realign if shape mismatch
     if mat_ref.shape[0] != len(r_genes):
         logger.warning(
             f"CopyKAT: ref matrix rows ({mat_ref.shape[0]}) != r_genes ({len(r_genes)}). "
-            "Falling back to adata_ref_ep.var_names for gene labelling."
+            "Falling back to adata_ref_ep.var_names."
         )
         r_genes = np.array(adata_ref_ep.var_names)
-        mat_ref_raw = _get_raw_matrix(adata_ref_ep)
-        mat_ref = mat_ref_raw.T
+        mat_ref = _get_raw_matrix(adata_ref_ep).T
 
-    # ------------------------------------------------------------------
-    # Common genes
-    # ------------------------------------------------------------------
     common_genes = np.intersect1d(q_genes, r_genes)
-    n_common     = len(common_genes)
-    logger.info(f"CopyKAT common genes: {n_common}")
+    logger.info(f"CopyKAT common genes: {len(common_genes)}")
 
-    if n_common < 200:
+    if len(common_genes) < 200:
         raise ValueError(
-            f"Only {n_common} common genes between query and reference. Need >= 200.\n"
-            "Both datasets must use HGNC gene symbols."
+            f"Only {len(common_genes)} common genes between query and reference. "
+            "Need >= 200. Both datasets must use HGNC gene symbols."
         )
-    if n_common < 2000:
-        logger.warning(f"Only {n_common} common genes — CopyKAT prefers a larger gene set.")
+    if len(common_genes) < 2000:
+        logger.warning(
+            f"Only {len(common_genes)} common genes — CopyKAT prefers a larger gene set."
+        )
 
-    q_idx = np.where(np.isin(q_genes,  common_genes))[0]
-    r_idx = np.where(np.isin(r_genes,  common_genes))[0]
+    q_idx = np.where(np.isin(q_genes, common_genes))[0]
+    r_idx = np.where(np.isin(r_genes, common_genes))[0]
 
-    mat_query_sub = mat_query[q_idx, :]   # common_genes × query_cells
-    mat_ref_sub   = mat_ref[r_idx,   :]   # common_genes × ref_cells
-
-    # Prefix reference barcodes to avoid barcode collision
     q_barcodes_sub = np.array(adata_query.obs_names)
     r_barcodes_sub = np.array(["REF_" + b for b in adata_ref_ep.obs_names])
 
-    mat_combined  = np.hstack([mat_query_sub, mat_ref_sub])
-    all_barcodes  = np.concatenate([q_barcodes_sub, r_barcodes_sub])
-    normal_cells  = r_barcodes_sub.tolist()
+    mat_combined = np.hstack([mat_query[q_idx, :], mat_ref[r_idx, :]])
+    all_barcodes = np.concatenate([q_barcodes_sub, r_barcodes_sub])
+    normal_cells = r_barcodes_sub.tolist()
 
     logger.info(
         f"CopyKAT combined matrix: {mat_combined.shape[0]} genes × "
@@ -621,107 +703,158 @@ def _run_copykat(
     )
 
     # ------------------------------------------------------------------
-    # Transfer to R and run copykat()
+    # Write inputs to temp dir → call prep.R → call run_copykat.R → read CSV
     # ------------------------------------------------------------------
-    logger.info("CopyKAT: transferring matrix to R ...")
-
-    # Flatten column-major (Fortran order) to match R matrix layout
-    ro.globalenv["ck_mat_flat"]    = ro.FloatVector(mat_combined.flatten(order="F").tolist())
-    ro.globalenv["ck_n_rows"]      = ro.IntVector([mat_combined.shape[0]])
-    ro.globalenv["ck_n_cols"]      = ro.IntVector([mat_combined.shape[1]])
-    ro.globalenv["ck_gene_names"]  = ro.StrVector(common_genes.tolist())
-    ro.globalenv["ck_barcodes"]    = ro.StrVector(all_barcodes.tolist())
-    ro.globalenv["ck_norm_cells"]  = ro.StrVector(normal_cells)
-    ro.globalenv["ck_id_type"]     = ro.StrVector([id_type])
-    ro.globalenv["ck_ngene_chr"]   = ro.IntVector([ngene_chr])
-    ro.globalenv["ck_win_size"]    = ro.IntVector([win_size])
-    ro.globalenv["ck_ks_cut"]      = ro.FloatVector([ks_cut])
-    ro.globalenv["ck_distance"]    = ro.StrVector([distance])
-    ro.globalenv["ck_n_cores"]     = ro.IntVector([n_cores])
-    ro.globalenv["ck_plot_genes"]  = ro.StrVector(["TRUE" if plot_genes  else "FALSE"])
-    ro.globalenv["ck_output_seg"]  = ro.StrVector(["TRUE" if output_seg  else "FALSE"])
-    ro.globalenv["ck_genome"]      = ro.StrVector([genome])
-    ro.globalenv["ck_sam_name"]    = ro.StrVector([sam_name])
-
-    logger.info("CopyKAT: running copykat() in R ...")
+    tmpdir = tempfile.mkdtemp(prefix="scart_copykat_")
     try:
-        ro.r("""
-            suppressPackageStartupMessages(library(copykat))
+        # Paths inside temp dir
+        mat_path      = os.path.join(tmpdir, "matrix.npy")
+        genes_path    = os.path.join(tmpdir, "genes.txt")
+        barcodes_path = os.path.join(tmpdir, "barcodes.txt")
+        norm_path     = os.path.join(tmpdir, "norm_cells.txt")
+        rds_path      = os.path.join(tmpdir, "copykat_input.rds")
+        output_csv    = os.path.join(tmpdir, "copykat_pred.csv")
+        prep_r        = os.path.join(tmpdir, "prep.R")
 
-            r_mat <- matrix(ck_mat_flat, nrow = ck_n_rows, ncol = ck_n_cols)
-            rownames(r_mat) <- ck_gene_names
-            colnames(r_mat) <- ck_barcodes
+        n_genes = mat_combined.shape[0]
+        n_cells = mat_combined.shape[1]
 
-            copykat.result <- copykat(
-                rawmat          = r_mat,
-                id.type         = ck_id_type,
-                ngene.chr       = ck_ngene_chr,
-                win.size        = ck_win_size,
-                KS.cut          = ck_ks_cut,
-                sam.name        = ck_sam_name,
-                distance        = ck_distance,
-                norm.cell.names = ck_norm_cells,
-                output.seg      = ck_output_seg,
-                plot.genes      = ck_plot_genes,
-                genome          = ck_genome,
-                n.cores         = ck_n_cores
-            )
-        """)
-    except Exception as exc:
-        logger.error(f"CopyKAT R execution failed: {exc}")
-        return empty_result
+        # Save matrix and metadata
+        np.save(mat_path, mat_combined.astype(np.float32))
+        np.savetxt(genes_path,    common_genes, fmt="%s")
+        np.savetxt(barcodes_path, all_barcodes, fmt="%s")
+        np.savetxt(norm_path,     normal_cells, fmt="%s")
 
-    # ------------------------------------------------------------------
-    # Parse copykat prediction output from R
-    # ------------------------------------------------------------------
-    try:
-        ro.r("""
-            ck_pred <- copykat.result$prediction
-        """)
-        ck_pred_r = ro.globalenv["ck_pred"]
+        # ── prep.R: read numpy binary → build R matrix → save RDS ──────
+        # numpy saves float32 in C (row-major) order with a 128-byte header.
+        # readBin in R reads column-major, so we use byrow=TRUE in matrix().
+        with open(prep_r, "w") as f:
+            f.write(f"""\
+genes      <- readLines("{genes_path}")
+barcodes   <- readLines("{barcodes_path}")
+norm_cells <- readLines("{norm_path}")
 
-        # Convert R data.frame to pandas
-        import rpy2.robjects as ro2
-        from rpy2.robjects import pandas2ri
-        pandas2ri.activate()
-        pred_df = pandas2ri.rpy2py(ck_pred_r)
+n_genes <- {n_genes}
+n_cells <- {n_cells}
 
-        logger.info(f"CopyKAT raw prediction columns: {list(pred_df.columns)}")
-        logger.info(
-            "CopyKAT raw prediction counts:\n"
-            + pred_df["copykat.pred"].value_counts().to_string()
-            if "copykat.pred" in pred_df.columns
-            else str(pred_df.head())
+# Read float32 numpy array (skip 128-byte header, little-endian)
+raw_bytes  <- readBin("{mat_path}", what = "raw", n = file.info("{mat_path}")$size)
+data_bytes <- raw_bytes[-(1:128)]
+vals       <- readBin(data_bytes, what = "numeric", n = n_genes * n_cells,
+                      size = 4, endian = "little")
+
+# numpy C order → row-major → byrow = TRUE re-creates genes × cells layout
+r_mat <- matrix(vals, nrow = n_genes, ncol = n_cells, byrow = TRUE)
+rownames(r_mat) <- genes
+colnames(r_mat) <- barcodes
+
+saveRDS(list(mat = r_mat, norm_cells = norm_cells), "{rds_path}")
+cat("[prep.R] RDS saved OK — dims:", nrow(r_mat), "x", ncol(r_mat), "\\n")
+""")
+
+        # ── Run prep.R ───────────────────────────────────────────────────
+        logger.info("CopyKAT: building RDS input via prep.R ...")
+        prep_result = subprocess.run(
+            [rscript_bin, "--vanilla", prep_r],
+            capture_output=True, text=True, env=sub_env,
         )
+        if prep_result.stdout:
+            for line in prep_result.stdout.strip().splitlines():
+                logger.info(f"[prep.R] {line}")
+        if prep_result.stderr:
+            for line in prep_result.stderr.strip().splitlines():
+                logger.debug(f"[prep.R stderr] {line}")
+        if prep_result.returncode != 0:
+            logger.error(
+                f"prep.R failed (exit {prep_result.returncode}).\n"
+                + prep_result.stderr[-2000:]
+            )
+            return empty_result
+        if not os.path.exists(rds_path):
+            logger.error("prep.R completed but RDS not created.")
+            return empty_result
+        logger.info("CopyKAT: RDS input ready.")
 
-        # Normalise column names — copykat may use 'cell.names' or the index
+        # ── Run run_copykat.R ────────────────────────────────────────────
+        cmd = [
+            rscript_bin, "--vanilla", runner_script,
+            rds_path,
+            output_csv,
+            sam_name,
+            genome,
+            id_type,
+            str(ngene_chr),
+            str(win_size),
+            str(ks_cut),
+            distance,
+            str(n_cores),
+            str(plot_genes).upper(),
+            str(output_seg).upper(),
+        ]
+        logger.info("CopyKAT: launching run_copykat.R subprocess ...")
+        run_result = subprocess.run(
+            cmd,
+            capture_output=True, text=True,
+            env=sub_env,
+            cwd=tmpdir,   # copykat writes its own side-effect files here
+        )
+        if run_result.stdout:
+            for line in run_result.stdout.strip().splitlines():
+                logger.info(f"[run_copykat.R] {line}")
+        if run_result.stderr:
+            for line in run_result.stderr.strip().splitlines():
+                logger.debug(f"[run_copykat.R stderr] {line}")
+        if run_result.returncode != 0:
+            logger.error(
+                f"run_copykat.R exited with code {run_result.returncode}.\n"
+                "Last 30 lines of stderr:\n"
+                + "\n".join(run_result.stderr.strip().splitlines()[-30:])
+            )
+            return empty_result
+
+        # ── Parse output CSV ─────────────────────────────────────────────
+        if not os.path.exists(output_csv):
+            logger.error(
+                f"run_copykat.R completed but prediction CSV not found: {output_csv}"
+            )
+            return empty_result
+
+        pred_df = pd.read_csv(output_csv)
+        logger.info(f"CopyKAT raw prediction columns: {list(pred_df.columns)}")
+
+        # Normalise barcode column name
         if "cell.names" in pred_df.columns:
             barcode_col = "cell.names"
         elif "barcodes" in pred_df.columns:
             barcode_col = "barcodes"
         else:
-            # Fall back: use the DataFrame index as barcodes
-            pred_df = pred_df.reset_index()
-            pred_df = pred_df.rename(columns={"index": "cell.names"})
-            barcode_col = "cell.names"
+            pred_df     = pred_df.reset_index()
+            barcode_col = pred_df.columns[0]
 
-        pred_col = "copykat.pred" if "copykat.pred" in pred_df.columns else pred_df.columns[-1]
+        pred_col = (
+            "copykat.pred"
+            if "copykat.pred" in pred_df.columns
+            else pred_df.columns[-1]
+        )
 
-        # Map copykat labels: "aneuploid" → "aneuploid", "diploid" → "diploid"
-        # Filter out REF_ prefixed barcodes — those are normal reference cells
-        pred_df = pred_df[~pred_df[barcode_col].str.startswith("REF_")].copy()
+        # Drop REF_ cells — those are the normal reference, not query
+        pred_df = pred_df[
+            ~pred_df[barcode_col].astype(str).str.startswith("REF_")
+        ].copy()
+
         pred_df = pred_df.rename(columns={
             barcode_col : "barcode",
             pred_col    : "copykat_prediction",
         })[["barcode", "copykat_prediction"]]
+
         pred_df["copykat_prediction"] = (
             pred_df["copykat_prediction"]
-            .str.strip()
-            .str.lower()
+            .astype(str).str.strip().str.lower()
+            .replace("nan", "not.defined")
             .fillna("not.defined")
         )
 
-        # Align to all original query barcodes (left-merge keeps order)
+        # Left-merge to guarantee every query barcode is present
         result_full = pd.DataFrame({"barcode": list(q_barcodes)})
         result_full = result_full.merge(pred_df, on="barcode", how="left")
         result_full["copykat_prediction"] = (
@@ -735,8 +868,15 @@ def _run_copykat(
         return result_full
 
     except Exception as exc:
-        logger.error(f"CopyKAT result parsing failed: {exc}")
+        logger.error(f"CopyKAT subprocess runner failed: {exc}")
+        logger.exception("Full traceback:")
         return empty_result
+
+    finally:
+        try:
+            shutil.rmtree(tmpdir)
+        except Exception:
+            pass
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -802,7 +942,7 @@ def run_preprocessing_pipeline(
     1.  Load full PopV h5ad (all cell types)  → adata_full
     2.  Read QC thresholds from adata.uns['qc_params']
     3.  Extract epithelial cells → apply QC if thresholds are set
-    4.  scMalignantFinder + CopyKAT on epithelial cells
+    4.  scMalignantFinder + CopyKAT on epithelial cells (CopyKAT via subprocess)
     5.  Keep ONLY malignant epithelial cells (non-malignant dropped)
     6.  adata_full non-epithelial cells → "rest" comparison group
     7.  Surfaceome filter (GESP genes) applied to BOTH groups
@@ -815,8 +955,10 @@ def run_preprocessing_pipeline(
         Full PopV output. Auto-loaded if None.
     popv_path : str or None
         Explicit PopV h5ad path.
-    log2fc_threshold : float   DEG log2FC cutoff. Default 1.0.
-    pval_adj_threshold : float DEG BH-adjusted p-value cutoff. Default 0.05.
+    log2fc_threshold : float
+        DEG log2FC cutoff. Default 1.0.
+    pval_adj_threshold : float
+        DEG BH-adjusted p-value cutoff. Default 0.05.
     reference_h5ad : str or None
         Tabula Sapiens h5ad for CopyKAT normal reference.
         CopyKAT skipped if None.
@@ -824,8 +966,10 @@ def run_preprocessing_pipeline(
         Module 1 h5ad for Route A-rescue. Auto-detected if None.
     save_dir : str or None
         Output directory. Default 'preprocessing_results/' in cwd.
-    scmalignant_model_dir : str or None  Auto-detected from SCART.
-    surfaceome_path : str or None        Auto-detected from SCART GESP file.
+    scmalignant_model_dir : str or None
+        Auto-detected from SCART.
+    surfaceome_path : str or None
+        Auto-detected from SCART GESP file.
     malignant_strategy : str
         'intersection' — malignant only if BOTH tools agree (default)
         'scMalignant'  — scMalignantFinder only
@@ -861,10 +1005,11 @@ def run_preprocessing_pipeline(
 
     Returns
     -------
-    AnnData  Malignant epithelial cells only, surfaceome-filtered, binarised.
-             DEG stored in adata.uns['filtered_deg'] and adata.uns['all_deg'].
-             CopyKAT full results in adata.uns['copykat_results'].
-             QC params echoed in adata.uns['qc_params'] (None if QC skipped).
+    AnnData
+        Malignant epithelial cells only, surfaceome-filtered, binarised.
+        DEG stored in adata.uns['filtered_deg'] and adata.uns['all_deg'].
+        CopyKAT full results in adata.uns['copykat_results'].
+        QC params echoed in adata.uns['qc_params'] (None if QC skipped).
     """
     if copykat_ref_epithelial_values is None:
         copykat_ref_epithelial_values = ["epithelial cell"]
@@ -893,8 +1038,8 @@ def run_preprocessing_pipeline(
     if adata is None:
         auto_popv = _auto_popv_h5ad()
         cands = (
-            ([popv_path]   if popv_path   else []) +
-            ([auto_popv]   if auto_popv   else [])
+            ([popv_path] if popv_path else []) +
+            ([auto_popv] if auto_popv else [])
         )
         for path in cands:
             if path and os.path.exists(path):
@@ -908,7 +1053,6 @@ def run_preprocessing_pipeline(
                 "Pass adata= or popv_path= explicitly."
             )
 
-    # Keep a clean copy of the FULL dataset for the "rest" group later
     adata_full = adata.copy()
     print(f"Full dataset loaded: {adata_full.n_obs} cells × {adata_full.n_vars} genes")
 
@@ -936,7 +1080,6 @@ def run_preprocessing_pipeline(
         sc.pp.calculate_qc_metrics(adata_epi, qc_vars=["mt"], inplace=True)
         print(f"Mean MT% BEFORE QC: {adata_epi.obs['pct_counts_mt'].mean():.2f}")
 
-        # Build filter: apply only the thresholds that are not None
         filters = np.ones(adata_epi.n_obs, dtype=bool)
         if min_genes is not None:
             filters &= adata_epi.obs["n_genes_by_counts"] > min_genes
@@ -982,7 +1125,6 @@ def run_preprocessing_pipeline(
     print("\n--- Step 4a: scMalignantFinder ---")
     feature_tsv = os.path.join(scmalignant_model_dir, "ordered_feature.tsv")
 
-    # Report gene-space route
     if "full_counts" in adata_epi.layers and adata_epi.uns.get("full_counts_var_names"):
         print(
             f"Gene-space: Route A-new "
@@ -993,66 +1135,45 @@ def run_preprocessing_pipeline(
         if rescue and os.path.exists(rescue):
             print(f"Gene-space: Route A-rescue ({rescue})")
         elif adata_epi.raw is not None:
-            print(
-                f"Gene-space: Route A-old (adata.raw, {adata_epi.raw.n_vars} genes)"
-            )
+            print(f"Gene-space: Route A-old (adata.raw, {adata_epi.raw.n_vars} genes)")
         else:
             print("Gene-space: Route C (4000-HVG fallback — ~19% model overlap)")
 
     adata_scm = _build_fullgene_adata_for_scm(adata_epi, feature_tsv, tumor_h5ad)
     print(f"  Gene space used: {adata_scm.n_vars} genes")
 
-    # scMalignantFinder is bundled inside SCART as a sub-package, NOT installed.
-    #
-    # Directory layout:
-    #   <scart_root>/external/scMalignantFinder/
-    #       __init__.py          ← always present
-    #       classifier.py        ← present in newer installs; class lives here
-    #       model/               ← this is scmalignant_model_dir
-    #
-    # Loading strategy (tries all routes, most specific first):
-    #   Route 1  classifier.py exists → load it directly via importlib
-    #   Route 2  __init__.py exists   → load it directly via importlib
-    #   Route 3  fallback             → add …/external to sys.path and import
-    import sys as _sys
     import importlib.util as _ilu
 
-    _scm_pkg_dir      = os.path.dirname(scmalignant_model_dir)   # …/external/scMalignantFinder
-    _scm_external_dir = os.path.dirname(_scm_pkg_dir)             # …/external
+    _scm_pkg_dir      = os.path.dirname(scmalignant_model_dir)
+    _scm_external_dir = os.path.dirname(_scm_pkg_dir)
     _classifier_py    = os.path.join(_scm_pkg_dir, "classifier.py")
     _init_py          = os.path.join(_scm_pkg_dir, "__init__.py")
 
     def _load_module_from_file(mod_name, filepath):
-        """Load a Python file as a module by absolute path."""
-        if mod_name in _sys.modules:
-            return _sys.modules[mod_name]
+        if mod_name in sys.modules:
+            return sys.modules[mod_name]
         _spec = _ilu.spec_from_file_location(mod_name, filepath)
         _mod  = _ilu.module_from_spec(_spec)
-        _sys.modules[mod_name] = _mod
+        sys.modules[mod_name] = _mod
         _spec.loader.exec_module(_mod)
         return _mod
 
     _clf_mod = None
 
-    # Route 1 — classifier.py (newer installs)
     if os.path.isfile(_classifier_py):
         logger.info(f"scMalignantFinder: loading via classifier.py ({_classifier_py})")
         _clf_mod = _load_module_from_file("scMalignantFinder.classifier", _classifier_py)
-
-    # Route 2 — __init__.py (older installs where class is defined there)
     elif os.path.isfile(_init_py):
         logger.info(f"scMalignantFinder: loading via __init__.py ({_init_py})")
         _clf_mod = _load_module_from_file("scMalignantFinder", _init_py)
-
-    # Route 3 — sys.path fallback
     else:
         logger.warning(
             f"scMalignantFinder: neither classifier.py nor __init__.py found in "
             f"{_scm_pkg_dir} — attempting sys.path fallback."
         )
-        _inserted = _scm_external_dir not in _sys.path
+        _inserted = _scm_external_dir not in sys.path
         if _inserted:
-            _sys.path.insert(0, _scm_external_dir)
+            sys.path.insert(0, _scm_external_dir)
         try:
             import importlib as _il
             import scMalignantFinder as _scm_pkg
@@ -1066,12 +1187,9 @@ def run_preprocessing_pipeline(
                 f"  Original error: {_exc}"
             ) from _exc
         finally:
-            if _inserted and _scm_external_dir in _sys.path:
-                _sys.path.remove(_scm_external_dir)
+            if _inserted and _scm_external_dir in sys.path:
+                sys.path.remove(_scm_external_dir)
 
-    # pretrain_dir  — directory containing model.joblib + ordered_feature.tsv
-    # norm_type=False — adata_scm is already log-normalised by _build_fullgene_adata_for_scm;
-    #                   passing True would double-normalise and corrupt the counts.
     model = _clf_mod.scMalignantFinder(
         test_input          = adata_scm,
         celltype_annotation = False,
@@ -1099,7 +1217,7 @@ def run_preprocessing_pipeline(
     print(adata_epi.obs[scm_col].value_counts().to_string())
 
     # ------------------------------------------------------------------
-    # STEP 4b — CopyKAT
+    # STEP 4b — CopyKAT (subprocess-based, FIX 10)
     # ------------------------------------------------------------------
     copykat_available = False
     copykat_result_df = None
@@ -1113,7 +1231,7 @@ def run_preprocessing_pipeline(
             malignant_strategy = "scMalignant"
         else:
             print(
-                f"\n--- Step 4b: CopyKAT ---\n"
+                f"\n--- Step 4b: CopyKAT (subprocess) ---\n"
                 f"  Reference:           {reference_h5ad}\n"
                 f"  Genome:              {copykat_genome}\n"
                 f"  id.type:             {copykat_id_type}\n"
@@ -1129,6 +1247,16 @@ def run_preprocessing_pipeline(
                 f"  ref_epithelial_key:  {copykat_ref_epithelial_key}\n"
                 f"  ref_epithelial_vals: {copykat_ref_epithelial_values}"
             )
+
+            # Log which Rscript will be used — visible before long CopyKAT run
+            _rs = _find_rscript()
+            if _rs:
+                _rh = _get_r_home(_rs)
+                print(f"  Rscript:             {_rs}")
+                print(f"  R home:              {_rh}")
+            else:
+                print("  WARNING: Rscript not found — CopyKAT will be skipped.")
+
             try:
                 adata_raw_cna   = adata_epi.copy()
                 adata_raw_cna.X = adata_epi.layers["raw_for_cna"]
@@ -1152,7 +1280,6 @@ def run_preprocessing_pipeline(
                     ref_epithelial_values    = copykat_ref_epithelial_values,
                 )
 
-                # Store per-cell CopyKAT predictions on adata_epi
                 bc_to_pred = dict(zip(
                     copykat_result_df["barcode"],
                     copykat_result_df["copykat_prediction"],
@@ -1162,7 +1289,6 @@ def run_preprocessing_pipeline(
                 ]
 
                 copykat_available = True
-
                 print("\nCopyKAT completed.")
                 print("  Prediction counts:")
                 print(adata_epi.obs["copykat_prediction"].value_counts().to_string())
@@ -1182,17 +1308,16 @@ def run_preprocessing_pipeline(
     scm_mal = adata_epi.obs[scm_col].str.lower() == "malignant"
 
     if copykat_available:
-        # CopyKAT labels aneuploid cells as malignant
         ck_mal = adata_epi.obs["copykat_prediction"].str.lower() == "aneuploid"
         if malignant_strategy == "intersection":
-            malignant_mask  = scm_mal & ck_mal
-            strategy_label  = "intersection (scMalignantFinder AND CopyKAT)"
+            malignant_mask = scm_mal & ck_mal
+            strategy_label = "intersection (scMalignantFinder AND CopyKAT)"
         elif malignant_strategy == "copykat":
-            malignant_mask  = ck_mal
-            strategy_label  = "CopyKAT only"
+            malignant_mask = ck_mal
+            strategy_label = "CopyKAT only"
         else:
-            malignant_mask  = scm_mal
-            strategy_label  = "scMalignantFinder only"
+            malignant_mask = scm_mal
+            strategy_label = "scMalignantFinder only"
     else:
         malignant_mask = scm_mal
         strategy_label = "scMalignantFinder only"
@@ -1222,11 +1347,10 @@ def run_preprocessing_pipeline(
     # STEP 6 — Non-epithelial "rest" group from adata_full
     # ------------------------------------------------------------------
     print("\n--- Step 6: Extract non-epithelial 'rest' group ---")
-    rest_mask  = ~ep_mask    # non-epithelial cells from the full dataset
+    rest_mask  = ~ep_mask
     adata_rest = adata_full[rest_mask].copy()
     print(f"Non-epithelial 'rest' cells: {adata_rest.n_obs}")
 
-    # Normalise the rest group for DEG
     for lyr in ("scvi_counts", "raw_counts", "counts"):
         if lyr in adata_rest.layers:
             adata_rest.X = adata_rest.layers[lyr].copy()
@@ -1241,9 +1365,9 @@ def run_preprocessing_pipeline(
     # STEP 7 — Surfaceome filter (GESP genes) applied to BOTH groups
     # ------------------------------------------------------------------
     print("\n--- Step 7: Surfaceome filter (GESP file) ---")
-    surfaceome   = pd.read_csv(surfaceome_path)
+    surfaceome        = pd.read_csv(surfaceome_path)
     surfaceome.columns = surfaceome.columns.str.strip()
-    surf_genes   = surfaceome["Gene"].astype(str).tolist()
+    surf_genes        = surfaceome["Gene"].astype(str).tolist()
     print(f"Surfaceome genes in GESP file: {len(surf_genes)}")
 
     surf_in_mal  = adata_mal.var_names.intersection(surf_genes)
@@ -1254,14 +1378,13 @@ def run_preprocessing_pipeline(
     adata_rest   = adata_rest[:, surf_in_rest].copy()
     print(f"Surfaceome genes in rest cells: {len(surf_in_rest)}")
 
-    surf_common  = surf_in_mal.intersection(surf_in_rest)
-    adata_mal    = adata_mal[:, surf_common].copy()
-    adata_rest   = adata_rest[:, surf_common].copy()
+    surf_common = surf_in_mal.intersection(surf_in_rest)
+    adata_mal   = adata_mal[:, surf_common].copy()
+    adata_rest  = adata_rest[:, surf_common].copy()
     print(f"Common surfaceome genes (used for DEG): {len(surf_common)}\n")
 
     # ------------------------------------------------------------------
     # STEP 8 — DEG: malignant epithelial vs non-epithelial rest
-    #          (FIX 9: correct biological comparison)
     # ------------------------------------------------------------------
     print("--- Step 8: DEG — malignant epithelial vs non-epithelial rest ---")
 
@@ -1334,7 +1457,6 @@ def run_preprocessing_pipeline(
     adata_mal.X = sp.csr_matrix(adata_mal.X)
     print("Expression converted to binary (0/1).")
 
-    # Store DEG results
     adata_mal.uns["filtered_deg"] = filtered_deg.reset_index(drop=True)
     adata_mal.uns["all_deg"]      = deg.reset_index(drop=True)
     adata_mal.uns["deg_params"]   = {
@@ -1348,7 +1470,6 @@ def run_preprocessing_pipeline(
         "n_filtered_deg"     : int(filtered_deg.shape[0]),
     }
 
-    # Echo QC params — store None if QC was skipped so downstream knows
     adata_mal.uns["qc_params"] = (
         {"min_genes": min_genes, "max_mt": max_mt}
         if qc_active else None
@@ -1356,13 +1477,12 @@ def run_preprocessing_pipeline(
 
     # FIX 8 — store full CopyKAT results
     if copykat_result_df is not None:
-        final_barcodes      = set(adata_mal.obs_names)
-        copykat_stored      = copykat_result_df.copy()
+        final_barcodes = set(adata_mal.obs_names)
+        copykat_stored = copykat_result_df.copy()
         copykat_stored["in_final_output"] = copykat_stored["barcode"].isin(
             final_barcodes
         )
         adata_mal.uns["copykat_results"] = copykat_stored
-
         print(
             f"\nCopyKAT results stored in adata.uns['copykat_results']:\n"
             f"  Shape: {copykat_stored.shape[0]} rows × "
@@ -1377,7 +1497,6 @@ def run_preprocessing_pipeline(
         adata_mal.uns["copykat_results"] = None
         print("\nCopyKAT was not run — adata.uns['copykat_results'] = None")
 
-    # Clean string columns
     for col in adata_mal.obs.columns:
         if adata_mal.obs[col].dtype == object:
             adata_mal.obs[col] = adata_mal.obs[col].astype(str)
