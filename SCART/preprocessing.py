@@ -1002,30 +1002,47 @@ def run_preprocessing_pipeline(
     adata_scm = _build_fullgene_adata_for_scm(adata_epi, feature_tsv, tumor_h5ad)
     print(f"  Gene space used: {adata_scm.n_vars} genes")
 
-    # scMalignantFinder is bundled inside SCART (not an installed package).
-    # scmalignant_model_dir = <scart_root>/external/scMalignantFinder/model/
+    # scMalignantFinder is bundled inside SCART as a sub-package, NOT installed.
     #
-    # Two possible layouts inside .../external/scMalignantFinder/:
-    #   Layout A (package):  __init__.py + classifier.py  → classifier.py is here
-    #   Layout B (bare):     classifier.py directly, no __init__.py
+    # Confirmed directory layout (from repo):
+    #   <scart_root>/external/scMalignantFinder/
+    #       __init__.py          ← package init
+    #       classifier.py        ← scMalignantFinder class lives here
+    #       model/               ← this is scmalignant_model_dir
     #
-    # We use importlib.util.spec_from_file_location to load classifier.py by
-    # its absolute path, bypassing the package system entirely.  This works
-    # for both layouts without modifying sys.path.
+    # scmalignant_model_dir  = …/external/scMalignantFinder/model
+    # _scm_pkg_dir           = …/external/scMalignantFinder   (the package folder)
+    # _scm_external_dir      = …/external                     (add THIS to sys.path)
+    #
+    # With …/external on sys.path, Python resolves:
+    #   "from scMalignantFinder import classifier"
+    #   → …/external/scMalignantFinder/classifier.py  ✓
+    import sys as _sys
     import importlib.util as _ilu
-    _scm_src_dir      = os.path.dirname(scmalignant_model_dir)  # …/external/scMalignantFinder
-    _classifier_py    = os.path.join(_scm_src_dir, "classifier.py")
-    if not os.path.exists(_classifier_py):
+
+    _scm_pkg_dir      = os.path.dirname(scmalignant_model_dir)   # …/external/scMalignantFinder
+    _scm_external_dir = os.path.dirname(_scm_pkg_dir)             # …/external
+    _classifier_py    = os.path.join(_scm_pkg_dir, "classifier.py")
+
+    if not os.path.isfile(_classifier_py):
         raise FileNotFoundError(
             f"scMalignantFinder classifier.py not found at: {_classifier_py}\n"
             f"Expected layout: <scart_root>/external/scMalignantFinder/classifier.py\n"
             f"Resolved scmalignant_model_dir: {scmalignant_model_dir}"
         )
-    _spec       = _ilu.spec_from_file_location("scMalignantFinder.classifier", _classifier_py)
-    _classifier = _ilu.module_from_spec(_spec)
-    _spec.loader.exec_module(_classifier)
 
-    model = _classifier.scMalignantFinder(
+    # Load classifier.py directly by absolute path — works whether or not
+    # …/external is already on sys.path, and avoids any stale cached imports.
+    _mod_name = "scMalignantFinder.classifier"
+    if _mod_name not in _sys.modules:
+        _spec    = _ilu.spec_from_file_location(_mod_name, _classifier_py)
+        _clf_mod = _ilu.module_from_spec(_spec)
+        _sys.modules[_mod_name] = _clf_mod
+        _spec.loader.exec_module(_clf_mod)
+    else:
+        _clf_mod = _sys.modules[_mod_name]
+
+    model = _clf_mod.scMalignantFinder(
         test_input          = adata_scm,
         celltype_annotation = False,
         pretrain_path       = scmalignant_model_dir,
