@@ -6,16 +6,10 @@ setup(
     description="Single-cell Antigen Ranking Tool",
     author="CSB LAB",
     packages=find_packages(include=["SCART", "SCART.*"]),
-
-
-
     python_requires=">=3.8",
-
     include_package_data=True,
-
     package_data={
         "SCART": [
-            # general data
             "**/*.json",
             "**/*.csv",
             "**/*.txt",
@@ -23,17 +17,12 @@ setup(
             "**/*.h5ad",
             "**/*.yaml",
             "**/*.yml",
-
-            # 🔥 IMPORTANT: add model artifacts explicitly
             "**/*.joblib",
             "**/*.gmt",
             "**/*.tsv"
         ]
     },
-    
-    
     zip_safe=False,
-
     install_requires=[
         "scanpy>=1.9",
         "geofetch==0.12.10",
@@ -48,7 +37,12 @@ setup(
         "deap>=1.4",
         "typer",
         "rich",
+        "rpy2>=3.5,<3.6",
         "onclass @ git+https://github.com/wangshenguiuc/OnClass.git"
-
-    ]
+    ],
+    extras_require={
+        "copykat": [
+            "rpy2>=3.5,<3.6",
+        ]
+    }
 )
