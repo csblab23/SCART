@@ -1002,7 +1002,24 @@ def run_preprocessing_pipeline(
     adata_scm = _build_fullgene_adata_for_scm(adata_epi, feature_tsv, tumor_h5ad)
     print(f"  Gene space used: {adata_scm.n_vars} genes")
 
-    from scMalignantFinder import classifier
+    # scMalignantFinder is bundled inside SCART (not an installed package).
+    # scmalignant_model_dir = <scart_root>/external/scMalignantFinder/model/
+    # The classifier module lives one level up:
+    #   <scart_root>/external/scMalignantFinder/
+    # We temporarily add that parent directory to sys.path so the import
+    # resolves against the bundled source rather than site-packages.
+    import sys as _sys
+    _scm_src_dir = os.path.dirname(scmalignant_model_dir)   # …/external/scMalignantFinder
+    _scm_inserted = False
+    if _scm_src_dir not in _sys.path:
+        _sys.path.insert(0, _scm_src_dir)
+        _scm_inserted = True
+    try:
+        from scMalignantFinder import classifier
+    finally:
+        if _scm_inserted and _scm_src_dir in _sys.path:
+            _sys.path.remove(_scm_src_dir)
+
     model = classifier.scMalignantFinder(
         test_input          = adata_scm,
         celltype_annotation = False,
