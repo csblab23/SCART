@@ -426,39 +426,53 @@ def _find_rscript():
     """
     Return the absolute path to Rscript in the active conda environment.
 
-    Search order:
-      1. $CONDA_PREFIX/bin/Rscript          — most reliable when env is active
-      2. dirname(sys.executable)/Rscript    — works inside Jupyter kernels
-      3. shutil.which("Rscript")            — PATH fallback (may be wrong env)
+    Search order — MOST reliable first:
+      1. dirname(sys.executable)/Rscript
+         The Jupyter kernel's Python is always inside the correct env bin/.
+         This is the only truly reliable signal inside a Jupyter session.
+
+      2. $CONDA_PREFIX/bin/Rscript
+         Unreliable in Jupyter — CONDA_PREFIX reflects the env that launched
+         the Jupyter SERVER, which is often a different env from the kernel.
+         Used only as a fallback when sys.executable gives nothing.
+
+      3. shutil.which("Rscript")
+         PATH fallback — last resort, may still be the wrong env.
 
     Returns None if Rscript cannot be found anywhere.
     """
-    # 1. CONDA_PREFIX
-    conda_prefix = os.environ.get("CONDA_PREFIX", "")
-    if conda_prefix:
-        candidate = os.path.join(conda_prefix, "bin", "Rscript")
-        if os.path.isfile(candidate):
-            logger.info(f"Rscript found via CONDA_PREFIX: {candidate}")
-            return candidate
-
-    # 2. Same directory as the Python interpreter (covers Jupyter kernels)
-    py_bin_dir = os.path.dirname(sys.executable)
+    # 1. Same bin/ directory as the Python interpreter — most reliable
+    #    inside Jupyter kernels because the kernel process IS copykat_env's python
+    py_bin_dir = os.path.dirname(os.path.abspath(sys.executable))
     candidate  = os.path.join(py_bin_dir, "Rscript")
     if os.path.isfile(candidate):
         logger.info(f"Rscript found via sys.executable dir: {candidate}")
         return candidate
 
-    # 3. PATH fallback — warn because this may pick the wrong env
+    # 2. CONDA_PREFIX — unreliable in Jupyter (points to server env, not kernel)
+    #    Only use it when sys.executable gave nothing
+    conda_prefix = os.environ.get("CONDA_PREFIX", "")
+    if conda_prefix:
+        candidate = os.path.join(conda_prefix, "bin", "Rscript")
+        if os.path.isfile(candidate):
+            logger.warning(
+                f"Rscript found via CONDA_PREFIX (may be wrong env in Jupyter): "
+                f"{candidate}\n"
+                f"  CONDA_PREFIX={conda_prefix}\n"
+                f"  sys.executable={sys.executable}\n"
+                f"  If CopyKAT fails, this is likely the wrong R."
+            )
+            return candidate
+
+    # 3. PATH fallback
     candidate = shutil.which("Rscript")
     if candidate:
         logger.warning(
-            f"Rscript found via PATH — may belong to a different conda env: {candidate}\n"
-            "Set CONDA_PREFIX or activate the correct env if CopyKAT fails."
+            f"Rscript found via PATH (may be wrong env): {candidate}"
         )
         return candidate
 
     return None
-
 
 def _get_r_home(rscript_bin):
     """
