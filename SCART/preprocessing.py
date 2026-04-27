@@ -1004,49 +1004,80 @@ def run_preprocessing_pipeline(
 
     # scMalignantFinder is bundled inside SCART as a sub-package, NOT installed.
     #
-    # Confirmed directory layout (from repo):
+    # Directory layout:
     #   <scart_root>/external/scMalignantFinder/
-    #       __init__.py          ← package init
-    #       classifier.py        ← scMalignantFinder class lives here
+    #       __init__.py          ← always present
+    #       classifier.py        ← present in newer installs; class lives here
     #       model/               ← this is scmalignant_model_dir
     #
-    # scmalignant_model_dir  = …/external/scMalignantFinder/model
-    # _scm_pkg_dir           = …/external/scMalignantFinder   (the package folder)
-    # _scm_external_dir      = …/external                     (add THIS to sys.path)
-    #
-    # With …/external on sys.path, Python resolves:
-    #   "from scMalignantFinder import classifier"
-    #   → …/external/scMalignantFinder/classifier.py  ✓
+    # Loading strategy (tries all routes, most specific first):
+    #   Route 1  classifier.py exists → load it directly via importlib
+    #   Route 2  __init__.py exists   → load it directly via importlib
+    #   Route 3  fallback             → add …/external to sys.path and import
     import sys as _sys
     import importlib.util as _ilu
 
     _scm_pkg_dir      = os.path.dirname(scmalignant_model_dir)   # …/external/scMalignantFinder
     _scm_external_dir = os.path.dirname(_scm_pkg_dir)             # …/external
     _classifier_py    = os.path.join(_scm_pkg_dir, "classifier.py")
+    _init_py          = os.path.join(_scm_pkg_dir, "__init__.py")
 
-    if not os.path.isfile(_classifier_py):
-        raise FileNotFoundError(
-            f"scMalignantFinder classifier.py not found at: {_classifier_py}\n"
-            f"Expected layout: <scart_root>/external/scMalignantFinder/classifier.py\n"
-            f"Resolved scmalignant_model_dir: {scmalignant_model_dir}"
-        )
+    def _load_module_from_file(mod_name, filepath):
+        """Load a Python file as a module by absolute path."""
+        if mod_name in _sys.modules:
+            return _sys.modules[mod_name]
+        _spec = _ilu.spec_from_file_location(mod_name, filepath)
+        _mod  = _ilu.module_from_spec(_spec)
+        _sys.modules[mod_name] = _mod
+        _spec.loader.exec_module(_mod)
+        return _mod
 
-    # Load classifier.py directly by absolute path — works whether or not
-    # …/external is already on sys.path, and avoids any stale cached imports.
-    _mod_name = "scMalignantFinder.classifier"
-    if _mod_name not in _sys.modules:
-        _spec    = _ilu.spec_from_file_location(_mod_name, _classifier_py)
-        _clf_mod = _ilu.module_from_spec(_spec)
-        _sys.modules[_mod_name] = _clf_mod
-        _spec.loader.exec_module(_clf_mod)
+    _clf_mod = None
+
+    # Route 1 — classifier.py (newer installs)
+    if os.path.isfile(_classifier_py):
+        logger.info(f"scMalignantFinder: loading via classifier.py ({_classifier_py})")
+        _clf_mod = _load_module_from_file("scMalignantFinder.classifier", _classifier_py)
+
+    # Route 2 — __init__.py (older installs where class is defined there)
+    elif os.path.isfile(_init_py):
+        logger.info(f"scMalignantFinder: loading via __init__.py ({_init_py})")
+        _clf_mod = _load_module_from_file("scMalignantFinder", _init_py)
+
+    # Route 3 — sys.path fallback
     else:
-        _clf_mod = _sys.modules[_mod_name]
+        logger.warning(
+            f"scMalignantFinder: neither classifier.py nor __init__.py found in "
+            f"{_scm_pkg_dir} — attempting sys.path fallback."
+        )
+        _inserted = _scm_external_dir not in _sys.path
+        if _inserted:
+            _sys.path.insert(0, _scm_external_dir)
+        try:
+            import importlib as _il
+            import scMalignantFinder as _scm_pkg
+            _clf_mod = _scm_pkg
+        except ImportError as _exc:
+            raise ImportError(
+                f"Could not import scMalignantFinder from any route.\n"
+                f"  classifier.py checked: {_classifier_py}\n"
+                f"  __init__.py checked:   {_init_py}\n"
+                f"  sys.path fallback dir: {_scm_external_dir}\n"
+                f"  Original error: {_exc}"
+            ) from _exc
+        finally:
+            if _inserted and _scm_external_dir in _sys.path:
+                _sys.path.remove(_scm_external_dir)
 
+    # pretrain_dir  — directory containing model.joblib + ordered_feature.tsv
+    # norm_type=False — adata_scm is already log-normalised by _build_fullgene_adata_for_scm;
+    #                   passing True would double-normalise and corrupt the counts.
     model = _clf_mod.scMalignantFinder(
         test_input          = adata_scm,
         celltype_annotation = False,
-        pretrain_path       = scmalignant_model_dir,
+        pretrain_dir        = scmalignant_model_dir,
         feature_path        = feature_tsv,
+        norm_type           = False,
     )
     model.load()
     result_scm = model.predict()
