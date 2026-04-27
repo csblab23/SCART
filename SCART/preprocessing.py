@@ -16,9 +16,9 @@ Step 2  Extract epithelial cells only from adata_full → apply QC filters
         If 'qc_params' is absent (user did not set thresholds), QC is
         skipped entirely and all epithelial cells proceed.
 
-Step 3  Run scMalignantFinder + inferCNA on the epithelial cells.
+Step 3  Run scMalignantFinder + CopyKAT on the epithelial cells.
         Combine predictions → final_malignant column on the epithelial adata.
-        Strategy: intersection (scMalignantFinder AND inferCNA must both agree).
+        Strategy: intersection (scMalignantFinder AND CopyKAT must both agree).
 
 Step 4  Keep ONLY the malignant epithelial cells (drop non-malignant epithelial).
         These are the true tumour cells.
@@ -76,10 +76,9 @@ Module 3 (this file)
   Reads:  popv_results/final_popv_annotated.h5ad  (auto-detected)
   Saves:  preprocessing_results/final_tumor.h5ad
             → malignant epithelial cells only
-            → obs: scMalignantFinder_prediction, infercna_prediction,
-                   infercna_cna_signal, infercna_cna_cor,
-                   infercna_gmm_label, final_malignant
-            → uns: infercna_results (full detail DataFrame)
+            → obs: scMalignantFinder_prediction, copykat_prediction,
+                   copykat_cna_signal, copykat_gmm_label, final_malignant
+            → uns: copykat_results (full detail DataFrame)
                    filtered_deg, all_deg, deg_params, cancer_type, qc_params
 
 ═══════════════════════════════════════════════════════════════════════════════
@@ -90,23 +89,17 @@ FIX 1   Full-gene route priority for scMalignantFinder:
         A-new (layers['full_counts']) → A-rescue (auto-detect Module 1 h5ad)
         → A-old (adata.raw) → C (4000-HVG fallback)
 
-FIX 2   inferCNA reference subsampled to infercna_ref_max_cells (default 2000).
+FIX 2   CopyKAT reference subsampled to copykat_ref_max_cells (default 100).
 
 FIX 3   DEG uses pvals_adj (BH-adjusted), not raw pvals.
-
-FIX 4   inferCNA n auto-capped to (n_common_genes - 1).
 
 FIX 5   _get_raw_matrix prefers adata.raw over HVG layers (more genes).
 
 FIX 6   scMalignantFinder predictions aligned by obs_names, not positional.
 
-FIX 7   inferCNA findMalignant() scalop-incompatibility workaround.
-        scalop >= 0.2.4 removed split_by_sample_names; we bypass findMalignant
-        entirely and run a Python-side 2-component GMM on (cnaSignal, cnaCor).
-
-FIX 8   inferCNA results saved in full detail:
-        Per-cell: cna_signal, cna_cor, gmm_label stored as obs columns.
-        Full table: adata.uns['infercna_results'] DataFrame.
+FIX 8   CopyKAT results saved in full detail:
+        Per-cell: cna_signal, gmm_label stored as obs columns.
+        Full table: adata.uns['copykat_results'] DataFrame.
 
 FIX 9   CORRECT DEG DESIGN:
         Malignant epithelial cells vs all NON-EPITHELIAL cells from adata_full.
@@ -419,166 +412,87 @@ def _build_fullgene_adata_for_scm(adata, feature_tsv, tumor_h5ad_path=None):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# FIX 7 — Python-side GMM replacing inferCNA findMalignant()
+# CopyKAT runner
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _python_find_malignant(cna_df, q_barcodes, signal_threshold=0.9):
-    """
-    Python replacement for inferCNA's findMalignant() which crashes when
-    scalop >= 0.2.4 removes split_by_sample_names.
-
-    Algorithm (mirrors the original R implementation):
-      1. cnaSignal = mean of top-(1-signal_threshold) absolute CNA values per cell
-      2. cnaCor    = Pearson correlation of each cell's profile vs tumour-mean profile
-      3. 2-component GMM on (cnaSignal, cnaCor)
-      4. Higher-signal cluster → 'malignant'
-
-    FIX 8: returns a DataFrame with per-cell scores for full result storage.
-
-    Returns
-    -------
-    pd.DataFrame with columns:
-        barcode             cell barcode
-        cna_signal          cnaSignal value
-        cna_cor             cnaCor value
-        gmm_label           raw GMM cluster (0 or 1)
-        infercna_prediction  'malignant' | 'non-malignant' | 'not.defined'
-    """
-    try:
-        from sklearn.mixture import GaussianMixture
-    except ImportError:
-        raise ImportError(
-            "scikit-learn required for Python-side GMM.\n"
-            "conda install -c conda-forge scikit-learn"
-        )
-
-    # Filter to only the barcodes that actually appear as columns in the CNA matrix
-    q_cols    = [c for c in q_barcodes if c in cna_df.columns]
-    # Subset CNA matrix to query cells only, as a raw NumPy array (genes × cells)
-    cna_query = cna_df[q_cols].values
-    # Store dimensions for use in downstream calculations
-    n_genes, n_cells = cna_query.shape
-
-    # Pre-build a safe fallback DataFrame returned if anything goes wrong
-    empty_row = pd.DataFrame({
-        "barcode"             : list(q_barcodes),
-        "cna_signal"          : np.nan,
-        "cna_cor"             : np.nan,
-        "gmm_label"           : -1,
-        "infercna_prediction" : "not.defined",
-    })
-
-    # Early exit if none of the query barcodes were found in the CNA matrix
-    if n_cells == 0:
-        logger.warning("GMM: no query barcodes in CNA matrix.")
-        return empty_row
-
-    # Step 1 — cnaSignal
-    # Compute how many top genes to use: (1 - signal_threshold) fraction, minimum 1
-    top_k      = max(1, int(n_genes * (1.0 - signal_threshold)))
-    # Take absolute CNA values so both gains and losses contribute equally
-    abs_cna    = np.abs(cna_query)
-    # Sort genes ascending per cell and slice the last top_k rows to get the highest values
-    top_vals   = np.sort(abs_cna, axis=0)[-top_k:, :]
-    # Average the top values per cell to produce one CNA activity score per cell
-    cna_signal = top_vals.mean(axis=0)           # (n_cells,)
-
-    # Step 2 — cnaCor
-    # Compute the mean CNA profile across all query cells as a representative tumour baseline
-    tumour_mean = cna_query.mean(axis=1)          # (n_genes,)
-    # Compute Pearson correlation of each cell's CNA profile against the tumour mean profile
-    cna_cor     = np.array([
-        np.corrcoef(cna_query[:, i], tumour_mean)[0, 1]
-        for i in range(n_cells)
-    ])
-    # Replace any NaN correlations (from zero-variance cells) with 0
-    cna_cor = np.nan_to_num(cna_cor, nan=0.0)
-
-    # Step 3 — GMM
-    # Stack cnaSignal and cnaCor into a 2D feature matrix (n_cells × 2) for GMM input
-    X_gmm = np.column_stack([cna_signal, cna_cor])
-    try:
-        # Fit a 2-component full-covariance GMM on the (cnaSignal, cnaCor) feature space
-        gmm    = GaussianMixture(n_components=2, covariance_type="full",
-                                 random_state=42, max_iter=300)
-        gmm.fit(X_gmm)
-        # Assign each cell to one of the two GMM clusters
-        labels = gmm.predict(X_gmm)
-
-        # Step 4 — higher mean cnaSignal → malignant
-        # Compute mean cnaSignal for each cluster to identify which one is malignant
-        mean0       = cna_signal[labels == 0].mean()
-        mean1       = cna_signal[labels == 1].mean()
-        # The cluster with higher average CNA activity is designated as malignant
-        mal_cluster = 1 if mean1 > mean0 else 0
-
-        # Map numeric cluster labels to human-readable malignancy strings
-        pred_labels = np.where(labels == mal_cluster, "malignant", "non-malignant")
-
-        # Build per-cell result DataFrame for cells found in the CNA matrix
-        result_df = pd.DataFrame({
-            "barcode"             : q_cols,
-            "cna_signal"          : cna_signal,
-            "cna_cor"             : cna_cor,
-            "gmm_label"           : labels.astype(int),
-            "infercna_prediction" : pred_labels,
-        })
-
-        # Start from all original barcodes to ensure no cell is silently dropped
-        result_full = pd.DataFrame({"barcode": list(q_barcodes)})
-        # Left-merge so barcodes missing from the CNA matrix get NaN rows
-        result_full = result_full.merge(result_df, on="barcode", how="left")
-        # Fill missing predictions with "not.defined" for barcodes absent from CNA matrix
-        result_full["infercna_prediction"] = (
-            result_full["infercna_prediction"].fillna("not.defined")
-        )
-        # Fill missing GMM labels with -1 sentinel value for barcodes absent from CNA matrix
-        result_full["gmm_label"] = result_full["gmm_label"].fillna(-1).astype(int)
-
-        logger.info(
-            "Python GMM findMalignant results:\n"
-            + result_full["infercna_prediction"].value_counts().to_string()
-        )
-        return result_full
-
-    except Exception as exc:
-        logger.warning(f"GMM failed: {exc}. Returning all 'not.defined'.")
-        return empty_row.assign(barcode=list(q_barcodes))
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# inferCNA runner
-# ═══════════════════════════════════════════════════════════════════════════
-
-def _run_infercna(
+def _run_copykat(
     adata_query,
     adata_ref,
-    genome="hg19",
-    n=5000,
-    noise=0.1,
-    signal_threshold=0.9,
-    ref_max_cells=2000,
+    genome="hg20",
+    id_type="S",
+    ngene_chr=10,
+    win_size=50,
+    ks_cut=0.1,
+    distance="euclidean",
+    n_cores=2,
+    plot_genes=True,
+    output_seg=False,
+    ref_max_cells=100,
+    sam_name="copykat_run",
+    ref_epithelial_key="cell_ontology_class",
+    ref_epithelial_values=None,
 ):
     """
-    Run inferCNA.
+    Run CopyKAT via rpy2 to identify aneuploid (malignant) cells.
 
-    FIX 4: n auto-capped to (n_common - 1).
-    FIX 5: _get_raw_matrix prefers adata.raw.
-    FIX 7: findMalignant bypassed; Python GMM used instead.
-    FIX 8: returns full per-cell DataFrame (scores + labels).
+    Mirrors the sample workflow from copykat_sample_code.odt:
+      1. Filter reference to epithelial cells (normal reference).
+      2. Subsample reference to ref_max_cells (FIX 2).
+      3. Extract raw counts from both query and reference.
+      4. Find common genes; build combined genes × cells matrix.
+      5. Prefix reference barcodes with "REF_" to avoid collision.
+      6. Run copykat() in R with user-controlled parameters.
+      7. Parse aneuploid.pred output → per-cell prediction DataFrame.
+
+    Parameters
+    ----------
+    adata_query : AnnData
+        Epithelial cells (query / tumour candidates).
+    adata_ref : AnnData
+        Tabula Sapiens (or other normal reference) h5ad.
+    genome : str
+        Genome version passed to copykat(). Default "hg20".
+    id_type : str
+        Gene ID type: "S" (symbol) or "E" (Ensembl). Default "S".
+    ngene_chr : int
+        Minimum genes per chromosome. Default 10.
+    win_size : int
+        Sliding window size for smoothing. Default 50.
+    ks_cut : float
+        KS statistic cut-off for classifying aneuploid vs diploid. Default 0.1.
+    distance : str
+        Distance metric for hierarchical clustering. Default "euclidean".
+    n_cores : int
+        Number of parallel cores for copykat. Default 2.
+    plot_genes : bool
+        Whether copykat should produce gene-level plots. Default True.
+    output_seg : bool
+        Whether copykat should write segment files. Default False.
+    ref_max_cells : int
+        Maximum normal reference cells (FIX 2). Default 100.
+    sam_name : str
+        Sample name prefix for copykat output files. Default "copykat_run".
+    ref_epithelial_key : str
+        obs column in adata_ref used to identify normal epithelial cells.
+        Default "cell_ontology_class".
+    ref_epithelial_values : list of str or None
+        Values in ref_epithelial_key that mark normal epithelial cells.
+        Default ["epithelial cell"].
 
     Returns
     -------
-    pd.DataFrame  columns: barcode, cna_signal, cna_cor, gmm_label,
-                           infercna_prediction
-                  indexed 0..n_query-1, barcode matches adata_query.obs_names
+    pd.DataFrame  columns: barcode, copykat_prediction
+                           (values: "aneuploid" | "diploid" | "not.defined")
+                  All query barcodes are present; missing ones get "not.defined".
     """
+    if ref_epithelial_values is None:
+        ref_epithelial_values = ["epithelial cell"]
+
     try:
         import rpy2.robjects as ro
         from rpy2.robjects.packages import importr
     except ImportError as exc:
         err = str(exc)
-        # Detect known rpy2/R version mismatch signatures and give a targeted fix message
         if any(s in err for s in ("R_getVar", "undefined symbol", "R_ClosureEnv")):
             raise ImportError(
                 "rpy2/R version mismatch.\n"
@@ -590,55 +504,62 @@ def _run_infercna(
         raise
 
     try:
-        importr("infercna")
+        importr("copykat")
     except Exception as exc:
         raise ImportError(
-            "R package 'infercna' not found.\n"
-            "In R: devtools::install_github('jlaffy/infercna')"
+            "R package 'copykat' not found.\n"
+            "In R: devtools::install_github('navinlabcode/copykat')"
         ) from exc
 
-    # FIX 2 — subsample reference epithelial cells
-    EPITHELIAL = {
-        "epithelial cell",
-        "glandular epithelial cell",
-        "ovarian surface epithelial cell",
-    }
-    # Subset reference to normal epithelial cells only for the most relevant CNA baseline
-    if "cell_ontology_class" in adata_ref.obs.columns:
-        ep_mask      = adata_ref.obs["cell_ontology_class"].str.lower().isin(EPITHELIAL)
-        # Fall back to full reference if no epithelial cells are found in the reference
+    q_barcodes = np.array(adata_query.obs_names)
+
+    # Pre-build safe fallback DataFrame returned on any critical failure
+    empty_result = pd.DataFrame({
+        "barcode"            : list(q_barcodes),
+        "copykat_prediction" : "not.defined",
+    })
+
+    # ------------------------------------------------------------------
+    # FIX 2 — filter reference to normal epithelial cells and subsample
+    # ------------------------------------------------------------------
+    if ref_epithelial_key in adata_ref.obs.columns:
+        ref_vals_lower = [v.lower() for v in ref_epithelial_values]
+        ep_mask = adata_ref.obs[ref_epithelial_key].str.lower().isin(ref_vals_lower)
         adata_ref_ep = adata_ref[ep_mask].copy() if ep_mask.any() else adata_ref.copy()
-        logger.info(f"inferCNA reference epithelial cells: {adata_ref_ep.n_obs}")
+        logger.info(
+            f"CopyKAT reference epithelial cells: {adata_ref_ep.n_obs} "
+            f"(key='{ref_epithelial_key}', values={ref_epithelial_values})"
+        )
     else:
-        # No ontology column present — use the entire reference as-is
+        logger.warning(
+            f"ref_epithelial_key '{ref_epithelial_key}' not found in reference obs. "
+            "Using full reference as normal cells."
+        )
         adata_ref_ep = adata_ref.copy()
 
-    # Randomly subsample the reference down to ref_max_cells to prevent memory blowup
     if adata_ref_ep.n_obs > ref_max_cells:
         rng = np.random.default_rng(seed=42)
         idx = rng.choice(adata_ref_ep.n_obs, size=ref_max_cells, replace=False)
-        # Sort indices to preserve original cell order after subsampling
         adata_ref_ep = adata_ref_ep[np.sort(idx)].copy()
-        logger.info(f"Reference subsampled to {ref_max_cells} cells.")
+        logger.info(f"CopyKAT reference subsampled to {ref_max_cells} cells.")
 
-    # Log-CPM matrices (FIX 5)
-    def _to_log_cpm(obj):
-        # Extract raw integer counts, preferring adata.raw over HVG layers
-        X  = _get_raw_matrix(obj)
-        # Compute per-cell library size for CPM normalisation
-        rs = X.sum(axis=1, keepdims=True)
-        # Guard against division-by-zero for empty cells
-        rs[rs == 0] = 1
-        # Apply log1p(CPM) and transpose to genes × cells as inferCNA expects
-        return np.log1p(X / rs * 1e6).T   # genes × cells
+    if adata_ref_ep.n_obs == 0:
+        logger.warning("CopyKAT: no reference cells found after filtering. Skipping.")
+        return empty_result
 
-    logger.info("inferCNA: building query log-CPM ...")
-    mat_query = _to_log_cpm(adata_query)
-    logger.info("inferCNA: building reference log-CPM ...")
-    mat_ref   = _to_log_cpm(adata_ref_ep)
+    # ------------------------------------------------------------------
+    # Extract raw integer count matrices  (cells × genes → transpose → genes × cells)
+    # ------------------------------------------------------------------
+    logger.info("CopyKAT: extracting raw counts from query ...")
+    mat_query = _get_raw_matrix(adata_query)      # cells × genes
+    mat_query = mat_query.T                        # genes × cells
 
+    logger.info("CopyKAT: extracting raw counts from reference ...")
+    mat_ref = _get_raw_matrix(adata_ref_ep)        # cells × genes
+    mat_ref = mat_ref.T                            # genes × cells
+
+    # Gene names
     q_genes = np.array(adata_query.var_names)
-    # Prefer adata.raw gene names for the reference if it covers more genes than any layer
     r_genes = (
         np.array(adata_ref_ep.raw.var_names)
         if adata_ref_ep.raw is not None
@@ -651,108 +572,171 @@ def _run_infercna(
         else np.array(adata_ref_ep.var_names)
     )
 
-    # Find genes present in both query and reference for a shared CNA feature space
-    common   = np.intersect1d(q_genes, r_genes)
-    n_common = len(common)
-    logger.info(f"inferCNA common genes: {n_common}")
+    # Align mat_ref rows to r_genes if raw was used
+    if adata_ref_ep.raw is not None and adata_ref_ep.raw.n_vars == mat_ref.shape[0]:
+        pass   # already aligned
+    # If _get_raw_matrix returned adata.raw but r_genes is var_names, realign
+    if mat_ref.shape[0] != len(r_genes):
+        logger.warning(
+            f"CopyKAT: ref matrix rows ({mat_ref.shape[0]}) != r_genes ({len(r_genes)}). "
+            "Falling back to adata_ref_ep.var_names for gene labelling."
+        )
+        r_genes = np.array(adata_ref_ep.var_names)
+        mat_ref_raw = _get_raw_matrix(adata_ref_ep)
+        mat_ref = mat_ref_raw.T
 
-    # Raise hard error if overlap is too small for meaningful CNA inference
+    # ------------------------------------------------------------------
+    # Common genes
+    # ------------------------------------------------------------------
+    common_genes = np.intersect1d(q_genes, r_genes)
+    n_common     = len(common_genes)
+    logger.info(f"CopyKAT common genes: {n_common}")
+
     if n_common < 200:
         raise ValueError(
-            f"Only {n_common} common genes. Need >= 200.\n"
+            f"Only {n_common} common genes between query and reference. Need >= 200.\n"
             "Both datasets must use HGNC gene symbols."
         )
-    # Warn if overlap is below the recommended threshold for reliable inference
     if n_common < 2000:
-        logger.warning(f"Only {n_common} common genes — inferCNA prefers 5000+.")
+        logger.warning(f"Only {n_common} common genes — CopyKAT prefers a larger gene set.")
 
-    # FIX 4 — auto-cap n
-    # Cap n to (n_common - 1) to prevent an internal R error inside infercna()
-    n_safe = min(n, n_common - 1)
-    if n_safe < n:
-        logger.warning(f"FIX 4: n capped {n} → {n_safe} (n_common={n_common}).")
+    q_idx = np.where(np.isin(q_genes,  common_genes))[0]
+    r_idx = np.where(np.isin(r_genes,  common_genes))[0]
 
-    # Get positional indices of common genes in query and reference gene arrays
-    q_idx = np.where(np.isin(q_genes, common))[0]
-    r_idx = np.where(np.isin(r_genes, common))[0]
+    mat_query_sub = mat_query[q_idx, :]   # common_genes × query_cells
+    mat_ref_sub   = mat_ref[r_idx,   :]   # common_genes × ref_cells
 
-    # Horizontally stack query and reference matrices (query first) on common genes only
-    mat_combined = np.hstack([mat_query[q_idx, :], mat_ref[r_idx, :]])
-    sub_genes    = q_genes[q_idx]
-    q_barcodes   = np.array(adata_query.obs_names)
-    # Prefix reference barcodes with "REF_" so inferCNA can distinguish them from query cells
-    ref_barcodes = np.array(["REF_" + b for b in adata_ref_ep.obs_names])
-    all_barcodes = np.concatenate([q_barcodes, ref_barcodes])
+    # Prefix reference barcodes to avoid barcode collision
+    q_barcodes_sub = np.array(adata_query.obs_names)
+    r_barcodes_sub = np.array(["REF_" + b for b in adata_ref_ep.obs_names])
+
+    mat_combined  = np.hstack([mat_query_sub, mat_ref_sub])
+    all_barcodes  = np.concatenate([q_barcodes_sub, r_barcodes_sub])
+    normal_cells  = r_barcodes_sub.tolist()
 
     logger.info(
-        f"inferCNA matrix: {mat_combined.shape[0]} genes × {mat_combined.shape[1]} cells "
-        f"({len(q_barcodes)} query + {len(ref_barcodes)} ref), n_safe={n_safe}"
+        f"CopyKAT combined matrix: {mat_combined.shape[0]} genes × "
+        f"{mat_combined.shape[1]} cells "
+        f"({len(q_barcodes_sub)} query + {len(r_barcodes_sub)} ref)"
     )
 
-    # Transfer to R and run infercna() ONLY — NOT findMalignant() (FIX 7)
-    logger.info("inferCNA: transferring to R ...")
-    # Flatten in Fortran (column-major) order to match R's matrix memory layout
-    ro.globalenv["mat_flat"]     = ro.FloatVector(mat_combined.flatten(order="F").tolist())
-    ro.globalenv["n_rows"]       = ro.IntVector([mat_combined.shape[0]])
-    ro.globalenv["n_cols"]       = ro.IntVector([mat_combined.shape[1]])
-    ro.globalenv["all_barcodes"] = ro.StrVector(all_barcodes.tolist())
-    ro.globalenv["ref_barcodes"] = ro.StrVector(ref_barcodes.tolist())
-    ro.globalenv["gene_names"]   = ro.StrVector(sub_genes.tolist())
-    ro.globalenv["n_genes"]      = ro.IntVector([n_safe])
-    ro.globalenv["noise_val"]    = ro.FloatVector([noise])
-    ro.globalenv["genome_name"]  = ro.StrVector([genome])
+    # ------------------------------------------------------------------
+    # Transfer to R and run copykat()
+    # ------------------------------------------------------------------
+    logger.info("CopyKAT: transferring matrix to R ...")
 
-    logger.info(
-        "inferCNA: running R (useGenome + infercna only — findMalignant bypassed) ..."
-    )
-    ro.r("""
-        suppressPackageStartupMessages(library(infercna))
-        r_mat <- matrix(mat_flat, nrow=n_rows, ncol=n_cols)
-        rownames(r_mat) <- gene_names
-        colnames(r_mat) <- all_barcodes
-        useGenome(genome_name)
-        cna <- infercna(
-            m        = r_mat,
-            refCells = list(normal_ref = ref_barcodes),
-            n        = n_genes,
-            noise    = noise_val,
-            isLog    = TRUE,
-            verbose  = FALSE
-        )
-    """)
+    # Flatten column-major (Fortran order) to match R matrix layout
+    ro.globalenv["ck_mat_flat"]    = ro.FloatVector(mat_combined.flatten(order="F").tolist())
+    ro.globalenv["ck_n_rows"]      = ro.IntVector([mat_combined.shape[0]])
+    ro.globalenv["ck_n_cols"]      = ro.IntVector([mat_combined.shape[1]])
+    ro.globalenv["ck_gene_names"]  = ro.StrVector(common_genes.tolist())
+    ro.globalenv["ck_barcodes"]    = ro.StrVector(all_barcodes.tolist())
+    ro.globalenv["ck_norm_cells"]  = ro.StrVector(normal_cells)
+    ro.globalenv["ck_id_type"]     = ro.StrVector([id_type])
+    ro.globalenv["ck_ngene_chr"]   = ro.IntVector([ngene_chr])
+    ro.globalenv["ck_win_size"]    = ro.IntVector([win_size])
+    ro.globalenv["ck_ks_cut"]      = ro.FloatVector([ks_cut])
+    ro.globalenv["ck_distance"]    = ro.StrVector([distance])
+    ro.globalenv["ck_n_cores"]     = ro.IntVector([n_cores])
+    ro.globalenv["ck_plot_genes"]  = ro.StrVector(["TRUE" if plot_genes  else "FALSE"])
+    ro.globalenv["ck_output_seg"]  = ro.StrVector(["TRUE" if output_seg  else "FALSE"])
+    ro.globalenv["ck_genome"]      = ro.StrVector([genome])
+    ro.globalenv["ck_sam_name"]    = ro.StrVector([sam_name])
 
-    # Pull CNA matrix back to Python
-    cna_r = ro.globalenv["cna"]
+    logger.info("CopyKAT: running copykat() in R ...")
     try:
-        cna_cols   = list(cna_r.colnames)
-        cna_rows   = list(cna_r.rownames)
-        # Reshape using Fortran order to correctly unpack R's column-major matrix
-        cna_values = np.array(cna_r).reshape(len(cna_rows), len(cna_cols), order="F")
-        # Wrap in DataFrame with gene names as index and cell barcodes as columns
-        cna_df     = pd.DataFrame(cna_values, index=cna_rows, columns=cna_cols)
-        logger.info(
-            f"CNA matrix retrieved: {cna_df.shape[0]} genes × {cna_df.shape[1]} cells"
-        )
-    except Exception as exc:
-        logger.error(f"Could not convert CNA matrix: {exc}")
-        return pd.DataFrame({
-            "barcode"            : list(q_barcodes),
-            "cna_signal"         : np.nan,
-            "cna_cor"            : np.nan,
-            "gmm_label"          : -1,
-            "infercna_prediction": "not.defined",
-        })
+        ro.r("""
+            suppressPackageStartupMessages(library(copykat))
 
-    # FIX 7 — Python GMM replaces findMalignant()
-    # Run Python-side GMM on the CNA matrix — reference cells are ignored as their
-    # barcodes are prefixed with "REF_" and will not match q_barcodes
-    logger.info("FIX 7: Python-side GMM findMalignant replacement ...")
-    result_df = _python_find_malignant(cna_df, q_barcodes, signal_threshold)
-    logger.info(
-        "inferCNA predictions:\n"
-        + result_df["infercna_prediction"].value_counts().to_string()
-    )
-    return result_df
+            r_mat <- matrix(ck_mat_flat, nrow = ck_n_rows, ncol = ck_n_cols)
+            rownames(r_mat) <- ck_gene_names
+            colnames(r_mat) <- ck_barcodes
+
+            copykat.result <- copykat(
+                rawmat          = r_mat,
+                id.type         = ck_id_type,
+                ngene.chr       = ck_ngene_chr,
+                win.size        = ck_win_size,
+                KS.cut          = ck_ks_cut,
+                sam.name        = ck_sam_name,
+                distance        = ck_distance,
+                norm.cell.names = ck_norm_cells,
+                output.seg      = ck_output_seg,
+                plot.genes      = ck_plot_genes,
+                genome          = ck_genome,
+                n.cores         = ck_n_cores
+            )
+        """)
+    except Exception as exc:
+        logger.error(f"CopyKAT R execution failed: {exc}")
+        return empty_result
+
+    # ------------------------------------------------------------------
+    # Parse copykat prediction output from R
+    # ------------------------------------------------------------------
+    try:
+        ro.r("""
+            ck_pred <- copykat.result$prediction
+        """)
+        ck_pred_r = ro.globalenv["ck_pred"]
+
+        # Convert R data.frame to pandas
+        import rpy2.robjects as ro2
+        from rpy2.robjects import pandas2ri
+        pandas2ri.activate()
+        pred_df = pandas2ri.rpy2py(ck_pred_r)
+
+        logger.info(f"CopyKAT raw prediction columns: {list(pred_df.columns)}")
+        logger.info(
+            "CopyKAT raw prediction counts:\n"
+            + pred_df["copykat.pred"].value_counts().to_string()
+            if "copykat.pred" in pred_df.columns
+            else str(pred_df.head())
+        )
+
+        # Normalise column names — copykat may use 'cell.names' or the index
+        if "cell.names" in pred_df.columns:
+            barcode_col = "cell.names"
+        elif "barcodes" in pred_df.columns:
+            barcode_col = "barcodes"
+        else:
+            # Fall back: use the DataFrame index as barcodes
+            pred_df = pred_df.reset_index()
+            pred_df = pred_df.rename(columns={"index": "cell.names"})
+            barcode_col = "cell.names"
+
+        pred_col = "copykat.pred" if "copykat.pred" in pred_df.columns else pred_df.columns[-1]
+
+        # Map copykat labels: "aneuploid" → "aneuploid", "diploid" → "diploid"
+        # Filter out REF_ prefixed barcodes — those are normal reference cells
+        pred_df = pred_df[~pred_df[barcode_col].str.startswith("REF_")].copy()
+        pred_df = pred_df.rename(columns={
+            barcode_col : "barcode",
+            pred_col    : "copykat_prediction",
+        })[["barcode", "copykat_prediction"]]
+        pred_df["copykat_prediction"] = (
+            pred_df["copykat_prediction"]
+            .str.strip()
+            .str.lower()
+            .fillna("not.defined")
+        )
+
+        # Align to all original query barcodes (left-merge keeps order)
+        result_full = pd.DataFrame({"barcode": list(q_barcodes)})
+        result_full = result_full.merge(pred_df, on="barcode", how="left")
+        result_full["copykat_prediction"] = (
+            result_full["copykat_prediction"].fillna("not.defined")
+        )
+
+        logger.info(
+            "CopyKAT predictions (query cells only):\n"
+            + result_full["copykat_prediction"].value_counts().to_string()
+        )
+        return result_full
+
+    except Exception as exc:
+        logger.error(f"CopyKAT result parsing failed: {exc}")
+        return empty_result
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -773,12 +757,20 @@ def run_preprocessing_pipeline(
     surfaceome_path=None,
     # malignancy
     malignant_strategy="intersection",
-    # inferCNA
-    infercna_genome="hg19",
-    infercna_n=5000,
-    infercna_noise=0.1,
-    infercna_signal_threshold=0.9,
-    infercna_ref_max_cells=2000,
+    # CopyKAT parameters (all user-configurable from the calling script)
+    copykat_genome="hg20",
+    copykat_id_type="S",
+    copykat_ngene_chr=10,
+    copykat_win_size=50,
+    copykat_ks_cut=0.1,
+    copykat_distance="euclidean",
+    copykat_n_cores=2,
+    copykat_plot_genes=True,
+    copykat_output_seg=False,
+    copykat_ref_max_cells=100,
+    copykat_sam_name="copykat_run",
+    copykat_ref_epithelial_key="cell_ontology_class",
+    copykat_ref_epithelial_values=None,
 ):
     """
     Full preprocessing pipeline.
@@ -810,7 +802,7 @@ def run_preprocessing_pipeline(
     1.  Load full PopV h5ad (all cell types)  → adata_full
     2.  Read QC thresholds from adata.uns['qc_params']
     3.  Extract epithelial cells → apply QC if thresholds are set
-    4.  scMalignantFinder + inferCNA on epithelial cells
+    4.  scMalignantFinder + CopyKAT on epithelial cells
     5.  Keep ONLY malignant epithelial cells (non-malignant dropped)
     6.  adata_full non-epithelial cells → "rest" comparison group
     7.  Surfaceome filter (GESP genes) applied to BOTH groups
@@ -826,8 +818,8 @@ def run_preprocessing_pipeline(
     log2fc_threshold : float   DEG log2FC cutoff. Default 1.0.
     pval_adj_threshold : float DEG BH-adjusted p-value cutoff. Default 0.05.
     reference_h5ad : str or None
-        Tabula Sapiens h5ad for inferCNA normal reference.
-        inferCNA skipped if None.
+        Tabula Sapiens h5ad for CopyKAT normal reference.
+        CopyKAT skipped if None.
     tumor_h5ad : str or None
         Module 1 h5ad for Route A-rescue. Auto-detected if None.
     save_dir : str or None
@@ -837,20 +829,46 @@ def run_preprocessing_pipeline(
     malignant_strategy : str
         'intersection' — malignant only if BOTH tools agree (default)
         'scMalignant'  — scMalignantFinder only
-        'infercna'     — inferCNA only (requires reference_h5ad)
-    infercna_genome : str   'hg19' (default) or 'hg38'. String key, not file.
-    infercna_n : int        CNA top genes. Default 5000. Auto-capped (FIX 4).
-    infercna_noise : float  Noise floor. Default 0.1.
-    infercna_signal_threshold : float  GMM cnaSignal top fraction. Default 0.9.
-    infercna_ref_max_cells : int       Max reference cells. Default 2000.
+        'copykat'      — CopyKAT only (requires reference_h5ad)
+    copykat_genome : str
+        Genome version for copykat(). Default "hg20".
+    copykat_id_type : str
+        Gene ID type: "S" (symbol) or "E" (Ensembl). Default "S".
+    copykat_ngene_chr : int
+        Minimum genes per chromosome for copykat. Default 10.
+    copykat_win_size : int
+        Sliding window size for CNA smoothing. Default 50.
+    copykat_ks_cut : float
+        KS statistic cut-off for aneuploid/diploid classification. Default 0.1.
+    copykat_distance : str
+        Distance metric for hierarchical clustering. Default "euclidean".
+    copykat_n_cores : int
+        Parallel cores for copykat. Default 2.
+    copykat_plot_genes : bool
+        Whether copykat produces gene-level plots. Default True.
+    copykat_output_seg : bool
+        Whether copykat writes segment files. Default False.
+    copykat_ref_max_cells : int
+        Maximum normal reference cells (FIX 2). Default 100.
+    copykat_sam_name : str
+        Sample name prefix for copykat output files. Default "copykat_run".
+    copykat_ref_epithelial_key : str
+        obs column in reference h5ad used to identify normal epithelial cells.
+        Default "cell_ontology_class".
+    copykat_ref_epithelial_values : list of str or None
+        Values in copykat_ref_epithelial_key that mark normal epithelial cells.
+        Default ["epithelial cell"].
 
     Returns
     -------
     AnnData  Malignant epithelial cells only, surfaceome-filtered, binarised.
              DEG stored in adata.uns['filtered_deg'] and adata.uns['all_deg'].
-             inferCNA full results in adata.uns['infercna_results'].
+             CopyKAT full results in adata.uns['copykat_results'].
              QC params echoed in adata.uns['qc_params'] (None if QC skipped).
     """
+    if copykat_ref_epithelial_values is None:
+        copykat_ref_epithelial_values = ["epithelial cell"]
+
     print("\n========== START ==========\n")
 
     # ------------------------------------------------------------------
@@ -939,7 +957,7 @@ def run_preprocessing_pipeline(
     else:
         print(f"QC filtering SKIPPED — all {adata_epi.n_obs} epithelial cells proceed.\n")
 
-    # Route raw counts → .X; snapshot for inferCNA
+    # Route raw counts → .X; snapshot for CopyKAT
     print("Detecting raw count source for epithelial cells...")
     for lyr in ("scvi_counts", "raw_counts", "counts"):
         if lyr in adata_epi.layers:
@@ -1011,75 +1029,80 @@ def run_preprocessing_pipeline(
     print(adata_epi.obs[scm_col].value_counts().to_string())
 
     # ------------------------------------------------------------------
-    # STEP 4b — inferCNA (FIX 7: scalop-safe Python GMM)
+    # STEP 4b — CopyKAT
     # ------------------------------------------------------------------
-    infercna_available = False
-    infercna_result_df = None
+    copykat_available = False
+    copykat_result_df = None
 
-    if malignant_strategy in ("infercna", "intersection"):
+    if malignant_strategy in ("copykat", "intersection"):
         if reference_h5ad is None:
             print(
-                "\nWarning: inferCNA skipped — no reference_h5ad provided.\n"
+                "\nWarning: CopyKAT skipped — no reference_h5ad provided.\n"
                 "  Falling back to scMalignantFinder only."
             )
             malignant_strategy = "scMalignant"
         else:
             print(
-                f"\n--- Step 4b: inferCNA ---\n"
-                f"  Reference: {reference_h5ad}\n"
-                f"  Reference subsampled to <={infercna_ref_max_cells} cells\n"
-                f"  n auto-capped, scalop-safe Python GMM"
+                f"\n--- Step 4b: CopyKAT ---\n"
+                f"  Reference:           {reference_h5ad}\n"
+                f"  Genome:              {copykat_genome}\n"
+                f"  id.type:             {copykat_id_type}\n"
+                f"  ngene.chr:           {copykat_ngene_chr}\n"
+                f"  win.size:            {copykat_win_size}\n"
+                f"  KS.cut:              {copykat_ks_cut}\n"
+                f"  distance:            {copykat_distance}\n"
+                f"  n.cores:             {copykat_n_cores}\n"
+                f"  plot.genes:          {copykat_plot_genes}\n"
+                f"  output.seg:          {copykat_output_seg}\n"
+                f"  ref_max_cells:       {copykat_ref_max_cells}\n"
+                f"  sam_name:            {copykat_sam_name}\n"
+                f"  ref_epithelial_key:  {copykat_ref_epithelial_key}\n"
+                f"  ref_epithelial_vals: {copykat_ref_epithelial_values}"
             )
             try:
                 adata_raw_cna   = adata_epi.copy()
                 adata_raw_cna.X = adata_epi.layers["raw_for_cna"]
                 adata_ref_full  = sc.read_h5ad(reference_h5ad)
 
-                infercna_result_df = _run_infercna(
-                    adata_query      = adata_raw_cna,
-                    adata_ref        = adata_ref_full,
-                    genome           = infercna_genome,
-                    n                = infercna_n,
-                    noise            = infercna_noise,
-                    signal_threshold = infercna_signal_threshold,
-                    ref_max_cells    = infercna_ref_max_cells,
+                copykat_result_df = _run_copykat(
+                    adata_query              = adata_raw_cna,
+                    adata_ref                = adata_ref_full,
+                    genome                   = copykat_genome,
+                    id_type                  = copykat_id_type,
+                    ngene_chr                = copykat_ngene_chr,
+                    win_size                 = copykat_win_size,
+                    ks_cut                   = copykat_ks_cut,
+                    distance                 = copykat_distance,
+                    n_cores                  = copykat_n_cores,
+                    plot_genes               = copykat_plot_genes,
+                    output_seg               = copykat_output_seg,
+                    ref_max_cells            = copykat_ref_max_cells,
+                    sam_name                 = copykat_sam_name,
+                    ref_epithelial_key       = copykat_ref_epithelial_key,
+                    ref_epithelial_values    = copykat_ref_epithelial_values,
                 )
 
-                # FIX 8 — store detailed inferCNA results on adata_epi
-                bc_to_pred   = dict(zip(infercna_result_df["barcode"],
-                                        infercna_result_df["infercna_prediction"]))
-                bc_to_signal = dict(zip(infercna_result_df["barcode"],
-                                        infercna_result_df["cna_signal"]))
-                bc_to_cor    = dict(zip(infercna_result_df["barcode"],
-                                        infercna_result_df["cna_cor"]))
-                bc_to_gmm    = dict(zip(infercna_result_df["barcode"],
-                                        infercna_result_df["gmm_label"]))
-
-                adata_epi.obs["infercna_prediction"]  = [
-                    bc_to_pred.get(b,   "not.defined") for b in adata_epi.obs_names
-                ]
-                adata_epi.obs["infercna_cna_signal"]  = [
-                    bc_to_signal.get(b, np.nan)         for b in adata_epi.obs_names
-                ]
-                adata_epi.obs["infercna_cna_cor"]     = [
-                    bc_to_cor.get(b,    np.nan)         for b in adata_epi.obs_names
-                ]
-                adata_epi.obs["infercna_gmm_label"]   = [
-                    bc_to_gmm.get(b,    -1)             for b in adata_epi.obs_names
+                # Store per-cell CopyKAT predictions on adata_epi
+                bc_to_pred = dict(zip(
+                    copykat_result_df["barcode"],
+                    copykat_result_df["copykat_prediction"],
+                ))
+                adata_epi.obs["copykat_prediction"] = [
+                    bc_to_pred.get(b, "not.defined") for b in adata_epi.obs_names
                 ]
 
-                infercna_available = True
+                copykat_available = True
 
-                print("\ninferCNA completed.")
+                print("\nCopyKAT completed.")
                 print("  Prediction counts:")
-                print(adata_epi.obs["infercna_prediction"].value_counts().to_string())
+                print(adata_epi.obs["copykat_prediction"].value_counts().to_string())
 
             except Exception as exc:
                 print(
-                    f"\nWarning: inferCNA failed — {type(exc).__name__}: {exc}\n"
+                    f"\nWarning: CopyKAT failed — {type(exc).__name__}: {exc}\n"
                     "  Falling back to scMalignantFinder only."
                 )
-                logger.exception("inferCNA error:")
+                logger.exception("CopyKAT error:")
                 malignant_strategy = "scMalignant"
 
     # ------------------------------------------------------------------
@@ -1088,14 +1111,15 @@ def run_preprocessing_pipeline(
     print("\n--- Step 4c: Combine malignancy calls ---")
     scm_mal = adata_epi.obs[scm_col].str.lower() == "malignant"
 
-    if infercna_available:
-        cna_mal = adata_epi.obs["infercna_prediction"].str.lower() == "malignant"
+    if copykat_available:
+        # CopyKAT labels aneuploid cells as malignant
+        ck_mal = adata_epi.obs["copykat_prediction"].str.lower() == "aneuploid"
         if malignant_strategy == "intersection":
-            malignant_mask  = scm_mal & cna_mal
-            strategy_label  = "intersection (scMalignantFinder AND inferCNA)"
-        elif malignant_strategy == "infercna":
-            malignant_mask  = cna_mal
-            strategy_label  = "inferCNA only"
+            malignant_mask  = scm_mal & ck_mal
+            strategy_label  = "intersection (scMalignantFinder AND CopyKAT)"
+        elif malignant_strategy == "copykat":
+            malignant_mask  = ck_mal
+            strategy_label  = "CopyKAT only"
         else:
             malignant_mask  = scm_mal
             strategy_label  = "scMalignantFinder only"
@@ -1260,28 +1284,28 @@ def run_preprocessing_pipeline(
         if qc_active else None
     )
 
-    # FIX 8 — store full inferCNA results
-    if infercna_result_df is not None:
-        final_barcodes         = set(adata_mal.obs_names)
-        infercna_stored        = infercna_result_df.copy()
-        infercna_stored["in_final_output"] = infercna_stored["barcode"].isin(
+    # FIX 8 — store full CopyKAT results
+    if copykat_result_df is not None:
+        final_barcodes      = set(adata_mal.obs_names)
+        copykat_stored      = copykat_result_df.copy()
+        copykat_stored["in_final_output"] = copykat_stored["barcode"].isin(
             final_barcodes
         )
-        adata_mal.uns["infercna_results"] = infercna_stored
+        adata_mal.uns["copykat_results"] = copykat_stored
 
         print(
-            f"\ninferCNA results stored in adata.uns['infercna_results']:\n"
-            f"  Shape: {infercna_stored.shape[0]} rows × "
-            f"{infercna_stored.shape[1]} columns\n"
-            f"  Columns: {list(infercna_stored.columns)}\n"
+            f"\nCopyKAT results stored in adata.uns['copykat_results']:\n"
+            f"  Shape: {copykat_stored.shape[0]} rows × "
+            f"{copykat_stored.shape[1]} columns\n"
+            f"  Columns: {list(copykat_stored.columns)}\n"
             f"  Prediction summary (all epithelial cells before filtering):\n"
-            + infercna_stored["infercna_prediction"].value_counts().to_string()
+            + copykat_stored["copykat_prediction"].value_counts().to_string()
             + f"\n  Cells in final malignant output: "
-            f"{infercna_stored['in_final_output'].sum()}"
+            f"{copykat_stored['in_final_output'].sum()}"
         )
     else:
-        adata_mal.uns["infercna_results"] = None
-        print("\ninferCNA was not run — adata.uns['infercna_results'] = None")
+        adata_mal.uns["copykat_results"] = None
+        print("\nCopyKAT was not run — adata.uns['copykat_results'] = None")
 
     # Clean string columns
     for col in adata_mal.obs.columns:
