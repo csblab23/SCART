@@ -1004,23 +1004,28 @@ def run_preprocessing_pipeline(
 
     # scMalignantFinder is bundled inside SCART (not an installed package).
     # scmalignant_model_dir = <scart_root>/external/scMalignantFinder/model/
-    # The classifier module lives one level up:
-    #   <scart_root>/external/scMalignantFinder/
-    # We temporarily add that parent directory to sys.path so the import
-    # resolves against the bundled source rather than site-packages.
-    import sys as _sys
-    _scm_src_dir = os.path.dirname(scmalignant_model_dir)   # …/external/scMalignantFinder
-    _scm_inserted = False
-    if _scm_src_dir not in _sys.path:
-        _sys.path.insert(0, _scm_src_dir)
-        _scm_inserted = True
-    try:
-        from scMalignantFinder import classifier
-    finally:
-        if _scm_inserted and _scm_src_dir in _sys.path:
-            _sys.path.remove(_scm_src_dir)
+    #
+    # Two possible layouts inside .../external/scMalignantFinder/:
+    #   Layout A (package):  __init__.py + classifier.py  → classifier.py is here
+    #   Layout B (bare):     classifier.py directly, no __init__.py
+    #
+    # We use importlib.util.spec_from_file_location to load classifier.py by
+    # its absolute path, bypassing the package system entirely.  This works
+    # for both layouts without modifying sys.path.
+    import importlib.util as _ilu
+    _scm_src_dir      = os.path.dirname(scmalignant_model_dir)  # …/external/scMalignantFinder
+    _classifier_py    = os.path.join(_scm_src_dir, "classifier.py")
+    if not os.path.exists(_classifier_py):
+        raise FileNotFoundError(
+            f"scMalignantFinder classifier.py not found at: {_classifier_py}\n"
+            f"Expected layout: <scart_root>/external/scMalignantFinder/classifier.py\n"
+            f"Resolved scmalignant_model_dir: {scmalignant_model_dir}"
+        )
+    _spec       = _ilu.spec_from_file_location("scMalignantFinder.classifier", _classifier_py)
+    _classifier = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_classifier)
 
-    model = classifier.scMalignantFinder(
+    model = _classifier.scMalignantFinder(
         test_input          = adata_scm,
         celltype_annotation = False,
         pretrain_path       = scmalignant_model_dir,
