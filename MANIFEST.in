@@ -14,5 +14,6 @@ recursive-include SCART *.model
 recursive-include SCART *.bin
 recursive-include SCART *.pickle
 recursive-include SCART/external/scMalignantFinder/model *
+recursive-include SCART/external *
 recursive-include SCART/PopV/resources *
 recursive-include SCART/GESP *
