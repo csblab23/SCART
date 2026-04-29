@@ -642,31 +642,14 @@ def run_popv_annotation(
     # -----------------------------------------------------------------------
     adata_query = _store_full_counts_layer(adata_query)
 
-    # Strip ALL layers from reference, keep only float32 layers on query.
-    # anndata.concat(join='outer') aligns every layer across objects; if the
-    # reference carries a string-typed layer scipy.sparse raises
-    # 'does not support dtype str224'.  Reference only needs .X for PopV.
-    if adata_ref.layers:
-        ref_layer_names = list(adata_ref.layers.keys())
-        logger.info(
-            f"Dropping {len(ref_layer_names)} reference layer(s) before "
-            f"Process_Query to prevent dtype concat crash: {ref_layer_names}"
-        )
-        for lk in ref_layer_names:
-            del adata_ref.layers[lk]
-
-    _keep_query_layers = {"full_counts", "raw_counts"}
-    _drop_query_layers = [
-        lk for lk in list(adata_query.layers.keys())
-        if lk not in _keep_query_layers
-    ]
-    if _drop_query_layers:
-        logger.info(
-            f"Dropping {len(_drop_query_layers)} non-essential query layer(s) "
-            f"before Process_Query: {_drop_query_layers}"
-        )
-        for lk in _drop_query_layers:
-            del adata_query.layers[lk]
+    # Log what layers exist before the gene-alignment step strips them all.
+    # (Full removal happens at the end of the gene-alignment block below.)
+    _ref_layer_info   = list(adata_ref.layers.keys())
+    _query_layer_info = list(adata_query.layers.keys())
+    if _ref_layer_info:
+        logger.info(f"Reference layers present (will be cleared): {_ref_layer_info}")
+    if _query_layer_info:
+        logger.info(f"Query layers present (full_counts/raw_counts will be saved): {_query_layer_info}")
 
     # -----------------------------------------------------------------------
     # Gene-space alignment before Process_Query.
@@ -703,26 +686,74 @@ def run_popv_annotation(
             f"query {n_query_genes} genes, ref {n_ref_genes} genes → "
             f"{len(common_genes)} common genes (intersection)."
         )
+
+        # Stash full_counts and raw_counts BEFORE subsetting .var.
+        # After [:, common_genes].copy() these layers would be column-subsetted
+        # too, losing the full-gene snapshot.  We preserve them separately and
+        # reattach after subsetting.
+        _full_counts_stash     = adata_query.layers.pop("full_counts", None)
+        _full_var_names_stash  = adata_query.uns.pop("full_counts_var_names", None)
+        _raw_counts_stash      = adata_query.layers.pop("raw_counts", None)
+
         adata_query = adata_query[:, common_genes].copy()
         adata_ref   = adata_ref[:, common_genes].copy()
 
-        # Patch the full_counts layer gene index to reflect the subset
-        # (full_counts itself is NOT subsetted — it keeps all original genes)
-        # but raw_counts on the subsetted query must stay float32.
-        if "raw_counts" in adata_query.layers:
-            if sp.issparse(adata_query.layers["raw_counts"]):
+        # Restore the full-gene snapshot (untouched — still all original genes)
+        if _full_counts_stash is not None:
+            adata_query.layers["full_counts"]         = _full_counts_stash
+            adata_query.uns["full_counts_var_names"]   = _full_var_names_stash
+            logger.info(
+                f"Gene-space alignment: full_counts restored "
+                f"({_full_counts_stash.shape[1]} genes) after subsetting .var "
+                f"to {len(common_genes)} common genes."
+            )
+
+        # Restore raw_counts subsetted to common genes (float32)
+        if _raw_counts_stash is not None:
+            # _raw_counts_stash still has the original n_vars columns; subset it
+            query_gene_list = list(adata_query_snapshot.var_names)
+            gene_to_idx     = {g: i for i, g in enumerate(query_gene_list)}
+            common_idx      = [gene_to_idx[g] for g in common_genes if g in gene_to_idx]
+            if sp.issparse(_raw_counts_stash):
                 adata_query.layers["raw_counts"] = (
-                    adata_query.layers["raw_counts"].tocsr().astype(np.float32)
+                    _raw_counts_stash[:, common_idx].tocsr().astype(np.float32)
                 )
             else:
                 adata_query.layers["raw_counts"] = np.asarray(
-                    adata_query.layers["raw_counts"], dtype=np.float32
+                    _raw_counts_stash[:, common_idx], dtype=np.float32
                 )
+            logger.info(
+                f"Gene-space alignment: raw_counts subsetted to "
+                f"{len(common_idx)} common genes."
+            )
+
     else:
         logger.info(
             f"Gene-space alignment: query and reference already share "
             f"all {len(common_genes)} genes — no subsetting needed."
         )
+
+    # Final safety: drop ALL layers from both objects so anndata.concat
+    # inside Process_Query never tries to align any layer across gene spaces.
+    # layers['full_counts'] and layers['raw_counts'] are preserved in local
+    # variables and will be reattached to the query OUTPUT after annotation.
+    # This is the definitive fix for "scipy.sparse does not support dtype str224":
+    # the outer-join fill_value="unknown" can only crash when a layer exists on
+    # one side but not the other — removing all layers eliminates that path.
+    _saved_full_counts     = adata_query.layers.pop("full_counts", None)
+    _saved_full_var_names  = adata_query.uns.pop("full_counts_var_names", None)
+    _saved_raw_counts      = adata_query.layers.pop("raw_counts", None)
+
+    # Clear any remaining layers on both sides
+    for lk in list(adata_query.layers.keys()):
+        del adata_query.layers[lk]
+    for lk in list(adata_ref.layers.keys()):
+        del adata_ref.layers[lk]
+
+    logger.info(
+        "All layers cleared from query and reference before Process_Query. "
+        "full_counts and raw_counts saved for reattachment after annotation."
+    )
 
     # --- Process_Query (popv 0.4.2 signature) --------------------------------
     # Removed vs 0.6.0: prediction_mode, save_path_trained_models, hvg
@@ -908,6 +939,30 @@ def run_popv_annotation(
     )
     adata_query_out = _extract_query_cells(adata_processed, adata_query_snapshot)
     logger.info(f"Query-only shape: {adata_query_out.shape}")
+
+    # --- Reattach full_counts and raw_counts saved before Process_Query -----
+    # These were popped before anndata.concat to prevent the str224 crash.
+    # Reattach now so the final saved h5ad has the full gene snapshot for
+    # Module 3 and the original expression matrix for .X restoration.
+    if _saved_full_counts is not None:
+        adata_query_out.layers["full_counts"]       = _saved_full_counts
+        adata_query_out.uns["full_counts_var_names"] = _saved_full_var_names
+        logger.info(
+            f"Reattached layers['full_counts'] "
+            f"({_saved_full_counts.shape[1]} genes) to query output."
+        )
+    else:
+        logger.error(
+            "full_counts not available for reattachment — "
+            "Module 3 will fall back to 4000 HVGs."
+        )
+
+    if _saved_raw_counts is not None:
+        adata_query_out.layers["raw_counts"] = _saved_raw_counts
+        logger.info(
+            f"Reattached layers['raw_counts'] "
+            f"({_saved_raw_counts.shape[1]} genes) to query output."
+        )
 
     # --- FIX 8 verification -------------------------------------------------
     _verify_full_counts_layer(adata_query_out)
