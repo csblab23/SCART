@@ -624,52 +624,23 @@ def run_popv_annotation(
     label_map, label_to_id = _build_label_map_from_obo(cl_obo_folder)
     logger.info(f"Loaded {len(label_map):,} ontology labels.")
 
-    # FIX 1a — normalise reference labels and filter non-ontology terms
+    # FIX 1a — normalise reference labels (case only; no cell dropping for 0.4.2)
+    # popv 0.4.2 handles unknown/non-ontology labels internally via its OBO
+    # digraph.  Dropping reference cells here is a 0.6.0-specific workaround
+    # and is intentionally omitted.
     _ref_label_col = "cell_ontology_class"
     if _ref_label_col in adata_ref.obs.columns and label_map:
-
         adata_ref.obs[_ref_label_col] = (
             adata_ref.obs[_ref_label_col]
             .astype(str)
             .str.lower()
             .map(lambda v: label_map.get(v, v))
         )
-
-        valid_labels     = set(label_map.values())
-        mask             = adata_ref.obs[_ref_label_col].isin(valid_labels)
-        n_before         = adata_ref.n_obs
-        n_dropped_labels = (~mask).sum()
-
-        if n_dropped_labels > 0:
-            dropped = adata_ref.obs.loc[~mask, _ref_label_col].unique().tolist()
-            logger.warning(
-                f"Dropping {n_dropped_labels} reference cells not in "
-                f"cell ontology digraph: {dropped}"
-            )
-            adata_ref = adata_ref[mask].copy()
-
         logger.info(
-            f"Reference: {n_before} → {adata_ref.n_obs} cells, "
+            f"Reference labels case-normalised — "
+            f"{adata_ref.n_obs} cells, "
             f"{adata_ref.obs[_ref_label_col].nunique()} unique labels."
         )
-
-    # Sync cell_ontology_id
-    _ref_id_col = "cell_ontology_id"
-    if _ref_label_col in adata_ref.obs.columns and label_to_id:
-        adata_ref.obs[_ref_id_col] = (
-            adata_ref.obs[_ref_label_col]
-            .map(label_to_id)
-            .fillna(
-                adata_ref.obs.get(_ref_id_col, "")
-                if _ref_id_col in adata_ref.obs.columns
-                else ""
-            )
-        )
-        missing_ids = (adata_ref.obs[_ref_id_col] == "").sum()
-        if missing_ids > 0:
-            logger.warning(f"{missing_ids} reference cells have no CL ID after sync.")
-        else:
-            logger.info("cell_ontology_id synced — ONCLASS dict will be complete.")
 
     # --- Process_Query (popv 0.4.2 signature) --------------------------------
     # Removed vs 0.6.0: prediction_mode, save_path_trained_models, hvg
@@ -859,6 +830,59 @@ def run_popv_annotation(
     # --- FIX 8 verification -------------------------------------------------
     _verify_full_counts_layer(adata_query_out)
 
+    # --- Restore original .X into the final output --------------------------
+    # After Process_Query + annotate_data, .X holds PopV's internal HVG-trimmed
+    # normalised matrix.  We restore the user's original expression matrix
+    # (raw counts or log1p) so downstream modules receive what they expect.
+    # The full-gene snapshot is already in layers['full_counts']; this restores
+    # .X to the original per-query-cell values aligned to the CURRENT .var
+    # (HVGs only, same genes as the trimmed .X).
+    #
+    # Strategy:
+    #   • If input_type == 'raw': restore from layers['raw_counts'] if present,
+    #     otherwise from layers['full_counts'] subsetted to current .var genes.
+    #   • If input_type == 'log1p': restore from layers['full_counts'] subsetted
+    #     to current .var genes (full_counts was snapshotted from .X before PQ).
+    #
+    # In both cases, if a clean layer is not available we leave .X as-is and
+    # log a warning — annotation results are still valid.
+    logger.info("Restoring original .X to the final query output …")
+    _restored = False
+
+    if input_type == "raw" and "raw_counts" in adata_query_out.layers:
+        adata_query_out.X = adata_query_out.layers["raw_counts"]
+        logger.info(".X restored from layers['raw_counts'] (raw counts, HVG space).")
+        _restored = True
+
+    if not _restored and "full_counts" in adata_query_out.layers:
+        # full_counts is (n_cells × n_full_genes); .var is HVG subset.
+        # Map current var_names back into the full gene list.
+        full_var_names = adata_query_out.uns.get("full_counts_var_names", [])
+        if full_var_names:
+            full_name_to_idx = {g: i for i, g in enumerate(full_var_names)}
+            hvg_names        = list(adata_query_out.var_names)
+            col_indices      = [full_name_to_idx[g] for g in hvg_names
+                                if g in full_name_to_idx]
+            if len(col_indices) == len(hvg_names):
+                fc = adata_query_out.layers["full_counts"]
+                adata_query_out.X = fc[:, col_indices]
+                logger.info(
+                    f".X restored from layers['full_counts'] "
+                    f"({input_type} values, HVG space, {len(col_indices)} genes)."
+                )
+                _restored = True
+            else:
+                logger.warning(
+                    f"Gene index mismatch: {len(col_indices)}/{len(hvg_names)} "
+                    "HVGs found in full_counts_var_names. Leaving .X as-is."
+                )
+
+    if not _restored:
+        logger.warning(
+            "Could not restore original .X — no suitable layer found. "
+            ".X contains PopV's internal normalised matrix."
+        )
+
     if drop_reference_columns:
         adata_query_out = _drop_reference_only_columns(adata_query_out)
 
@@ -891,21 +915,112 @@ def auto_run_popv(
     output_dir: str = "popv_results",
     user_reference: str = None,
     drop_reference_columns: bool = True,
+    user_popv_prediction: str = None,
 ):
     """
     Fully automatic entry-point.  Finds the tumor h5ad from Module 1,
     downloads the matching Tabula Sapiens reference (or uses
     user_reference), and runs PopV 0.4.2 annotation.
 
+    Parameters
+    ----------
+    input_type : str
+        'raw' or 'log1p' — determines which methods run and how .X is handled.
+    nsamples : int
+        Cells sampled per label during reference subsampling.
+    output_dir : str
+        Directory where final_popv_annotated.h5ad is written.
+    user_reference : str, optional
+        Path to a local Tabula Sapiens (or compatible) reference h5ad.
+        If provided, the automatic Figshare download is skipped.
+    drop_reference_columns : bool
+        Remove Tabula Sapiens metadata columns from the saved output.
+    user_popv_prediction : str, optional
+        Path to an already-annotated h5ad that contains PopV prediction
+        columns (e.g. 'popv_majority_vote_prediction').  When supplied,
+        the entire PopV annotation pipeline is SKIPPED.  The file is
+        validated, copied to output_dir as final_popv_annotated.h5ad,
+        and returned directly.  This lets users plug in their own
+        pre-computed PopV results without re-running the pipeline.
+
+        The h5ad must contain at least one column ending in '_prediction'
+        in .obs.  A warning is printed if 'popv_majority_vote_prediction'
+        is absent but execution continues.
+
     Usage
     -----
+    # Run our pipeline:
     from SCART import popv_annotation
     adata = popv_annotation.auto_run_popv(
         input_type="raw",
         nsamples=300,
-        user_reference="/data/users/deepika/vinaya/Ovary_TSP1_30_version2d_10X_smartseq_scvi_Nov262024.h5ad"
+        user_reference="/data/Ovary_TSP1_30.h5ad"
+    )
+
+    # Use your own pre-computed PopV result:
+    adata = popv_annotation.auto_run_popv(
+        user_popv_prediction="/data/my_popv_annotated.h5ad",
+        output_dir="popv_results"
     )
     """
+    # ------------------------------------------------------------------
+    # Short-circuit: user supplies their own PopV prediction h5ad
+    # ------------------------------------------------------------------
+    if user_popv_prediction is not None:
+        if not os.path.exists(user_popv_prediction):
+            raise FileNotFoundError(
+                f"user_popv_prediction file not found: {user_popv_prediction}"
+            )
+
+        logger.info(
+            f"user_popv_prediction provided — skipping PopV pipeline.\n"
+            f"Loading: {user_popv_prediction}"
+        )
+        adata = sc.read_h5ad(user_popv_prediction)
+
+        # Basic validation
+        pred_cols = [c for c in adata.obs.columns if c.endswith("_prediction")]
+        if not pred_cols:
+            raise ValueError(
+                f"No '_prediction' columns found in {user_popv_prediction}.\n"
+                "Expected at least one column ending in '_prediction' in .obs.\n"
+                "Please supply a valid PopV-annotated h5ad."
+            )
+        if "popv_majority_vote_prediction" not in adata.obs.columns:
+            logger.warning(
+                "'popv_majority_vote_prediction' not found in user-supplied h5ad. "
+                f"Found prediction columns: {pred_cols}. "
+                "Downstream modules expecting 'popv_majority_vote_prediction' "
+                "may need adjustment."
+            )
+        else:
+            logger.info(
+                f"'popv_majority_vote_prediction' present — "
+                f"{adata.obs['popv_majority_vote_prediction'].nunique()} unique labels."
+            )
+
+        # Save a copy into output_dir so the rest of the pipeline
+        # always finds final_popv_annotated.h5ad in the expected location.
+        os.makedirs(output_dir, exist_ok=True)
+        out_path = os.path.join(output_dir, "final_popv_annotated.h5ad")
+        if os.path.abspath(user_popv_prediction) != os.path.abspath(out_path):
+            logger.info(f"Copying user prediction to: {out_path}")
+            adata.write(out_path)
+        else:
+            logger.info("user_popv_prediction is already the output path — no copy needed.")
+
+        logger.info(
+            f"\n{'='*60}\n"
+            f"User PopV prediction loaded: {out_path}\n"
+            f"Shape       : {adata.shape}\n"
+            f"Pred columns: {pred_cols}\n"
+            f"{'='*60}"
+        )
+        return adata
+
+    # ------------------------------------------------------------------
+    # Normal pipeline
+    # ------------------------------------------------------------------
     tumor_file = get_latest_tumor_h5ad()
     logger.info(f"Query file: {tumor_file}")
 
