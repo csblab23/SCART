@@ -1,11 +1,12 @@
 """
 popv_annotation.py
-Module 2 — PopV cell-type annotation
+Module 2 — PopV cell-type annotation  (popv == 0.4.2)
 
 Fixes applied (all changes marked with # FIX N comments):
   1. Case-normalisation: predictions are title-cased before ontology lookup
      so "b cell" → "B cell" matches the digraph node label.
-  2. Ontology path: uses popv's own bundled ontology, not SCART's copy.
+  2. Ontology path: resolves cl.obo (v0.4.2 format) from popv's own bundle
+     or a filesystem walk; cl_obo_folder passed to Process_Query.
   3. Harmony batch fix: _batch_annotation guard added; falls back gracefully
      when only one batch value is present.
   4. Fallback prediction: derived from actually-present obs columns, not
@@ -39,6 +40,17 @@ Fixes applied (all changes marked with # FIX N comments):
        Module 3 _build_fullgene_adata_for_scm() checks 'full_counts'
        first, giving scMalignantFinder ≥90% model feature overlap instead
        of the previous 19%.
+
+  popv 0.4.2 API notes:
+    • Process_Query: no prediction_mode, no save_path_trained_models, no
+      hvg kwarg.  cl_obo_folder must point to the directory containing
+      cl.obo (not a JSON).
+    • annotate_data: simpler signature — annotate_data(adata, methods=[…])
+      with no methods_kwargs argument.
+    • Method name strings are UPPER_SNAKE (e.g. "KNN_BBKNN", "CELLTYPIST")
+      as registered in popv 0.4.2.
+    • .X must contain raw counts (integer or float32) when input_type='raw'.
+      For log1p input, .X is passed as-is; only CELLTYPIST is run.
 """
 
 import os
@@ -208,16 +220,29 @@ def _force_float32(adata):
 
 
 def _set_input_matrix(adata, input_type: str):
-    """Route raw counts into .X according to input_type."""
+    """
+    Route raw counts into .X according to input_type.
+
+    popv 0.4.2 expects .X to contain raw counts (not log-normalised)
+    for all methods except CELLTYPIST.  For log1p input we pass .X
+    through unchanged and restrict methods to CELLTYPIST only.
+    """
     if input_type == "raw":
         if "raw_counts" in adata.layers:
-            adata.X = adata.layers["raw_counts"]
+            logger.info("Using existing 'raw_counts' layer for .X.")
+            adata.X = adata.layers["raw_counts"].copy()
         elif "counts" in adata.layers:
-            adata.layers["raw_counts"] = adata.layers["counts"]
+            logger.info("Using 'counts' layer as raw input.")
+            adata.layers["raw_counts"] = adata.layers["counts"].copy()
             adata.X = adata.layers["raw_counts"]
-        # else assume .X already contains raw counts
+        else:
+            logger.info(
+                "No counts layer found — assuming adata.X already contains raw counts."
+            )
     elif input_type == "log1p":
-        pass  # .X is already log-normalised; pass through
+        # .X is already log-normalised; pass through.
+        # Only CELLTYPIST will be run downstream.
+        logger.info("log1p mode: adata.X passed through unchanged.")
     else:
         raise ValueError(f"input_type must be 'raw' or 'log1p', got: {input_type!r}")
 
@@ -226,31 +251,67 @@ def _set_input_matrix(adata, input_type: str):
 # FIX 1 — case normalisation
 # ---------------------------------------------------------------------------
 
-def _build_label_map(ontology_json_path: str):
+def _build_label_map_from_obo(cl_obo_folder: str):
     """
-    Build two dicts from cl_popv.json:
+    Build two dicts from cl.obo (popv 0.4.2 format):
 
     label_map   : lowercase_label → correctly-cased label
                   e.g. "b cell" → "B cell"
 
     label_to_id : correctly-cased label → short CL ID
                   e.g. "B cell" → "CL:0000236"
+
+    Parses the OBO flat-text format directly so there is no dependency
+    on pronto or owlready2.
     """
-    import json
-    with open(ontology_json_path) as fh:
-        cl = json.load(fh)
+    obo_candidates = ["cl.obo", "cl_popv.obo"]
+    obo_path = None
+    for fname in obo_candidates:
+        p = os.path.join(cl_obo_folder.rstrip("/"), fname)
+        if os.path.exists(p):
+            obo_path = p
+            break
+
+    if obo_path is None:
+        # Graceful fallback: empty maps (annotation will still run)
+        logger.warning(
+            f"cl.obo not found in {cl_obo_folder}. "
+            "Label normalisation and ontology ID sync will be skipped."
+        )
+        return {}, {}
+
+    logger.info(f"Building label map from OBO: {obo_path}")
 
     label_map   = {}
     label_to_id = {}
 
-    for node in cl.get("nodes", []):
-        lbl = node.get("lbl", "")
-        nid = node.get("id", "")
-        if lbl:
-            label_map[lbl.lower()] = lbl
-            short_id = nid.split("/")[-1].replace("_", ":")
-            label_to_id[lbl] = short_id
+    current_id  = None
+    current_lbl = None
 
+    with open(obo_path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.rstrip()
+            if line == "[Term]":
+                current_id  = None
+                current_lbl = None
+            elif line.startswith("id: CL:"):
+                current_id = line[4:].strip()   # e.g. "CL:0000236"
+            elif line.startswith("name: "):
+                current_lbl = line[6:].strip()
+            elif line == "" and current_id and current_lbl:
+                label_map[current_lbl.lower()] = current_lbl
+                label_to_id[current_lbl]       = current_id
+                current_id  = None
+                current_lbl = None
+
+    # Flush last term if file has no trailing blank line
+    if current_id and current_lbl:
+        label_map[current_lbl.lower()] = current_lbl
+        label_to_id[current_lbl]       = current_id
+
+    logger.info(
+        f"OBO parsed: {len(label_map):,} CL labels loaded."
+    )
     return label_map, label_to_id
 
 
@@ -270,11 +331,17 @@ def _normalise_predictions(adata, label_map: dict):
 
 
 # ---------------------------------------------------------------------------
-# FIX 2 — resolve ontology path
+# FIX 2 — resolve ontology folder (cl.obo for popv 0.4.2)
 # ---------------------------------------------------------------------------
 
 def _resolve_ontology_folder() -> str:
-    """Return the directory containing cl_popv.json (or equivalent)."""
+    """
+    Return the directory containing cl.obo (popv 0.4.2 uses the OBO file,
+    not a JSON).  Searches importlib resources then filesystem walk.
+    """
+    obo_filenames = ["cl.obo", "cl_popv.obo"]
+
+    # --- importlib.resources search -----------------------------------------
     candidate_packages = [
         "SCART.PopV.resources.ontology",
         "SCART.PopV.resources",
@@ -282,19 +349,21 @@ def _resolve_ontology_folder() -> str:
         "popv.resources",
         "popv",
     ]
-    candidate_files = ["cl_popv.json", "cl.obo.json", "cl.json"]
 
     for pkg in candidate_packages:
-        for fname in candidate_files:
+        for fname in obo_filenames:
             try:
                 f = pkg_resources.files(pkg).joinpath(fname)
                 with pkg_resources.as_file(f) as p:
                     if p.exists():
-                        logger.info(f"Ontology found via importlib ({pkg}): {p}")
+                        logger.info(
+                            f"Ontology (OBO) found via importlib ({pkg}): {p}"
+                        )
                         return str(p.parent) + "/"
             except (ModuleNotFoundError, FileNotFoundError, TypeError, ValueError):
                 continue
 
+    # --- filesystem walk ----------------------------------------------------
     walk_roots = []
     try:
         import SCART as _scart_pkg
@@ -310,26 +379,18 @@ def _resolve_ontology_folder() -> str:
     for pkg_root in walk_roots:
         for root, _, fnames in os.walk(pkg_root):
             for fname in fnames:
-                if fname in ("cl_popv.json", "cl.obo.json", "cl.json"):
-                    logger.info(f"Ontology found via filesystem walk: {os.path.join(root, fname)}")
+                if fname in obo_filenames:
+                    logger.info(
+                        f"Ontology (OBO) found via filesystem walk: "
+                        f"{os.path.join(root, fname)}"
+                    )
                     return root + "/"
 
     raise FileNotFoundError(
-        "Could not locate the cell-ontology JSON (cl_popv.json).\n"
-        "Expected location: SCART/PopV/resources/ontology/cl_popv.json\n"
-        "Check that the SCART package is installed correctly."
-    )
-
-
-def _find_ontology_json(cl_obo_folder: str) -> str:
-    """Return the full path to the ontology JSON inside cl_obo_folder."""
-    for fname in ("cl.obo.json", "cl_popv.json", "cl.json"):
-        p = os.path.join(cl_obo_folder.rstrip("/"), fname)
-        if os.path.exists(p):
-            return p
-    raise FileNotFoundError(
-        f"No ontology JSON found in {cl_obo_folder}.\n"
-        f"Expected one of: cl.obo.json | cl_popv.json | cl.json"
+        "Could not locate cl.obo.\n"
+        "Expected location: SCART/PopV/resources/ontology/cl.obo\n"
+        "or inside the popv package directory.\n"
+        "Check that the SCART / popv 0.4.2 package is installed correctly."
     )
 
 
@@ -367,11 +428,6 @@ def _extract_query_cells(adata_processed, adata_query_original):
     After Process_Query + annotate_data, the AnnData contains both query
     and reference cells concatenated together.  Returns a new AnnData
     containing ONLY the original query cells with all PopV columns.
-
-    Strategy (in order of preference):
-      1. adata.obs['_dataset'] == 'query'   ← written by Process_Query
-      2. Match obs_names against the original query obs_names
-      3. adata.obs['_reference_labels_annotation'].isna() proxy
     """
     if "_dataset" in adata_processed.obs.columns:
         query_mask = adata_processed.obs["_dataset"] == "query"
@@ -441,12 +497,7 @@ def _store_full_counts_layer(adata_query: anndata.AnnData) -> anndata.AnnData:
     gene names to uns['full_counts_var_names'].
 
     Call AFTER _set_input_matrix (so .X = raw counts) and BEFORE
-    Process_Query (which trims .var to 4000 HVGs).
-
-    The layer persists through Process_Query concatenation and AnnData
-    slicing because layers are indexed by cell barcode, not var names.
-    Module 3 reads this layer in _build_fullgene_adata_for_scm() to give
-    scMalignantFinder the full gene space (≥90% model overlap vs 19%).
+    Process_Query (which trims .var to HVGs).
     """
     if "full_counts" in adata_query.layers:
         logger.info(
@@ -468,7 +519,6 @@ def _store_full_counts_layer(adata_query: anndata.AnnData) -> anndata.AnnData:
             np.asarray(X, dtype=np.float32)
         )
 
-    # Gene names stored as a list of str — survives uns h5ad round-trip
     adata_query.uns["full_counts_var_names"] = list(adata_query.var_names)
 
     logger.info(
@@ -483,8 +533,8 @@ def _store_full_counts_layer(adata_query: anndata.AnnData) -> anndata.AnnData:
 def _verify_full_counts_layer(adata_out: anndata.AnnData) -> None:
     """Log whether 'full_counts' survived the full pipeline."""
     if "full_counts" in adata_out.layers:
-        n_genes    = adata_out.layers["full_counts"].shape[1]
-        n_names    = len(adata_out.uns.get("full_counts_var_names", []))
+        n_genes = adata_out.layers["full_counts"].shape[1]
+        n_names = len(adata_out.uns.get("full_counts_var_names", []))
         logger.info(
             f"FIX 8 VERIFIED: layers['full_counts'] present — "
             f"{adata_out.n_obs} cells × {n_genes} genes, "
@@ -512,7 +562,7 @@ def run_popv_annotation(
     drop_reference_columns: bool = True,
 ):
     """
-    Run PopV cell-type annotation and write results to output_dir.
+    Run PopV (0.4.2) cell-type annotation and write results to output_dir.
 
     Parameters
     ----------
@@ -523,13 +573,23 @@ def run_popv_annotation(
     output_dir : str
         Directory where final_popv_annotated.h5ad is written.
     input_type : str
-        'raw'  — .X contains raw counts (default).
+        'raw'  — .X contains raw counts (default). All popv methods are run.
         'log1p' — .X is already log-normalised; only CELLTYPIST will run.
     n_samples_per_label : int
         Cells sampled per label during reference subsampling.
     drop_reference_columns : bool
         If True (default), Tabula Sapiens metadata columns are removed from
         the saved query AnnData to keep the output file clean.
+
+    popv 0.4.2 specifics
+    --------------------
+    • Process_Query does NOT accept: prediction_mode, save_path_trained_models,
+      hvg.  These kwargs are removed vs the 0.6.0 call.
+    • annotate_data does NOT accept methods_kwargs.  Each method is called
+      with annotate_data(adata, methods=[method]) only.
+    • cl_obo_folder must point to the directory containing cl.obo.
+    • .X must be raw integer/float32 counts for all methods except CELLTYPIST.
+    • .raw is set to None before Process_Query to prevent dtype concat crashes.
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -546,23 +606,27 @@ def run_popv_annotation(
     _force_float32(adata_query)
     _force_float32(adata_ref)
 
+    # Remove .raw to prevent concat dtype crashes (popv 0.4.2 issue)
+    adata_query.raw = None
+    adata_ref.raw   = None
+
     # -----------------------------------------------------------------------
     # FIX 8 — snapshot full gene space into layers['full_counts'] BEFORE
     # Process_Query trims .var to HVGs.
-    # This replaces the previous adata.raw approach which did not survive
-    # the write/read round-trip.
     # -----------------------------------------------------------------------
     adata_query = _store_full_counts_layer(adata_query)
 
-    # --- resolve ontology ---------------------------------------------------
+    # --- FIX 2: resolve cl.obo folder (popv 0.4.2 uses OBO, not JSON) ------
     cl_obo_folder = _resolve_ontology_folder()
-    ontology_json = _find_ontology_json(cl_obo_folder)
-    label_map, label_to_id = _build_label_map(ontology_json)
+    logger.info(f"cl_obo_folder: {cl_obo_folder}")
+
+    # --- FIX 1: build label map from OBO ------------------------------------
+    label_map, label_to_id = _build_label_map_from_obo(cl_obo_folder)
     logger.info(f"Loaded {len(label_map):,} ontology labels.")
 
     # FIX 1a — normalise reference labels and filter non-ontology terms
     _ref_label_col = "cell_ontology_class"
-    if _ref_label_col in adata_ref.obs.columns:
+    if _ref_label_col in adata_ref.obs.columns and label_map:
 
         adata_ref.obs[_ref_label_col] = (
             adata_ref.obs[_ref_label_col]
@@ -591,7 +655,7 @@ def run_popv_annotation(
 
     # Sync cell_ontology_id
     _ref_id_col = "cell_ontology_id"
-    if _ref_label_col in adata_ref.obs.columns:
+    if _ref_label_col in adata_ref.obs.columns and label_to_id:
         adata_ref.obs[_ref_id_col] = (
             adata_ref.obs[_ref_label_col]
             .map(label_to_id)
@@ -607,7 +671,8 @@ def run_popv_annotation(
         else:
             logger.info("cell_ontology_id synced — ONCLASS dict will be complete.")
 
-    # --- Process_Query ------------------------------------------------------
+    # --- Process_Query (popv 0.4.2 signature) --------------------------------
+    # Removed vs 0.6.0: prediction_mode, save_path_trained_models, hvg
     pq = Process_Query(
         query_adata=adata_query,
         ref_adata=adata_ref,
@@ -637,6 +702,7 @@ def run_popv_annotation(
         and len(adata_processed.obs["_batch_annotation"].unique()) >= 2
     )
 
+    # --- popv 0.4.2 obsm proxy (harmony shape guard) -----------------------
     _harmony_key = "X_pca_harmony_popv"
 
     class _ObsmProxy:
@@ -672,6 +738,7 @@ def run_popv_annotation(
         def __getattr__(self, name):
             return getattr(object.__getattribute__(self, "_real"), name)
 
+    # --- ONCLASS dict patch (popv 0.4.2) ------------------------------------
     def _patch_onclass(label_to_id_map):
         import contextlib
 
@@ -709,6 +776,9 @@ def run_popv_annotation(
 
         return _ctx()
 
+    # --- per-method runner (popv 0.4.2) -------------------------------------
+    # annotate_data in 0.4.2: annotate_data(adata, methods=[method])
+    # NO methods_kwargs argument.
     def _run_method_safe(adata, method):
         import unittest.mock as mock
 
@@ -723,7 +793,8 @@ def run_popv_annotation(
         else:
             annotate_data(adata, methods=[method])
 
-    # --- method selection ---------------------------------------------------
+    # --- method selection (popv 0.4.2 method name strings) ------------------
+    # popv 0.4.2 registers methods as UPPER_SNAKE strings.
     if input_type == "raw":
         methods = [
             "CELLTYPIST",
@@ -739,7 +810,9 @@ def run_popv_annotation(
         else:
             logger.warning("Skipping KNN_HARMONY: fewer than 2 batch values.")
     else:
+        # log1p: only CELLTYPIST is safe without raw counts
         methods = ["CELLTYPIST"]
+        logger.info("log1p mode — running CELLTYPIST only.")
 
     # --- run each method ----------------------------------------------------
     successful_methods = []
@@ -747,7 +820,8 @@ def run_popv_annotation(
     for method in methods:
         try:
             _run_method_safe(adata_processed, method)
-            _normalise_predictions(adata_processed, label_map)
+            if label_map:
+                _normalise_predictions(adata_processed, label_map)
             successful_methods.append(method)
             logger.info(f"✓ {method} completed.")
         except Exception as exc:
@@ -821,7 +895,16 @@ def auto_run_popv(
     """
     Fully automatic entry-point.  Finds the tumor h5ad from Module 1,
     downloads the matching Tabula Sapiens reference (or uses
-    user_reference), and runs PopV annotation.
+    user_reference), and runs PopV 0.4.2 annotation.
+
+    Usage
+    -----
+    from SCART import popv_annotation
+    adata = popv_annotation.auto_run_popv(
+        input_type="raw",
+        nsamples=300,
+        user_reference="/data/users/deepika/vinaya/Ovary_TSP1_30_version2d_10X_smartseq_scvi_Nov262024.h5ad"
+    )
     """
     tumor_file = get_latest_tumor_h5ad()
     logger.info(f"Query file: {tumor_file}")
