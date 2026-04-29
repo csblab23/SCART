@@ -668,6 +668,62 @@ def run_popv_annotation(
         for lk in _drop_query_layers:
             del adata_query.layers[lk]
 
+    # -----------------------------------------------------------------------
+    # Gene-space alignment before Process_Query.
+    #
+    # Root cause (persists even after layer stripping): Process_Query calls
+    #   anndata.concat(ref, query, join="outer", fill_value=unknown_celltype_label)
+    # where unknown_celltype_label is the STRING "unknown".  When query and
+    # reference do not share the exact same var_names, anndata fills missing
+    # genes with that string value while building the outer-join sparse matrix.
+    # scipy.sparse then raises "does not support dtype str224".
+    #
+    # Fix: subset both objects to the intersection of their var_names BEFORE
+    # calling Process_Query.  With identical gene spaces, join="outer" becomes
+    # equivalent to join="inner" and no string fill is ever needed.
+    # The full gene snapshot (layers['full_counts']) was taken before this step
+    # so Module 3 still gets all 36 k genes.
+    # -----------------------------------------------------------------------
+    query_genes = set(adata_query.var_names)
+    ref_genes   = set(adata_ref.var_names)
+    common_genes = sorted(query_genes & ref_genes)
+
+    if len(common_genes) == 0:
+        raise ValueError(
+            "Query and reference share 0 genes. "
+            "Check that both datasets use the same gene identifier (Ensembl ID vs symbol)."
+        )
+
+    n_query_genes = adata_query.n_vars
+    n_ref_genes   = adata_ref.n_vars
+
+    if len(common_genes) < n_query_genes or len(common_genes) < n_ref_genes:
+        logger.info(
+            f"Gene-space alignment: "
+            f"query {n_query_genes} genes, ref {n_ref_genes} genes → "
+            f"{len(common_genes)} common genes (intersection)."
+        )
+        adata_query = adata_query[:, common_genes].copy()
+        adata_ref   = adata_ref[:, common_genes].copy()
+
+        # Patch the full_counts layer gene index to reflect the subset
+        # (full_counts itself is NOT subsetted — it keeps all original genes)
+        # but raw_counts on the subsetted query must stay float32.
+        if "raw_counts" in adata_query.layers:
+            if sp.issparse(adata_query.layers["raw_counts"]):
+                adata_query.layers["raw_counts"] = (
+                    adata_query.layers["raw_counts"].tocsr().astype(np.float32)
+                )
+            else:
+                adata_query.layers["raw_counts"] = np.asarray(
+                    adata_query.layers["raw_counts"], dtype=np.float32
+                )
+    else:
+        logger.info(
+            f"Gene-space alignment: query and reference already share "
+            f"all {len(common_genes)} genes — no subsetting needed."
+        )
+
     # --- Process_Query (popv 0.4.2 signature) --------------------------------
     # Removed vs 0.6.0: prediction_mode, save_path_trained_models, hvg
     pq = Process_Query(
