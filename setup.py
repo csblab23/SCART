@@ -25,9 +25,8 @@ setup(
 
     install_requires=[
         # ✅ core flexible deps (force modern compatible versions)
-    
-        "numpy>=1.23",
-        "pandas",
+        "numpy>=1.24,<2.0",   
+        "pandas>=1.5",
         "scikit-learn",
         "typer",
         "rich",
