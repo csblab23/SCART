@@ -68,25 +68,31 @@ TABULA_DOI_LINK = "https://doi.org/10.6084/m9.figshare.27921984"
 # ---------------------------------------------------------------------------
 
 # Each inner list is a group of known aliases for one method, tried in order.
+# popv 0.4.2 registers all methods as lowercase_snake in popv.algorithms.
+# Confirmed present in logs: "celltypist", "onclass".
+# The remaining 8 follow the same lowercase pattern from the popv 0.4.2 source.
 _METHOD_ALIASES = [
-    ["CELLTYPIST",    "Celltypist",    "celltypist"],
-    ["KNN_BBKNN",     "Knn_Bbknn",     "knn_bbknn"],
-    ["KNN_HARMONY",   "Knn_Harmony",   "knn_harmony"],
-    ["KNN_SCVI",      "Knn_Scvi",      "knn_scvi"],
-    ["ONCLASS",       "OnClass",       "onclass"],
-    ["SCANVI_POPV",   "Scanvi_Popv",   "scanvi_popv"],
-    ["Support_Vector","support_vector","SupportVector"],
-    ["XGboost",       "Xgboost",       "xgboost"],
+    # (canonical_key, *aliases_in_priority_order)
+    ["CELLTYPIST",    "celltypist",    "Celltypist",    "CELLTYPIST"],
+    ["KNN_BBKNN",     "knn_bbknn",     "Knn_Bbknn",     "KNN_BBKNN"],
+    ["KNN_SCANORAMA", "knn_scanorama", "Knn_Scanorama", "KNN_SCANORAMA"],
+    ["KNN_SCVI",      "knn_scvi",      "Knn_Scvi",      "KNN_SCVI"],
+    ["KNN_HARMONY",   "knn_harmony",   "Knn_Harmony",   "KNN_HARMONY"],
+    ["RANDOM_FOREST", "random_forest", "Random_Forest", "RANDOM_FOREST"],
+    ["SVM",           "svm",           "support_vector_machine", "Support_Vector", "SupportVector"],
+    ["XGBOOST",       "xgboost",       "Xgboost",       "XGboost",   "XGBOOST"],
+    ["ONCLASS",       "onclass",       "OnClass",       "ONCLASS"],
+    ["SCANVI",        "scanvi",        "scanvi_popv",   "Scanvi_Popv", "SCANVI_POPV"],
 ]
 
-# All alias spellings that indicate KNN_HARMONY (for proxy & skip logic)
+# All alias spellings that indicate KNN_HARMONY (for obsm proxy & skip logic)
 _HARMONY_ALIASES = {
-    "KNN_HARMONY", "Knn_Harmony", "knn_harmony",
+    "KNN_HARMONY", "knn_harmony", "Knn_Harmony",
 }
 
-# All alias spellings that indicate ONCLASS
+# All alias spellings that indicate ONCLASS (for dict-patch logic)
 _ONCLASS_ALIASES = {
-    "ONCLASS", "OnClass", "onclass",
+    "ONCLASS", "onclass", "OnClass",
 }
 
 
@@ -685,15 +691,34 @@ def run_popv_annotation(
 
     _ref_label_col = "cell_ontology_class"
     if _ref_label_col in adata_ref.obs.columns and label_map:
+        # Step 1: case-normalise
         adata_ref.obs[_ref_label_col] = (
             adata_ref.obs[_ref_label_col]
             .astype(str)
             .str.lower()
             .map(lambda v: label_map.get(v, v))
         )
+        # Step 2: drop cells whose label is NOT in the CL ontology.
+        # ONCLASS looks up every reference label in its celltype_dict
+        # (keyed by CL ID).  Labels absent from label_to_id have no CL ID
+        # and cause a KeyError inside _onclass.py:make_cell_ontology_id().
+        # Example: 'follicle' is a tissue compartment, not a CL cell type.
+        valid_labels  = set(label_to_id.keys())   # correctly-cased CL labels
+        mask_valid    = adata_ref.obs[_ref_label_col].isin(valid_labels)
+        n_before      = adata_ref.n_obs
+        n_dropped     = (~mask_valid).sum()
+        if n_dropped > 0:
+            dropped_labels = (
+                adata_ref.obs.loc[~mask_valid, _ref_label_col].unique().tolist()
+            )
+            logger.warning(
+                f"Dropping {n_dropped} reference cells with non-ontology labels "
+                f"(not in CL label_to_id): {dropped_labels}"
+            )
+            adata_ref = adata_ref[mask_valid].copy()
         logger.info(
-            f"Reference labels case-normalised — "
-            f"{adata_ref.n_obs} cells, "
+            f"Reference labels normalised — "
+            f"{n_before} → {adata_ref.n_obs} cells, "
             f"{adata_ref.obs[_ref_label_col].nunique()} unique labels."
         )
 
@@ -885,12 +910,21 @@ def run_popv_annotation(
     )
 
     if input_type == "raw":
+        # All 10 popv 0.4.2 methods in preferred run order.
+        # KNN_HARMONY inserted at position 4 only when 2 batch values exist.
         run_order = [
-            "CELLTYPIST", "KNN_BBKNN", "KNN_SCVI",
-            "ONCLASS", "SCANVI_POPV", "Support_Vector", "XGboost",
+            "CELLTYPIST",
+            "KNN_BBKNN",
+            "KNN_SCANORAMA",
+            "KNN_SCVI",
+            "RANDOM_FOREST",
+            "SVM",
+            "XGBOOST",
+            "ONCLASS",
+            "SCANVI",
         ]
         if harmony_canonical and has_two_batches:
-            run_order.insert(2, harmony_canonical)
+            run_order.insert(4, harmony_canonical)   # after KNN_SCANORAMA
         elif harmony_canonical:
             logger.warning("Skipping KNN_HARMONY: fewer than 2 batch values.")
     else:
