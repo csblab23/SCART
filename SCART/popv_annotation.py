@@ -610,12 +610,6 @@ def run_popv_annotation(
     adata_query.raw = None
     adata_ref.raw   = None
 
-    # -----------------------------------------------------------------------
-    # FIX 8 — snapshot full gene space into layers['full_counts'] BEFORE
-    # Process_Query trims .var to HVGs.
-    # -----------------------------------------------------------------------
-    adata_query = _store_full_counts_layer(adata_query)
-
     # --- FIX 2: resolve cl.obo folder (popv 0.4.2 uses OBO, not JSON) ------
     cl_obo_folder = _resolve_ontology_folder()
     logger.info(f"cl_obo_folder: {cl_obo_folder}")
@@ -641,6 +635,38 @@ def run_popv_annotation(
             f"{adata_ref.n_obs} cells, "
             f"{adata_ref.obs[_ref_label_col].nunique()} unique labels."
         )
+
+    # -----------------------------------------------------------------------
+    # FIX 8 — snapshot full gene space into layers['full_counts'] BEFORE
+    # Process_Query trims .var to HVGs.
+    # -----------------------------------------------------------------------
+    adata_query = _store_full_counts_layer(adata_query)
+
+    # Strip ALL layers from reference, keep only float32 layers on query.
+    # anndata.concat(join='outer') aligns every layer across objects; if the
+    # reference carries a string-typed layer scipy.sparse raises
+    # 'does not support dtype str224'.  Reference only needs .X for PopV.
+    if adata_ref.layers:
+        ref_layer_names = list(adata_ref.layers.keys())
+        logger.info(
+            f"Dropping {len(ref_layer_names)} reference layer(s) before "
+            f"Process_Query to prevent dtype concat crash: {ref_layer_names}"
+        )
+        for lk in ref_layer_names:
+            del adata_ref.layers[lk]
+
+    _keep_query_layers = {"full_counts", "raw_counts"}
+    _drop_query_layers = [
+        lk for lk in list(adata_query.layers.keys())
+        if lk not in _keep_query_layers
+    ]
+    if _drop_query_layers:
+        logger.info(
+            f"Dropping {len(_drop_query_layers)} non-essential query layer(s) "
+            f"before Process_Query: {_drop_query_layers}"
+        )
+        for lk in _drop_query_layers:
+            del adata_query.layers[lk]
 
     # --- Process_Query (popv 0.4.2 signature) --------------------------------
     # Removed vs 0.6.0: prediction_mode, save_path_trained_models, hvg
