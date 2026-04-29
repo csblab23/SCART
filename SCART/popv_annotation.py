@@ -1,58 +1,29 @@
 """
 popv_annotation.py
-Module 2 — PopV cell-type annotation  (popv == 0.4.2)
+Module 2 — PopV cell-type annotation
 
-Fixes applied (all changes marked with # FIX N comments):
-  1. Case-normalisation: predictions are title-cased before ontology lookup
-     so "b cell" → "B cell" matches the digraph node label.
-  2. Ontology path: resolves cl.obo (v0.4.2 format) from popv's own bundle
-     or a filesystem walk; cl_obo_folder passed to Process_Query.
-  3. Harmony batch fix: _batch_annotation guard added; falls back gracefully
-     when only one batch value is present.
-  4. Fallback prediction: derived from actually-present obs columns, not
-     from the successful_methods list (which could be misleading).
-  5. GEO download is re-used from the already-cached GSE dir so Module 1
-     does not re-download at annotation time.
-  6. Minor: bare excepts replaced with specific Exception catches; unused
-     obo_file argument removed from public API.
-  7. Query-cell extraction: after PopV annotation the combined
-     query+reference AnnData is filtered back to query cells only using
-     the '_dataset' column written by Process_Query.  Only the query
-     portion (original Module 1 shape) is saved to disk.
-  8. [NEW — sidecar h5ad] Full-gene raw/log1p count preservation via a
-     SEPARATE sidecar h5ad file rather than layers['full_counts'].
-
-     WHY SIDECAR (not adata.raw, not layers):
-       After gene-space alignment (query ∩ reference intersection), adata_query
-       is subsetted to e.g. 23,539 common genes.  AnnData enforces that every
-       layer must match the parent's .var shape — so layers['full_counts']
-       (36,601 genes) cannot be reattached to the 23,539-gene object.
-       adata.raw has the same constraint.
-
-       Sidecar approach:
-         • Snapshot taken BEFORE gene-space alignment (full gene space, 36 k).
-         • Written as output_dir/full_counts_for_module3.h5ad after annotation.
-         • Path stored in adata.uns['full_counts_h5ad_path'] so Module 3 can
-           find it automatically with sc.read_h5ad(adata.uns[...]).
-         • Zero shape-mismatch risk — separate file, no AnnData parent coupling.
-         • Gene names available via the sidecar's .var_names directly.
-
-       Module 3 _build_fullgene_adata_for_scm() checks uns['full_counts_h5ad_path']
-       first, giving scMalignantFinder ≥90% model feature overlap.
-
-     .X RESTORATION:
-       After Process_Query + annotate_data, .X holds PopV's internal HVG-trimmed
-       normalised matrix.  The final output restores .X to the user's original
-       raw / log1p counts aligned to the current HVG .var (intersection genes).
-       The raw_counts layer is subsetted to common genes before Process_Query
-       and reattached to adata_query_out after annotation.
-
-  popv 0.4.2 API notes:
-    • Process_Query: no prediction_mode, no save_path_trained_models, no hvg kwarg.
-      cl_obo_folder must point to the directory containing cl.obo (not a JSON).
-    • annotate_data: annotate_data(adata, methods=[…]) — no methods_kwargs.
-    • Method name strings are UPPER_SNAKE (e.g. "KNN_BBKNN", "CELLTYPIST").
-    • .X must contain raw counts (integer or float32) for input_type='raw'.
+Fixes applied:
+  1. Case-normalisation: predictions lower-cased before ontology lookup.
+  2. Ontology path: resolves cl.obo from SCART/popv bundle.
+  3. Harmony batch fix: KNN_HARMONY skipped when < 2 unique batch values.
+  4. Fallback prediction: derived from actually-present obs columns.
+  5. GEO download re-used from cached GSE dir.
+  6. Minor: bare excepts → specific Exception catches.
+  7. Query-cell extraction: only query cells saved after annotation.
+  8. Full-gene preservation via SIDECAR h5ad:
+       • full_X / full_var_names snapshotted as plain Python objects BEFORE
+         gene-space alignment — zero AnnData shape-coupling.
+       • Written as output_dir/full_counts_for_module3.h5ad after annotation.
+       • Path stored in adata.uns['full_counts_h5ad_path'] for Module 3.
+  9. Method name auto-discovery:
+       • _discover_popv_methods() inspects popv.algorithms at runtime.
+       • Handles version differences (e.g. "CELLTYPIST" vs "Celltypist").
+       • Each canonical method has a list of known aliases tried in order.
+  10. .X restoration — HVG-aware:
+       • After Process_Query, adata_query_out.var has 4 000 HVGs, NOT the
+         23 539-gene intersection space.
+       • _restore_X_to_hvg_space() column-subsets _saved_raw_counts / full_X
+         to the 4 000 HVG var_names before assigning to .X.
 """
 
 import os
@@ -93,6 +64,70 @@ TABULA_DOI_LINK = "https://doi.org/10.6084/m9.figshare.27921984"
 
 
 # ---------------------------------------------------------------------------
+# FIX 9 — runtime method-name discovery
+# ---------------------------------------------------------------------------
+
+# Each inner list is a group of known aliases for one method, tried in order.
+_METHOD_ALIASES = [
+    ["CELLTYPIST",    "Celltypist",    "celltypist"],
+    ["KNN_BBKNN",     "Knn_Bbknn",     "knn_bbknn"],
+    ["KNN_HARMONY",   "Knn_Harmony",   "knn_harmony"],
+    ["KNN_SCVI",      "Knn_Scvi",      "knn_scvi"],
+    ["ONCLASS",       "OnClass",       "onclass"],
+    ["SCANVI_POPV",   "Scanvi_Popv",   "scanvi_popv"],
+    ["Support_Vector","support_vector","SupportVector"],
+    ["XGboost",       "Xgboost",       "xgboost"],
+]
+
+# All alias spellings that indicate KNN_HARMONY (for proxy & skip logic)
+_HARMONY_ALIASES = {
+    "KNN_HARMONY", "Knn_Harmony", "knn_harmony",
+}
+
+# All alias spellings that indicate ONCLASS
+_ONCLASS_ALIASES = {
+    "ONCLASS", "OnClass", "onclass",
+}
+
+
+def _discover_popv_methods() -> dict:
+    """
+    Inspect popv.algorithms at runtime and return:
+        {canonical_name: actual_attribute_name_in_popv.algorithms}
+
+    Falls back to canonical names (first alias) if discovery fails.
+    """
+    try:
+        import popv.algorithms as _alg
+        available = set(dir(_alg))
+    except ImportError:
+        logger.warning("Could not import popv.algorithms — using default names.")
+        available = set()
+
+    found = {}
+    for aliases in _METHOD_ALIASES:
+        canonical = aliases[0]
+        for name in aliases:
+            if name in available:
+                found[canonical] = name
+                break
+
+    if found:
+        logger.info(
+            f"popv.algorithms discovery: {len(found)} methods available — "
+            + ", ".join(f"{k}→{v}" for k, v in found.items())
+        )
+    else:
+        found = {aliases[0]: aliases[0] for aliases in _METHOD_ALIASES}
+        logger.warning(
+            "popv.algorithms discovery found nothing — "
+            "falling back to canonical names. Methods may fail individually."
+        )
+
+    return found
+
+
+# ---------------------------------------------------------------------------
 # Locate the most recent tumor h5ad written by Module 1
 # ---------------------------------------------------------------------------
 
@@ -109,7 +144,7 @@ def get_latest_tumor_h5ad(data_dir="GSE_data"):
     if not files:
         raise FileNotFoundError(
             "No tumor h5ad found.\n"
-            "Expected one of: *_tumor.h5ad | combined_tumor.h5ad | input_tumor.h5ad\n"
+            "Expected: *_tumor.h5ad | combined_tumor.h5ad | input_tumor.h5ad\n"
             "in current directory or GSE_data/"
         )
 
@@ -202,7 +237,7 @@ def detect_cancer_type_from_h5ad(h5ad_file: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _fix_obs_dtypes(adata):
-    """Convert all categorical obs columns to str to avoid h5ad write errors."""
+    """Convert categorical obs columns to str to avoid h5ad write errors."""
     for col in adata.obs.columns:
         if str(adata.obs[col].dtype) == "category":
             adata.obs[col] = adata.obs[col].astype(str)
@@ -227,9 +262,8 @@ def _set_input_matrix(adata, input_type: str):
     """
     Route raw counts into .X according to input_type.
 
-    popv 0.4.2 expects .X to contain raw counts (not log-normalised)
-    for all methods except CELLTYPIST.  For log1p input we pass .X
-    through unchanged and restrict methods to CELLTYPIST only.
+    'raw'   → .X = raw integer counts (layers['raw_counts'] or ['counts'])
+    'log1p' → .X passed through unchanged; only CELLTYPIST runs downstream.
     """
     if input_type == "raw":
         if "raw_counts" in adata.layers:
@@ -241,10 +275,10 @@ def _set_input_matrix(adata, input_type: str):
             adata.X = adata.layers["raw_counts"]
         else:
             logger.info(
-                "No counts layer found — assuming adata.X already contains raw counts."
+                "No counts layer found — assuming .X already contains raw counts."
             )
     elif input_type == "log1p":
-        logger.info("log1p mode: adata.X passed through unchanged.")
+        logger.info("log1p mode: .X passed through unchanged.")
     else:
         raise ValueError(f"input_type must be 'raw' or 'log1p', got: {input_type!r}")
 
@@ -255,15 +289,9 @@ def _set_input_matrix(adata, input_type: str):
 
 def _build_label_map_from_obo(cl_obo_folder: str):
     """
-    Build two dicts from cl.obo (popv 0.4.2 format):
-
-    label_map   : lowercase_label → correctly-cased label
-                  e.g. "b cell" → "B cell"
-
-    label_to_id : correctly-cased label → short CL ID
-                  e.g. "B cell" → "CL:0000236"
-
-    Parses the OBO flat-text format directly — no pronto/owlready2 dependency.
+    Build two dicts from cl.obo (popv OBO flat format):
+      label_map   : lowercase → correctly-cased label
+      label_to_id : correctly-cased label → CL:XXXXXXX
     """
     obo_candidates = ["cl.obo", "cl_popv.obo"]
     obo_path = None
@@ -291,8 +319,7 @@ def _build_label_map_from_obo(cl_obo_folder: str):
         for line in fh:
             line = line.rstrip()
             if line == "[Term]":
-                current_id  = None
-                current_lbl = None
+                current_id = current_lbl = None
             elif line.startswith("id: CL:"):
                 current_id = line[4:].strip()
             elif line.startswith("name: "):
@@ -300,8 +327,7 @@ def _build_label_map_from_obo(cl_obo_folder: str):
             elif line == "" and current_id and current_lbl:
                 label_map[current_lbl.lower()] = current_lbl
                 label_to_id[current_lbl]       = current_id
-                current_id  = None
-                current_lbl = None
+                current_id = current_lbl = None
 
     if current_id and current_lbl:
         label_map[current_lbl.lower()] = current_lbl
@@ -312,10 +338,7 @@ def _build_label_map_from_obo(cl_obo_folder: str):
 
 
 def _normalise_predictions(adata, label_map: dict):
-    """
-    For every *_prediction column in adata.obs, replace lowercase labels
-    with the correctly-cased ontology label.
-    """
+    """Replace lowercase predictions with correctly-cased ontology labels."""
     pred_cols = [c for c in adata.obs.columns if c.endswith("_prediction")]
     for col in pred_cols:
         adata.obs[col] = (
@@ -327,14 +350,11 @@ def _normalise_predictions(adata, label_map: dict):
 
 
 # ---------------------------------------------------------------------------
-# FIX 2 — resolve ontology folder (cl.obo for popv 0.4.2)
+# FIX 2 — resolve ontology folder
 # ---------------------------------------------------------------------------
 
 def _resolve_ontology_folder() -> str:
-    """
-    Return the directory containing cl.obo (popv 0.4.2 uses the OBO file).
-    Searches importlib resources then filesystem walk.
-    """
+    """Return the directory containing cl.obo."""
     obo_filenames = ["cl.obo", "cl_popv.obo"]
 
     candidate_packages = [
@@ -351,9 +371,7 @@ def _resolve_ontology_folder() -> str:
                 f = pkg_resources.files(pkg).joinpath(fname)
                 with pkg_resources.as_file(f) as p:
                     if p.exists():
-                        logger.info(
-                            f"Ontology (OBO) found via importlib ({pkg}): {p}"
-                        )
+                        logger.info(f"OBO found via importlib ({pkg}): {p}")
                         return str(p.parent) + "/"
             except (ModuleNotFoundError, FileNotFoundError, TypeError, ValueError):
                 continue
@@ -375,16 +393,14 @@ def _resolve_ontology_folder() -> str:
             for fname in fnames:
                 if fname in obo_filenames:
                     logger.info(
-                        f"Ontology (OBO) found via filesystem walk: "
-                        f"{os.path.join(root, fname)}"
+                        f"OBO found via filesystem walk: {os.path.join(root, fname)}"
                     )
                     return root + "/"
 
     raise FileNotFoundError(
         "Could not locate cl.obo.\n"
-        "Expected location: SCART/PopV/resources/ontology/cl.obo\n"
-        "or inside the popv package directory.\n"
-        "Check that the SCART / popv 0.4.2 package is installed correctly."
+        "Expected: SCART/PopV/resources/ontology/cl.obo or inside popv package.\n"
+        "Check that SCART / popv is installed correctly."
     )
 
 
@@ -396,10 +412,7 @@ def _check_batch_annotation(adata):
     """Warn if _batch_annotation has fewer than 2 unique values."""
     col = "_batch_annotation"
     if col not in adata.obs.columns:
-        logger.warning(
-            f"'{col}' not in adata.obs — KNN_HARMONY may fail. "
-            "Check that Process_Query ran correctly."
-        )
+        logger.warning(f"'{col}' not in adata.obs — KNN_HARMONY may fail.")
         return
 
     unique_vals = adata.obs[col].unique()
@@ -408,7 +421,7 @@ def _check_batch_annotation(adata):
     if len(unique_vals) < 2:
         logger.warning(
             f"'{col}' has only 1 unique value ({unique_vals}). "
-            "KNN_HARMONY will fail with a shape mismatch — it will be skipped."
+            "KNN_HARMONY will be skipped."
         )
 
 
@@ -417,21 +430,13 @@ def _check_batch_annotation(adata):
 # ---------------------------------------------------------------------------
 
 def _extract_query_cells(adata_processed, adata_query_original):
-    """
-    After Process_Query + annotate_data, the AnnData contains both query
-    and reference cells.  Returns a new AnnData with ONLY the query cells.
-
-    Strategy (in order of preference):
-      1. adata.obs['_dataset'] == 'query'
-      2. Match obs_names against the original query obs_names
-      3. adata.obs['_reference_labels_annotation'].isna() proxy
-    """
+    """Return a new AnnData containing ONLY the original query cells."""
     if "_dataset" in adata_processed.obs.columns:
         query_mask = adata_processed.obs["_dataset"] == "query"
         n_query = query_mask.sum()
         logger.info(
             f"_extract_query_cells: '_dataset' found — "
-            f"extracting {n_query} query cells out of {adata_processed.n_obs} total."
+            f"extracting {n_query} of {adata_processed.n_obs} cells."
         )
         if n_query > 0:
             return adata_processed[query_mask].copy()
@@ -441,24 +446,17 @@ def _extract_query_cells(adata_processed, adata_query_original):
     mask_by_name   = adata_processed.obs_names.isin(original_names)
     n_matched      = mask_by_name.sum()
     if n_matched > 0:
-        logger.info(
-            f"_extract_query_cells: matched {n_matched} cells by obs_names."
-        )
+        logger.info(f"_extract_query_cells: matched {n_matched} cells by obs_names.")
         return adata_processed[mask_by_name].copy()
 
     if "_reference_labels_annotation" in adata_processed.obs.columns:
         mask_nan = adata_processed.obs["_reference_labels_annotation"].isna()
         n_nan    = mask_nan.sum()
-        logger.warning(
-            f"_extract_query_cells: NaN proxy — {n_nan} cells assumed query."
-        )
+        logger.warning(f"_extract_query_cells: NaN proxy — {n_nan} cells assumed query.")
         if n_nan > 0:
             return adata_processed[mask_nan].copy()
 
-    logger.error(
-        "Could not identify query cells — returning full combined object. "
-        "Output will contain reference cells too."
-    )
+    logger.error("Could not identify query cells — returning full combined object.")
     return adata_processed
 
 
@@ -476,7 +474,6 @@ def _drop_reference_only_columns(adata):
         "_scvi_batch", "_scvi_labels", "scvi_leiden_donorassay_full",
         "age", "sex", "ethnicity", "scvi_leiden_res05_tissue", "sample_number",
     }
-
     cols_to_drop = [c for c in adata.obs.columns if c in tabula_ref_cols]
     if cols_to_drop:
         logger.info(f"Dropping {len(cols_to_drop)} Tabula reference columns.")
@@ -485,34 +482,24 @@ def _drop_reference_only_columns(adata):
 
 
 # ---------------------------------------------------------------------------
-# FIX 8 (SIDECAR) — preserve full-gene counts as a separate h5ad file
+# FIX 8 — full-gene sidecar helpers
 # ---------------------------------------------------------------------------
 
 def _snapshot_full_counts(adata_query: anndata.AnnData):
     """
-    Capture a snapshot of the full gene-space expression matrix (.X) BEFORE
-    gene-space alignment trims .var to the query ∩ reference intersection.
+    Capture .X as a plain sparse matrix + gene name list BEFORE any
+    gene-space alignment or Process_Query call.
 
-    Returns
-    -------
-    full_X : scipy.sparse.csr_matrix
-        Raw (or log1p) count matrix — shape (n_cells × n_full_genes).
-    full_var_names : list[str]
-        Gene names matching the columns of full_X.
-
-    Call AFTER _set_input_matrix (so .X = raw/log1p counts) and BEFORE
-    the gene-space alignment / Process_Query call.
+    Returns (full_X: csr_matrix, full_var_names: list[str])
     """
     X = adata_query.X
-    if sp.issparse(X):
-        full_X = X.tocsr().copy().astype(np.float32)
-    else:
-        full_X = sp.csr_matrix(np.asarray(X, dtype=np.float32))
-
+    full_X = (
+        X.tocsr().copy().astype(np.float32) if sp.issparse(X)
+        else sp.csr_matrix(np.asarray(X, dtype=np.float32))
+    )
     full_var_names = list(adata_query.var_names)
-
     logger.info(
-        f"FIX 8: Full-gene snapshot captured — "
+        f"FIX 8: Snapshot captured — "
         f"{full_X.shape[0]} cells × {full_X.shape[1]} genes."
     )
     return full_X, full_var_names
@@ -524,28 +511,7 @@ def _write_full_counts_sidecar(
     obs: pd.DataFrame,
     output_dir: str,
 ) -> str:
-    """
-    Write the full-gene count matrix as a standalone h5ad sidecar file.
-
-    Parameters
-    ----------
-    full_X : sparse matrix (n_query_cells × n_full_genes)
-    full_var_names : list of gene names (length n_full_genes)
-    obs : pd.DataFrame — cell metadata from the final query AnnData
-    output_dir : str
-
-    Returns
-    -------
-    str : absolute path to the written sidecar file.
-    """
-    # obs may have more or fewer rows than full_X if _extract_query_cells
-    # was used.  Guard against shape mismatch.
-    if full_X.shape[0] != len(obs):
-        logger.warning(
-            f"FIX 8: full_X has {full_X.shape[0]} cells but obs has {len(obs)} rows. "
-            "Using obs index as-is; cell order assumed consistent."
-        )
-
+    """Write full-gene count matrix as a standalone h5ad. Returns file path."""
     sidecar = anndata.AnnData(
         X   = full_X,
         obs = obs.copy(),
@@ -558,27 +524,112 @@ def _write_full_counts_sidecar(
 
     size_mb = os.path.getsize(sidecar_path) / 1e6
     logger.info(
-        f"FIX 8: Full-gene sidecar written → {sidecar_path} "
+        f"FIX 8: Sidecar written → {sidecar_path} "
         f"({sidecar.shape[0]} cells × {sidecar.shape[1]} genes, {size_mb:.1f} MB)."
     )
     return sidecar_path
 
 
 def _verify_full_counts_sidecar(adata_out: anndata.AnnData) -> None:
-    """Log whether the full_counts sidecar was registered and exists on disk."""
+    """Log whether the full_counts sidecar was written and registered."""
     sidecar = adata_out.uns.get("full_counts_h5ad_path", None)
     if sidecar and os.path.exists(str(sidecar)):
         size_mb = os.path.getsize(sidecar) / 1e6
         logger.info(
-            f"FIX 8 VERIFIED: full_counts sidecar present — {sidecar} "
-            f"({size_mb:.1f} MB). "
-            "Module 3 reads sc.read_h5ad(adata.uns['full_counts_h5ad_path'])."
+            f"FIX 8 VERIFIED: sidecar present — {sidecar} ({size_mb:.1f} MB). "
+            "Module 3: sc.read_h5ad(adata.uns['full_counts_h5ad_path'])"
         )
     else:
         logger.error(
-            "FIX 8 FAILED: full_counts sidecar MISSING or path not set in uns. "
-            "Module 3 will fall back to 4000 HVGs (~19% model feature overlap)."
+            "FIX 8 FAILED: sidecar missing or path not set. "
+            "Module 3 will fall back to 4 000 HVGs (~19% model overlap)."
         )
+
+
+# ---------------------------------------------------------------------------
+# FIX 10 — HVG-aware .X restoration
+# ---------------------------------------------------------------------------
+
+def _restore_X_to_hvg_space(
+    adata_query_out: anndata.AnnData,
+    saved_raw_counts,       # csr_matrix (n_query_cells × n_intersection_genes) | None
+    full_X,                 # csr_matrix (n_snapshot_cells × n_full_genes)
+    full_var_names: list,
+    input_type: str,
+    common_genes: list,
+) -> None:
+    """
+    Set adata_query_out.X to the user's original expression values in the
+    HVG gene space selected by Process_Query (adata_query_out.var_names).
+
+    Why column-subsetting is required
+    ----------------------------------
+    Process_Query trims .var from the intersection space (e.g. 23 539 genes)
+    to 4 000 HVGs.  Assigning a 23 539-column or 36 601-column matrix to .X
+    raises "Data matrix has wrong shape".  We must select only the HVG columns
+    from whichever source matrix we have.
+
+    Source priority
+    ---------------
+    1. saved_raw_counts column-subsetted to HVGs  (raw mode only)
+    2. full_X column-subsetted to HVGs
+    3. Leave .X unchanged (PopV's internal normalised matrix) + warning
+    """
+    hvg_names = list(adata_query_out.var_names)   # e.g. 4 000 genes
+    n_obs     = adata_query_out.n_obs
+
+    def _subset_cols(matrix, gene_list):
+        """Return matrix[:,hvg_col_indices] or None on failure."""
+        name_to_idx = {g: i for i, g in enumerate(gene_list)}
+        col_idx = [name_to_idx[g] for g in hvg_names if g in name_to_idx]
+        if len(col_idx) != len(hvg_names):
+            logger.warning(
+                f".X restoration: {len(col_idx)}/{len(hvg_names)} "
+                "HVGs found in source — skipping this source."
+            )
+            return None
+        m = matrix.tocsr() if sp.issparse(matrix) else sp.csr_matrix(matrix)
+        return m[:, col_idx]
+
+    # 1. saved_raw_counts → common_genes space
+    if saved_raw_counts is not None and input_type == "raw":
+        sub = _subset_cols(saved_raw_counts, common_genes)
+        if sub is not None:
+            if sub.shape[0] == n_obs:
+                adata_query_out.X = sub
+                logger.info(
+                    f".X restored from saved_raw_counts (HVG space: "
+                    f"{n_obs} cells × {len(hvg_names)} genes)."
+                )
+                return
+            else:
+                logger.warning(
+                    f"saved_raw_counts has {sub.shape[0]} rows, "
+                    f"query_out has {n_obs}. Trying full_X."
+                )
+
+    # 2. full_X → full gene space
+    sub = _subset_cols(full_X, full_var_names)
+    if sub is not None:
+        if sub.shape[0] == n_obs:
+            adata_query_out.X = sub
+            logger.info(
+                f".X restored from full_X snapshot (HVG space: "
+                f"{n_obs} cells × {len(hvg_names)} genes, {input_type})."
+            )
+            return
+        else:
+            logger.warning(
+                f"full_X has {sub.shape[0]} rows, query_out has {n_obs}. "
+                "Cannot assign; leaving .X as PopV internal matrix."
+            )
+
+    # 3. give up
+    logger.warning(
+        ".X restoration failed — no source with matching dimensions. "
+        ".X retains PopV's internal normalised HVG matrix. "
+        "Annotation results are unaffected."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -594,40 +645,21 @@ def run_popv_annotation(
     drop_reference_columns: bool = True,
 ):
     """
-    Run PopV (0.4.2) cell-type annotation and write results to output_dir.
-
-    Parameters
-    ----------
-    adata_query : AnnData
-        Query dataset (tumor cells from Module 1).
-    adata_ref : AnnData
-        Tabula Sapiens tissue reference.
-    output_dir : str
-        Directory where final_popv_annotated.h5ad and
-        full_counts_for_module3.h5ad are written.
-    input_type : str
-        'raw'  — .X contains raw counts (default). All popv methods are run.
-        'log1p' — .X is already log-normalised; only CELLTYPIST will run.
-    n_samples_per_label : int
-        Cells sampled per label during reference subsampling.
-    drop_reference_columns : bool
-        If True (default), Tabula Sapiens metadata columns are removed from
-        the saved query AnnData.
+    Run PopV cell-type annotation and write results to output_dir.
 
     Output files
     ------------
     output_dir/final_popv_annotated.h5ad
-        Query cells only, .X = original raw/log1p counts (HVG/intersection
-        gene space), .obs contains all PopV prediction columns.
+        Query cells only.  .X = original raw/log1p counts in 4 000-HVG space.
         uns['full_counts_h5ad_path'] points to the sidecar below.
 
     output_dir/full_counts_for_module3.h5ad
-        Full-gene count matrix (all genes before intersection subsetting).
-        Module 3 reads this for scMalignantFinder (≥90% model overlap).
+        Full-gene count matrix (all genes pre-alignment).
+        Module 3: sc.read_h5ad(adata.uns['full_counts_h5ad_path'])
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    # Snapshot of original query needed for _extract_query_cells
+    # Snapshot obs_names for query-cell extraction later
     adata_query_snapshot = adata_query.copy()
 
     # --- pre-process dtypes -------------------------------------------------
@@ -640,20 +672,17 @@ def run_popv_annotation(
     _force_float32(adata_query)
     _force_float32(adata_ref)
 
-    # Remove .raw to prevent concat dtype crashes (popv 0.4.2 issue)
     adata_query.raw = None
     adata_ref.raw   = None
 
-    # --- FIX 2: resolve cl.obo folder ---------------------------------------
+    # --- FIX 2: resolve cl.obo ----------------------------------------------
     cl_obo_folder = _resolve_ontology_folder()
     logger.info(f"cl_obo_folder: {cl_obo_folder}")
 
-    # --- FIX 1: build label map from OBO ------------------------------------
+    # --- FIX 1: build label map ---------------------------------------------
     label_map, label_to_id = _build_label_map_from_obo(cl_obo_folder)
     logger.info(f"Loaded {len(label_map):,} ontology labels.")
 
-    # FIX 1a — normalise reference labels (case only; popv 0.4.2 handles
-    # unknown labels internally via its OBO digraph)
     _ref_label_col = "cell_ontology_class"
     if _ref_label_col in adata_ref.obs.columns and label_map:
         adata_ref.obs[_ref_label_col] = (
@@ -668,29 +697,13 @@ def run_popv_annotation(
             f"{adata_ref.obs[_ref_label_col].nunique()} unique labels."
         )
 
-    # -----------------------------------------------------------------------
-    # FIX 8 — snapshot full gene space BEFORE gene-space alignment.
-    #
-    # We capture full_X and full_var_names here as plain Python objects
-    # (not attached to any AnnData layer) so there is NO shape-mismatch
-    # risk when adata_query is later subsetted to intersection genes.
-    # They will be written as a sidecar h5ad after annotation completes.
-    # -----------------------------------------------------------------------
+    # --- FIX 8: snapshot full gene space BEFORE alignment -------------------
     full_X, full_var_names = _snapshot_full_counts(adata_query)
 
-    # -----------------------------------------------------------------------
-    # Gene-space alignment before Process_Query.
-    #
-    # Root cause: Process_Query calls anndata.concat(ref, query, join="outer",
-    # fill_value="unknown").  When var_names differ, anndata fills missing genes
-    # with the string "unknown" which scipy.sparse rejects ("dtype str224").
-    #
-    # Fix: subset both objects to the intersection of var_names so the outer
-    # join never needs to fill any values.
-    #
-    # The full-gene snapshot above was already captured as plain matrices —
-    # it is completely unaffected by this subsetting step.
-    # -----------------------------------------------------------------------
+    # --- gene-space alignment -----------------------------------------------
+    # anndata.concat inside Process_Query uses join="outer", fill_value="unknown".
+    # Mismatched var_names → scipy fills with the string "unknown" → str224 crash.
+    # Fix: subset both objects to the intersection so no filling occurs.
     query_genes  = set(adata_query.var_names)
     ref_genes    = set(adata_ref.var_names)
     common_genes = sorted(query_genes & ref_genes)
@@ -698,84 +711,68 @@ def run_popv_annotation(
     if len(common_genes) == 0:
         raise ValueError(
             "Query and reference share 0 genes. "
-            "Check that both datasets use the same gene identifier "
-            "(Ensembl ID vs symbol)."
+            "Check gene identifier type (Ensembl ID vs symbol)."
         )
 
     n_query_genes = adata_query.n_vars
     n_ref_genes   = adata_ref.n_vars
 
-    if len(common_genes) < n_query_genes or len(common_genes) < n_ref_genes:
-        logger.info(
-            f"Gene-space alignment: "
-            f"query {n_query_genes} genes, ref {n_ref_genes} genes → "
-            f"{len(common_genes)} common genes (intersection)."
-        )
+    # Stash raw_counts before clearing layers so we can subset & restore it
+    _raw_counts_stash = adata_query.layers.pop("raw_counts", None)
 
-        # Stash raw_counts layer BEFORE subsetting so we can re-index it
-        # to the common gene set after the copy.
-        _raw_counts_stash = adata_query.layers.pop("raw_counts", None)
-
-        # Clear ALL layers from both objects before subsetting to prevent
-        # anndata.concat inside Process_Query from attempting to align
-        # layers across mismatched gene spaces (str224 crash).
-        for lk in list(adata_query.layers.keys()):
-            del adata_query.layers[lk]
-        for lk in list(adata_ref.layers.keys()):
-            del adata_ref.layers[lk]
-
-        adata_query = adata_query[:, common_genes].copy()
-        adata_ref   = adata_ref[:, common_genes].copy()
-
-        # Reattach raw_counts subsetted to common genes
-        if _raw_counts_stash is not None:
-            original_gene_list = list(adata_query_snapshot.var_names)
-            gene_to_idx        = {g: i for i, g in enumerate(original_gene_list)}
-            common_idx         = [
-                gene_to_idx[g] for g in common_genes if g in gene_to_idx
-            ]
-            if sp.issparse(_raw_counts_stash):
-                adata_query.layers["raw_counts"] = (
-                    _raw_counts_stash[:, common_idx].tocsr().astype(np.float32)
-                )
-            else:
-                adata_query.layers["raw_counts"] = np.asarray(
-                    _raw_counts_stash[:, common_idx], dtype=np.float32
-                )
-            logger.info(
-                f"Gene-space alignment: raw_counts subsetted to "
-                f"{len(common_idx)} common genes and reattached."
-            )
-    else:
-        logger.info(
-            f"Gene-space alignment: query and reference already share "
-            f"all {len(common_genes)} genes — no subsetting needed."
-        )
-        # Still clear layers to prevent str224 crash from any stray layers
-        for lk in list(adata_query.layers.keys()):
-            if lk != "raw_counts":
-                del adata_query.layers[lk]
-        for lk in list(adata_ref.layers.keys()):
-            del adata_ref.layers[lk]
-
-    # Save and remove raw_counts from query before Process_Query — anndata.concat
-    # would try to align it across both datasets (ref has no raw_counts layer)
-    # and hit the str224 crash.  We restore it to adata_query_out after annotation.
-    _saved_raw_counts = adata_query.layers.pop("raw_counts", None)
-
-    # Final safety: no layers on either side when entering Process_Query
+    # Clear ALL layers from both objects — prevents str224 crash from any
+    # stray layers that exist on one side but not the other
     for lk in list(adata_query.layers.keys()):
         del adata_query.layers[lk]
     for lk in list(adata_ref.layers.keys()):
         del adata_ref.layers[lk]
 
+    if len(common_genes) < n_query_genes or len(common_genes) < n_ref_genes:
+        logger.info(
+            f"Gene-space alignment: query {n_query_genes}, "
+            f"ref {n_ref_genes} → {len(common_genes)} common genes."
+        )
+        adata_query = adata_query[:, common_genes].copy()
+        adata_ref   = adata_ref[:, common_genes].copy()
+
+        # Subset raw_counts to common genes
+        if _raw_counts_stash is not None:
+            original_genes = list(adata_query_snapshot.var_names)
+            g2i = {g: i for i, g in enumerate(original_genes)}
+            common_idx = [g2i[g] for g in common_genes if g in g2i]
+            if sp.issparse(_raw_counts_stash):
+                _saved_raw_counts = (
+                    _raw_counts_stash[:, common_idx].tocsr().astype(np.float32)
+                )
+            else:
+                _saved_raw_counts = np.asarray(
+                    _raw_counts_stash[:, common_idx], dtype=np.float32
+                )
+            logger.info(
+                f"raw_counts subsetted to {len(common_idx)} common genes."
+            )
+        else:
+            _saved_raw_counts = None
+    else:
+        logger.info(
+            f"Gene-space: query and reference already share all "
+            f"{len(common_genes)} genes — no subsetting needed."
+        )
+        if _raw_counts_stash is not None:
+            _saved_raw_counts = (
+                _raw_counts_stash.tocsr().astype(np.float32)
+                if sp.issparse(_raw_counts_stash)
+                else np.asarray(_raw_counts_stash, dtype=np.float32)
+            )
+        else:
+            _saved_raw_counts = None
+
     logger.info(
-        "All layers cleared from query and reference before Process_Query. "
-        "raw_counts saved locally for reattachment after annotation. "
-        "full_counts snapshot held as plain matrix for sidecar write."
+        "Layers cleared. raw_counts saved locally; "
+        "full_X held as plain matrix for sidecar."
     )
 
-    # --- Process_Query (popv 0.4.2 signature) --------------------------------
+    # --- Process_Query -------------------------------------------------------
     pq = Process_Query(
         query_adata=adata_query,
         ref_adata=adata_ref,
@@ -786,14 +783,17 @@ def run_popv_annotation(
     )
     adata_processed = pq.adata
 
-    # FIX 3: check batch column
+    # --- FIX 3: batch check -------------------------------------------------
     _check_batch_annotation(adata_processed)
     has_two_batches = (
         "_batch_annotation" in adata_processed.obs.columns
         and len(adata_processed.obs["_batch_annotation"].unique()) >= 2
     )
 
-    # --- popv 0.4.2 obsm proxy (harmony shape guard) ------------------------
+    # --- FIX 9: discover actual method names --------------------------------
+    method_map = _discover_popv_methods()
+
+    # --- obsm proxy (harmony shape guard) -----------------------------------
     _harmony_key = "X_pca_harmony_popv"
 
     class _ObsmProxy:
@@ -812,9 +812,7 @@ def run_popv_annotation(
                     )
                     arr = arr.T
                 elif arr.ndim == 1:
-                    logger.warning(
-                        f"obsm proxy: {key} is 1-D — KNN_HARMONY skipped."
-                    )
+                    logger.warning(f"obsm proxy: {key} is 1-D — skipping.")
                     return
                 object.__getattribute__(self, "_real").__setitem__(key, arr)
             else:
@@ -829,7 +827,7 @@ def run_popv_annotation(
         def __getattr__(self, name):
             return getattr(object.__getattribute__(self, "_real"), name)
 
-    # --- ONCLASS dict patch (popv 0.4.2) ------------------------------------
+    # --- ONCLASS dict patch -------------------------------------------------
     def _patch_onclass(label_to_id_map):
         import contextlib
 
@@ -850,14 +848,9 @@ def run_popv_annotation(
                     d = getattr(obj, dict_attr, None)
                     if not isinstance(d, dict):
                         continue
-                    missing = {
-                        k: v for k, v in label_to_id_map.items() if k not in d
-                    }
+                    missing = {k: v for k, v in label_to_id_map.items()
+                               if k not in d}
                     if missing:
-                        logger.info(
-                            f"ONCLASS patch: injecting {len(missing)} entries into "
-                            f"{mod_name}.{obj_attr}.{dict_attr}"
-                        )
                         d.update(missing)
                         patched.append((d, missing))
                 except Exception:
@@ -869,56 +862,79 @@ def run_popv_annotation(
 
         return _ctx()
 
-    # --- per-method runner (popv 0.4.2) -------------------------------------
-    def _run_method_safe(adata, method):
+    # --- per-method runner --------------------------------------------------
+    def _run_method_safe(adata, canonical, actual):
         import unittest.mock as mock
 
-        if method == "KNN_HARMONY":
-            real_obsm = adata.obsm
-            proxy     = _ObsmProxy(real_obsm, adata.n_obs)
+        if actual in _HARMONY_ALIASES or canonical in _HARMONY_ALIASES:
+            proxy = _ObsmProxy(adata.obsm, adata.n_obs)
             with mock.patch.object(adata, "obsm", proxy):
-                annotate_data(adata, methods=[method])
-        elif method == "ONCLASS":
+                annotate_data(adata, methods=[actual])
+        elif actual in _ONCLASS_ALIASES or canonical in _ONCLASS_ALIASES:
             with _patch_onclass(label_to_id):
-                annotate_data(adata, methods=[method])
+                annotate_data(adata, methods=[actual])
         else:
-            annotate_data(adata, methods=[method])
+            annotate_data(adata, methods=[actual])
 
     # --- method selection ---------------------------------------------------
+    # Find which canonical key corresponds to harmony (if any)
+    harmony_canonical = next(
+        (c for c in method_map
+         if c in _HARMONY_ALIASES or method_map[c] in _HARMONY_ALIASES),
+        None
+    )
+
     if input_type == "raw":
-        methods = [
-            "CELLTYPIST",
-            "KNN_BBKNN",
-            "KNN_SCVI",
-            "ONCLASS",
-            "SCANVI_POPV",
-            "Support_Vector",
-            "XGboost",
+        run_order = [
+            "CELLTYPIST", "KNN_BBKNN", "KNN_SCVI",
+            "ONCLASS", "SCANVI_POPV", "Support_Vector", "XGboost",
         ]
-        if has_two_batches:
-            methods.insert(2, "KNN_HARMONY")
-        else:
+        if harmony_canonical and has_two_batches:
+            run_order.insert(2, harmony_canonical)
+        elif harmony_canonical:
             logger.warning("Skipping KNN_HARMONY: fewer than 2 batch values.")
     else:
-        methods = ["CELLTYPIST"]
+        run_order = ["CELLTYPIST"]
         logger.info("log1p mode — running CELLTYPIST only.")
+
+    # Build final run list using discovered actual names
+    run_list = [
+        (canonical, method_map[canonical])
+        for canonical in run_order
+        if canonical in method_map
+    ]
+
+    not_found = [c for c in run_order if c not in method_map]
+    if not_found:
+        logger.warning(
+            f"Methods not found in popv.algorithms and will be skipped: "
+            f"{not_found}"
+        )
+
+    logger.info(
+        f"Running {len(run_list)} methods: "
+        + ", ".join(f"{c}({a})" for c, a in run_list)
+    )
 
     # --- run each method ----------------------------------------------------
     successful_methods = []
 
-    for method in methods:
+    for canonical, actual in run_list:
         try:
-            _run_method_safe(adata_processed, method)
+            _run_method_safe(adata_processed, canonical, actual)
             if label_map:
                 _normalise_predictions(adata_processed, label_map)
-            successful_methods.append(method)
-            logger.info(f"✓ {method} completed.")
+            successful_methods.append(actual)
+            logger.info(f"✓ {canonical} ({actual}) completed.")
         except Exception as exc:
-            logger.warning(f"✗ Skipping {method}: {type(exc).__name__}: {exc}")
+            logger.warning(
+                f"✗ Skipping {canonical} ({actual}): "
+                f"{type(exc).__name__}: {exc}"
+            )
 
     logger.info(f"Methods completed: {successful_methods}")
 
-    # --- FIX 4: robust fallback for majority-vote ---------------------------
+    # --- FIX 4: majority-vote fallback --------------------------------------
     if "popv_majority_vote_prediction" not in adata_processed.obs.columns:
         pred_cols = [
             c for c in adata_processed.obs.columns
@@ -928,143 +944,73 @@ def run_popv_annotation(
         ]
         if pred_cols:
             logger.warning(
-                "popv_majority_vote_prediction missing — "
+                f"popv_majority_vote_prediction missing — "
                 f"using '{pred_cols[0]}' as fallback."
             )
             adata_processed.obs["popv_majority_vote_prediction"] = (
                 adata_processed.obs[pred_cols[0]]
             )
         else:
-            logger.error("No prediction columns found at all. Annotation failed.")
+            logger.error("No prediction columns found. Annotation failed.")
 
-    # --- FIX 7: extract query cells only ------------------------------------
+    # --- FIX 7: extract query cells -----------------------------------------
     logger.info(
-        f"Combined shape after annotation: {adata_processed.shape} "
+        f"Combined shape: {adata_processed.shape} "
         f"(query {adata_query_snapshot.n_obs} + reference cells)"
     )
     adata_query_out = _extract_query_cells(adata_processed, adata_query_snapshot)
     logger.info(f"Query-only shape: {adata_query_out.shape}")
 
-    # --- Restore original .X (raw or log1p) into the final output -----------
-    # After Process_Query + annotate_data, .X holds PopV's internal HVG-trimmed
-    # normalised matrix.  We restore the user's original expression values
-    # aligned to the current .var (intersection/HVG gene space).
-    #
-    # Priority:
-    #   1. layers['raw_counts'] (already column-subsetted to common genes above)
-    #   2. full_X snapshot column-subsetted to current .var genes
-    #   3. Leave .X as-is (PopV internal) with a warning
-    logger.info("Restoring original .X to the final query output …")
-    _restored = False
+    # --- FIX 10: restore .X to original counts in HVG space ----------------
+    # adata_query_out.var_names = 4 000 HVGs selected by Process_Query.
+    # _saved_raw_counts has n_intersection genes (e.g. 23 539).
+    # full_X has n_full genes (e.g. 36 601).
+    # _restore_X_to_hvg_space() column-subsets both to the 4 000 HVGs.
+    _restore_X_to_hvg_space(
+        adata_query_out  = adata_query_out,
+        saved_raw_counts = _saved_raw_counts,
+        full_X           = full_X,
+        full_var_names   = full_var_names,
+        input_type       = input_type,
+        common_genes     = common_genes,
+    )
 
-    if _saved_raw_counts is not None and input_type == "raw":
-        # _saved_raw_counts is already aligned to common_genes — same gene space
-        # as adata_query_out.var after Process_Query HVG selection.
-        # Guard: ensure row count matches (should always match after extraction).
-        if _saved_raw_counts.shape[0] == adata_query_out.n_obs:
-            adata_query_out.X = (
-                _saved_raw_counts.tocsr()
-                if sp.issparse(_saved_raw_counts)
-                else sp.csr_matrix(_saved_raw_counts)
-            )
-            logger.info(
-                f".X restored from saved raw_counts "
-                f"({adata_query_out.n_obs} cells × {_saved_raw_counts.shape[1]} genes)."
-            )
-            _restored = True
-        else:
-            logger.warning(
-                f"raw_counts row mismatch: saved {_saved_raw_counts.shape[0]} rows "
-                f"vs query_out {adata_query_out.n_obs} cells. Trying full_X fallback."
-            )
-
-    if not _restored:
-        # Subset full_X to the current .var genes
-        full_name_to_idx = {g: i for i, g in enumerate(full_var_names)}
-        hvg_names        = list(adata_query_out.var_names)
-        col_indices      = [
-            full_name_to_idx[g] for g in hvg_names if g in full_name_to_idx
-        ]
-
-        if len(col_indices) == len(hvg_names):
-            subset_X = full_X.tocsr()[:, col_indices]
-            if subset_X.shape[0] == adata_query_out.n_obs:
-                adata_query_out.X = subset_X
-                logger.info(
-                    f".X restored from full_X snapshot "
-                    f"({input_type}, {len(col_indices)} intersection genes)."
-                )
-                _restored = True
-            else:
-                logger.warning(
-                    f"full_X row mismatch: {subset_X.shape[0]} rows "
-                    f"vs query_out {adata_query_out.n_obs} cells. "
-                    "Leaving .X as PopV internal matrix."
-                )
-        else:
-            logger.warning(
-                f"Gene index mismatch: only {len(col_indices)}/{len(hvg_names)} "
-                "current .var genes found in full_var_names. "
-                "Leaving .X as PopV internal matrix."
-            )
-
-    if not _restored:
-        logger.warning(
-            "Could not restore original .X — no suitable source available. "
-            ".X contains PopV's internal normalised HVG matrix."
-        )
-
-    # --- FIX 8: write full-gene sidecar h5ad --------------------------------
-    # full_X holds the ORIGINAL expression matrix (all genes, all query cells)
-    # captured before gene-space alignment.  It has the same cell order as
-    # adata_query_snapshot (pre-extraction); we need to match it to the final
-    # query cell set.
-    #
-    # Cell order alignment:
-    #   full_X rows correspond to adata_query_snapshot.obs_names.
-    #   adata_query_out.obs_names is a subset (query cells only).
-    #   We reindex full_X rows to match adata_query_out.
-    logger.info("Writing full-gene sidecar for Module 3 …")
-
+    # --- FIX 8: write full-gene sidecar -------------------------------------
+    # Reindex full_X rows to match adata_query_out.obs_names
     snapshot_names   = list(adata_query_snapshot.obs_names)
     query_out_names  = list(adata_query_out.obs_names)
     snap_name_to_idx = {n: i for i, n in enumerate(snapshot_names)}
-
-    row_indices = [snap_name_to_idx[n] for n in query_out_names
-                   if n in snap_name_to_idx]
+    row_indices      = [
+        snap_name_to_idx[n] for n in query_out_names
+        if n in snap_name_to_idx
+    ]
 
     if len(row_indices) == adata_query_out.n_obs:
-        full_X_reindexed = full_X.tocsr()[row_indices, :]
+        full_X_out = full_X.tocsr()[row_indices, :]
         logger.info(
-            f"FIX 8: Reindexed full_X to {len(row_indices)} query cells "
-            f"× {full_X_reindexed.shape[1]} full genes."
+            f"FIX 8: full_X reindexed → "
+            f"{len(row_indices)} cells × {full_X_out.shape[1]} genes."
         )
     else:
         logger.warning(
-            f"FIX 8: Only {len(row_indices)}/{adata_query_out.n_obs} query "
-            "obs_names found in full_X snapshot. Using full_X as-is (may include "
-            "reference cells if _extract_query_cells fell back to full object)."
+            f"FIX 8: Only {len(row_indices)}/{adata_query_out.n_obs} "
+            "obs_names matched in snapshot. Using full_X as-is."
         )
-        full_X_reindexed = full_X
+        full_X_out = full_X
 
     sidecar_path = _write_full_counts_sidecar(
-        full_X        = full_X_reindexed,
-        full_var_names= full_var_names,
-        obs           = adata_query_out.obs,
-        output_dir    = output_dir,
+        full_X         = full_X_out,
+        full_var_names = full_var_names,
+        obs            = adata_query_out.obs,
+        output_dir     = output_dir,
     )
-
-    # Register path so Module 3 can locate the sidecar automatically
     adata_query_out.uns["full_counts_h5ad_path"] = sidecar_path
-
-    # --- FIX 8 verification -------------------------------------------------
     _verify_full_counts_sidecar(adata_query_out)
 
-    # --- drop reference metadata cols if requested --------------------------
+    # --- final clean-up & save ----------------------------------------------
     if drop_reference_columns:
         adata_query_out = _drop_reference_only_columns(adata_query_out)
 
-    # --- final clean-up & save ----------------------------------------------
     _clean_obs_for_h5ad(adata_query_out)
 
     out_path = os.path.join(output_dir, "final_popv_annotated.h5ad")
@@ -1080,7 +1026,6 @@ def run_popv_annotation(
         f"uns keys                : {list(adata_query_out.uns.keys())}\n"
         f"{'='*60}"
     )
-
     return adata_query_out
 
 
@@ -1097,9 +1042,7 @@ def auto_run_popv(
     user_popv_prediction: str = None,
 ):
     """
-    Fully automatic entry-point.  Finds the tumor h5ad from Module 1,
-    downloads the matching Tabula Sapiens reference (or uses
-    user_reference), and runs PopV 0.4.2 annotation.
+    Fully automatic entry-point.
 
     Parameters
     ----------
@@ -1108,38 +1051,20 @@ def auto_run_popv(
     nsamples : int
         Cells sampled per label during reference subsampling.
     output_dir : str
-        Directory where output files are written:
+        Output directory.  Two files are written:
           • final_popv_annotated.h5ad
-          • full_counts_for_module3.h5ad  (full gene space for Module 3)
+          • full_counts_for_module3.h5ad
     user_reference : str, optional
-        Path to a local Tabula Sapiens (or compatible) reference h5ad.
-        If provided, the automatic Figshare download is skipped.
+        Path to a local reference h5ad (skips Figshare download).
     drop_reference_columns : bool
-        Remove Tabula Sapiens metadata columns from the saved output.
+        Remove Tabula Sapiens metadata columns from the output.
     user_popv_prediction : str, optional
-        Path to an already-annotated h5ad that contains PopV prediction
-        columns (e.g. 'popv_majority_vote_prediction').  When supplied,
-        the entire PopV annotation pipeline is SKIPPED.  The file is
-        validated, copied to output_dir as final_popv_annotated.h5ad,
-        and returned directly.
+        Path to a pre-computed PopV-annotated h5ad.  When supplied the
+        full pipeline is skipped; the file is validated and copied to
+        output_dir/final_popv_annotated.h5ad.
 
-    Usage
-    -----
-    # Run the full pipeline:
-    from SCART import popv_annotation
-    adata = popv_annotation.auto_run_popv(
-        input_type="raw",
-        nsamples=300,
-        user_reference="/data/Ovary_TSP1_30.h5ad"
-    )
-
-    # Use a pre-computed PopV result:
-    adata = popv_annotation.auto_run_popv(
-        user_popv_prediction="/data/my_popv_annotated.h5ad",
-        output_dir="popv_results"
-    )
-
-    # Module 3 accesses full gene space via:
+    Module 3 usage
+    --------------
     full_adata = sc.read_h5ad(adata.uns['full_counts_h5ad_path'])
     """
     # ------------------------------------------------------------------
@@ -1148,44 +1073,35 @@ def auto_run_popv(
     if user_popv_prediction is not None:
         if not os.path.exists(user_popv_prediction):
             raise FileNotFoundError(
-                f"user_popv_prediction file not found: {user_popv_prediction}"
+                f"user_popv_prediction not found: {user_popv_prediction}"
             )
 
-        logger.info(
-            f"user_popv_prediction provided — skipping PopV pipeline.\n"
-            f"Loading: {user_popv_prediction}"
-        )
+        logger.info(f"user_popv_prediction provided — loading: {user_popv_prediction}")
         adata = sc.read_h5ad(user_popv_prediction)
 
         pred_cols = [c for c in adata.obs.columns if c.endswith("_prediction")]
         if not pred_cols:
             raise ValueError(
-                f"No '_prediction' columns found in {user_popv_prediction}.\n"
-                "Expected at least one column ending in '_prediction' in .obs.\n"
-                "Please supply a valid PopV-annotated h5ad."
+                f"No '_prediction' columns in {user_popv_prediction}.\n"
+                "Supply a valid PopV-annotated h5ad."
             )
         if "popv_majority_vote_prediction" not in adata.obs.columns:
             logger.warning(
-                "'popv_majority_vote_prediction' not found in user-supplied h5ad. "
-                f"Found prediction columns: {pred_cols}. "
-                "Downstream modules expecting 'popv_majority_vote_prediction' "
-                "may need adjustment."
+                f"'popv_majority_vote_prediction' not found. Found: {pred_cols}"
             )
         else:
             logger.info(
                 f"'popv_majority_vote_prediction' present — "
-                f"{adata.obs['popv_majority_vote_prediction'].nunique()} unique labels."
+                f"{adata.obs['popv_majority_vote_prediction'].nunique()} labels."
             )
 
         os.makedirs(output_dir, exist_ok=True)
         out_path = os.path.join(output_dir, "final_popv_annotated.h5ad")
         if os.path.abspath(user_popv_prediction) != os.path.abspath(out_path):
-            logger.info(f"Copying user prediction to: {out_path}")
+            logger.info(f"Copying to: {out_path}")
             adata.write(out_path)
         else:
-            logger.info(
-                "user_popv_prediction is already the output path — no copy needed."
-            )
+            logger.info("Already at output path — no copy needed.")
 
         logger.info(
             f"\n{'='*60}\n"
