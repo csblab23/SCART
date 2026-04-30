@@ -616,6 +616,7 @@ def run_popv_annotation(
     input_type: str = "raw",
     n_samples_per_label: int = 300,
     drop_reference_columns: bool = True,
+    n_jobs: int = 1,
 ):
     """
     Run PopV (0.4.2) cell-type annotation and write results to output_dir.
@@ -633,6 +634,9 @@ def run_popv_annotation(
         'log1p' — .X is already log-normalised; only CELLTYPIST will run.
     n_samples_per_label : int
         Cells sampled per label during reference subsampling.
+    n_jobs : int
+        Number of CPU cores for parallelisable methods (SVM, Random Forest,
+        ONCLASS).  -1 = use all available cores.  Default 1.
     drop_reference_columns : bool
         If True (default), Tabula Sapiens metadata columns are removed from
         the saved query AnnData to keep the output file clean.
@@ -964,12 +968,20 @@ def run_popv_annotation(
     method_map = _discover_popv_methods()
 
     # --- per-method runner --------------------------------------------------
+    # Set thread env vars so sklearn SVM/RF/ONCLASS use n_jobs cores.
+    import os as _os
+    _n_jobs_str = str(n_jobs if n_jobs > 0 else _os.cpu_count())
+    _os.environ['OMP_NUM_THREADS']      = _n_jobs_str
+    _os.environ['OPENBLAS_NUM_THREADS'] = _n_jobs_str
+    _os.environ['MKL_NUM_THREADS']      = _n_jobs_str
+    logger.info(f'Parallelism: n_jobs={n_jobs} ')
+
     def _run_method_safe(adata, canonical, actual):
         import unittest.mock as mock
 
         if actual in _HARMONY_ALIASES or canonical in _HARMONY_ALIASES:
             proxy = _ObsmProxy(adata.obsm, adata.n_obs)
-            with mock.patch.object(adata, "obsm", proxy):
+            with mock.patch.object(adata, 'obsm', proxy):
                 annotate_data(adata, methods=[actual])
         elif actual in _ONCLASS_ALIASES or canonical in _ONCLASS_ALIASES:
             with _patch_onclass(label_to_id):
@@ -1170,6 +1182,7 @@ def auto_run_popv(
     user_reference: str = None,
     drop_reference_columns: bool = True,
     user_popv_prediction: str = None,
+    n_jobs: int = 1,
 ):
     """
     Fully automatic entry-point.  Finds the tumor h5ad from Module 1,
@@ -1295,4 +1308,5 @@ def auto_run_popv(
         input_type=input_type,
         n_samples_per_label=nsamples,
         drop_reference_columns=drop_reference_columns,
+        n_jobs=n_jobs,
     )
