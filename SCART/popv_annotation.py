@@ -885,10 +885,29 @@ def run_popv_annotation(
 
     # FIX 3: check batch column
     _check_batch_annotation(adata_processed)
-    has_two_batches = (
-        "_batch_annotation" in adata_processed.obs.columns
-        and len(adata_processed.obs["_batch_annotation"].unique()) >= 2
-    )
+
+    # Determine whether REAL batch variation exists for KNN_HARMONY.
+    # popv always writes '_batch_annotation' with pseudo-labels
+    # 'unknown' (reference) and 'unknown_query' (query) when no real
+    # batch key is provided.  These are not biological batches and
+    # harmony will loop indefinitely trying to correct them.
+    # Only enable KNN_HARMONY when at least one value is NOT a popv
+    # internal pseudo-label — i.e. a real sample/donor batch ID.
+    _POPV_PSEUDO_BATCHES = {"unknown", "unknown_query"}
+    _batch_vals = set()
+    if "_batch_annotation" in adata_processed.obs.columns:
+        _batch_vals = set(adata_processed.obs["_batch_annotation"].unique())
+
+    has_real_batches = bool(_batch_vals - _POPV_PSEUDO_BATCHES)
+
+    if not has_real_batches and _batch_vals:
+        logger.warning(
+            f"'_batch_annotation' only contains popv pseudo-labels "
+            f"{_batch_vals} — no real batch signal. "
+            "KNN_HARMONY will be skipped to avoid infinite convergence loop."
+        )
+
+    has_two_batches = has_real_batches
 
 
 
