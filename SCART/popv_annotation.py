@@ -674,21 +674,44 @@ def run_popv_annotation(
     label_map, label_to_id = _build_label_map_from_obo(cl_obo_folder)
     logger.info(f"Loaded {len(label_map):,} ontology labels.")
 
-    # FIX 1a — normalise reference labels (case only; no cell dropping for 0.4.2)
-    # popv 0.4.2 handles unknown/non-ontology labels internally via its OBO
-    # digraph.  Dropping reference cells here is a 0.6.0-specific workaround
-    # and is intentionally omitted.
+    # FIX 1a — normalise reference labels + drop non-CL-ontology cells.
+    #
+    # WHY dropping is required for popv 0.4.2:
+    #   After KNN methods finish their embedding, popv walks the CL ontology
+    #   digraph to propagate labels.  Any reference label absent from the
+    #   digraph (e.g. 'follicle' — a tissue compartment, not a cell type)
+    #   raises NetworkXError: "The node follicle is not in the digraph."
+    #   This kills KNN_BBKNN, KNN_SCANORAMA, KNN_SCVI, KNN_HARMONY even
+    #   though the embedding itself completed successfully.
+    #   Dropping these cells before Process_Query is the only reliable fix.
     _ref_label_col = "cell_ontology_class"
     if _ref_label_col in adata_ref.obs.columns and label_map:
+        # Step 1: case-normalise
         adata_ref.obs[_ref_label_col] = (
             adata_ref.obs[_ref_label_col]
             .astype(str)
             .str.lower()
             .map(lambda v: label_map.get(v, v))
         )
+        # Step 2: drop cells whose label is NOT a valid CL ontology term.
+        # label_to_id keys are the correctly-cased CL labels from cl.obo.
+        valid_labels = set(label_to_id.keys())
+        mask_valid   = adata_ref.obs[_ref_label_col].isin(valid_labels)
+        n_before     = adata_ref.n_obs
+        n_dropped    = (~mask_valid).sum()
+        if n_dropped > 0:
+            dropped_labels = (
+                adata_ref.obs.loc[~mask_valid, _ref_label_col].unique().tolist()
+            )
+            logger.warning(
+                f"Dropping {n_dropped} reference cells with labels not in "
+                f"CL ontology digraph: {dropped_labels}. "
+                "These would cause NetworkXError during KNN label propagation."
+            )
+            adata_ref = adata_ref[mask_valid].copy()
         logger.info(
-            f"Reference labels case-normalised — "
-            f"{adata_ref.n_obs} cells, "
+            f"Reference labels normalised — "
+            f"{n_before} → {adata_ref.n_obs} cells, "
             f"{adata_ref.obs[_ref_label_col].nunique()} unique labels."
         )
 
