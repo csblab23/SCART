@@ -1091,17 +1091,18 @@ def run_popv_annotation(
                 if sp.issparse(_saved_raw_counts)
                 else _saved_raw_counts[row_idx, :]
             )
-            # Step 2: store intersection-space raw counts as named layer
-            adata_query_out.layers["raw_counts"] = rc_aligned
+            # raw_counts has 23,539 intersection genes — too wide for
+            # adata_query_out.layers (4,000 HVGs).  Store it in uns as a
+            # path reference via the sidecar instead (written below).
+            # Only the HVG-subsetted version goes into .X.
             logger.info(
-                f"layers['raw_counts'] attached — "
+                f"raw_counts row-aligned — "
                 f"{rc_aligned.shape[0]} cells × {rc_aligned.shape[1]} genes "
-                f"(intersection gene space). Original raw counts from Module 1."
+                f"(intersection space, stored in sidecar h5ad)."
             )
 
-            # Step 3: subset to HVG columns for .X
+            # Subset to HVG columns for .X
             hvg_names    = list(adata_query_out.var_names)          # 4000 HVGs
-            # common_genes is the intersection list; build index into it
             cg_to_idx    = {g: i for i, g in enumerate(common_genes)}
             hvg_col_idx  = [cg_to_idx[g] for g in hvg_names if g in cg_to_idx]
 
@@ -1128,6 +1129,52 @@ def run_popv_annotation(
             "layers['raw_counts'] not added and .X not restored."
         )
 
+    # --- Write sidecar h5ad with full-gene + raw_counts matrices -----------
+    # Neither full_counts (36k genes) nor raw_counts (23k intersection genes)
+    # can go into adata_query_out.layers — both are wider than the 4k HVG
+    # .var space.  Write them to a separate h5ad for Module 3 access.
+    if _saved_full_counts is not None:
+        # Row-align full_counts to query output obs order
+        snapshot_obs     = list(adata_query_snapshot.obs_names)
+        snap_idx         = {n: i for i, n in enumerate(snapshot_obs)}
+        out_obs          = list(adata_query_out.obs_names)
+        fc_row_idx       = [snap_idx[n] for n in out_obs if n in snap_idx]
+        full_X_out       = _saved_full_counts.tocsr()[fc_row_idx, :]
+
+        # Also row-align raw_counts if available
+        rc_out = None
+        if _saved_raw_counts is not None:
+            rc_out = (
+                _saved_raw_counts.tocsr()[fc_row_idx, :]
+                if sp.issparse(_saved_raw_counts)
+                else _saved_raw_counts[fc_row_idx, :]
+            )
+
+        import pandas as pd
+        sidecar = anndata.AnnData(
+            X   = full_X_out,
+            obs = adata_query_out.obs.copy(),
+            var = pd.DataFrame(index=_saved_full_var_names),
+        )
+        if rc_out is not None:
+            # raw_counts has intersection genes; align var names
+            sidecar.layers["raw_counts"] = rc_out if rc_out.shape[1] == full_X_out.shape[1] else rc_out
+            # store intersection gene names in uns for clarity
+            sidecar.uns["raw_counts_var_names"] = common_genes
+        _clean_obs_for_h5ad(sidecar)
+
+        sidecar_path = os.path.join(output_dir, "full_counts_for_module3.h5ad")
+        sidecar.write(sidecar_path)
+        adata_query_out.uns["full_counts_h5ad_path"] = sidecar_path
+        size_mb = os.path.getsize(sidecar_path) / 1e6
+        logger.info(
+            f"Sidecar written → {sidecar_path} "
+            f"({sidecar.n_obs} cells × {sidecar.n_vars} genes, {size_mb:.1f} MB). "
+            "Module 3: sc.read_h5ad(adata.uns['full_counts_h5ad_path'])"
+        )
+    else:
+        logger.error("full_counts snapshot missing — sidecar not written.")
+
     # --- FIX 8 verification -------------------------------------------------
     _verify_full_counts_layer(adata_query_out)
 
@@ -1142,11 +1189,12 @@ def run_popv_annotation(
 
     logger.info(
         f"\n{'='*60}\n"
-        f"PopV output saved: {out_path}\n"
-        f"Shape             : {adata_query_out.shape}\n"
-        f"obs columns       : {list(adata_query_out.obs.columns)}\n"
-        f"layers            : {list(adata_query_out.layers.keys())}\n"
-        f"uns keys          : {list(adata_query_out.uns.keys())}\n"
+        f"PopV output saved      : {out_path}\n"
+        f"Full-gene sidecar      : {adata_query_out.uns.get('full_counts_h5ad_path', 'N/A')}\n"
+        f"Shape                  : {adata_query_out.shape}\n"
+        f"obs columns            : {list(adata_query_out.obs.columns)}\n"
+        f"layers                 : {list(adata_query_out.layers.keys())}\n"
+        f"uns keys               : {list(adata_query_out.uns.keys())}\n"
         f"{'='*60}"
     )
 
