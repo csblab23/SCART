@@ -90,7 +90,8 @@ _METHOD_ALIASES = [
     ["KNN_HARMONY",   "knn_on_harmony",   "knn_harmony",     "Knn_Harmony",   "KNN_HARMONY"],
     ["RANDOM_FOREST", "rf",               "random_forest",   "Random_Forest", "RANDOM_FOREST"],
     ["SVM",           "svm",              "support_vector_machine", "Support_Vector"],
-    ["XGBOOST",       "xgboost_popv",     "xgboost",         "Xgboost",       "XGboost",  "gradient_boosting", "XGBOOST"],
+    # XGBOOST is not present in popv 0.4.2 (confirmed via dir(popv.algorithms))
+    # ["XGBOOST", ...],  ← kept commented in case a future version adds it
     ["ONCLASS",       "onclass",          "OnClass",         "ONCLASS"],
     ["SCANVI",        "scanvi",           "scanvi_popv",     "Scanvi_Popv",   "SCANVI_POPV"],
 ]
@@ -964,7 +965,6 @@ def run_popv_annotation(
             "KNN_SCVI",
             "RANDOM_FOREST",
             "SVM",
-            "XGBOOST",
             "ONCLASS",
             "SCANVI",
         ]
