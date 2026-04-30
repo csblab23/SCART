@@ -890,41 +890,7 @@ def run_popv_annotation(
         and len(adata_processed.obs["_batch_annotation"].unique()) >= 2
     )
 
-    # --- popv 0.4.2 obsm proxy (harmony shape guard) -----------------------
-    _harmony_key = "X_pca_harmony_popv"
 
-    class _ObsmProxy:
-        def __init__(self, real_obsm, n_obs):
-            object.__setattr__(self, "_real", real_obsm)
-            object.__setattr__(self, "_n_obs", n_obs)
-
-        def __setitem__(self, key, value):
-            if key == _harmony_key:
-                arr   = np.array(value)
-                n_obs = object.__getattribute__(self, "_n_obs")
-                if arr.ndim == 2 and arr.shape[0] != n_obs:
-                    logger.warning(
-                        f"obsm proxy: correcting {key} shape "
-                        f"{arr.shape} → {arr.T.shape}"
-                    )
-                    arr = arr.T
-                elif arr.ndim == 1:
-                    logger.warning(
-                        f"obsm proxy: {key} is 1-D — KNN_HARMONY skipped."
-                    )
-                    return
-                object.__getattribute__(self, "_real").__setitem__(key, arr)
-            else:
-                object.__getattribute__(self, "_real").__setitem__(key, value)
-
-        def __getitem__(self, key):
-            return object.__getattribute__(self, "_real").__getitem__(key)
-
-        def __contains__(self, key):
-            return object.__getattribute__(self, "_real").__contains__(key)
-
-        def __getattr__(self, name):
-            return getattr(object.__getattribute__(self, "_real"), name)
 
     # --- ONCLASS dict patch (popv 0.4.2) ------------------------------------
     def _patch_onclass(label_to_id_map):
@@ -977,13 +943,10 @@ def run_popv_annotation(
     logger.info(f'Parallelism: n_jobs={n_jobs} ')
 
     def _run_method_safe(adata, canonical, actual):
-        import unittest.mock as mock
-
-        if actual in _HARMONY_ALIASES or canonical in _HARMONY_ALIASES:
-            proxy = _ObsmProxy(adata.obsm, adata.n_obs)
-            with mock.patch.object(adata, 'obsm', proxy):
-                annotate_data(adata, methods=[actual])
-        elif actual in _ONCLASS_ALIASES or canonical in _ONCLASS_ALIASES:
+        # Run exactly as the sample script does — no proxy, no timeout.
+        # Harmony works fine when called directly; the obsm proxy was
+        # causing it to hang by intercepting internal writes.
+        if actual in _ONCLASS_ALIASES or canonical in _ONCLASS_ALIASES:
             with _patch_onclass(label_to_id):
                 annotate_data(adata, methods=[actual])
         else:
@@ -1309,4 +1272,4 @@ def auto_run_popv(
         n_samples_per_label=nsamples,
         drop_reference_columns=drop_reference_columns,
         n_jobs=n_jobs,
-    )
+        )
