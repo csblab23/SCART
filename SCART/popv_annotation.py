@@ -1059,20 +1059,13 @@ def run_popv_annotation(
     adata_query_out = _extract_query_cells(adata_processed, adata_query_snapshot)
     logger.info(f"Query-only shape: {adata_query_out.shape}")
 
-    # --- Reattach full_counts and raw_counts saved before Process_Query -----
-    # These were popped before anndata.concat to prevent the str224 crash.
-    # Reattach now so the final saved h5ad has the full gene snapshot for
-    # Module 3 and the original expression matrix for .X restoration.
-    if _saved_full_counts is not None:
-        adata_query_out.layers["full_counts"]       = _saved_full_counts
-        adata_query_out.uns["full_counts_var_names"] = _saved_full_var_names
-        logger.info(
-            f"Reattached layers['full_counts'] "
-            f"({_saved_full_counts.shape[1]} genes) to query output."
-        )
-    else:
+    # full_counts (36k genes) is NOT attached to adata_query_out.layers —
+    # adata_query_out.var has only 4000 HVGs so AnnData would reject the
+    # shape mismatch.  It is written exclusively to the sidecar h5ad below
+    # and accessed by Module 3 via adata.uns['full_counts_h5ad_path'].
+    if _saved_full_counts is None:
         logger.error(
-            "full_counts not available for reattachment — "
+            "full_counts snapshot missing — sidecar will not be written. "
             "Module 3 will fall back to 4000 HVGs."
         )
 
