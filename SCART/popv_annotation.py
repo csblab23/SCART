@@ -1197,6 +1197,94 @@ def run_popv_annotation(
     else:
         logger.error("full_counts snapshot missing — sidecar not written.")
 
+    # --- Restore original Module 1 raw counts as layers['counts'] ----------
+    # Goal: final_popv_annotated.h5ad should contain layers['counts'] with
+    # the original integer/float32 counts from Module 1, subsetted to the
+    # 4000 HVGs that form adata_query_out.var.  This mirrors the structure
+    # of the input GSE*_tumor.h5ad (which had layers['counts'] over all genes)
+    # so downstream modules always find raw counts under the same key.
+    #
+    # Source priority:
+    #   1. _saved_full_counts (36k genes, snapshotted before gene-alignment)
+    #      → subset columns to 4000 HVGs via _saved_full_var_names index.
+    #   2. _saved_raw_counts (23k intersection genes) as fallback
+    #      → subset columns to 4000 HVGs via common_genes index.
+    #
+    # Row alignment uses fc_row_idx (computed in the sidecar block above).
+    # If the sidecar block did not run (full_counts missing), we recompute
+    # the row index here.
+    _counts_layer_written = False
+
+    # Ensure we have a row index into snapshot obs for adata_query_out rows
+    _snap_obs_for_counts  = list(adata_query_snapshot.obs_names)
+    _snap_idx_for_counts  = {n: i for i, n in enumerate(_snap_obs_for_counts)}
+    _out_obs_for_counts   = list(adata_query_out.obs_names)
+    _counts_row_idx       = [_snap_idx_for_counts[n]
+                             for n in _out_obs_for_counts
+                             if n in _snap_idx_for_counts]
+
+    hvg_names_for_counts  = list(adata_query_out.var_names)   # 4000 HVGs
+
+    if len(_counts_row_idx) == adata_query_out.n_obs and _saved_full_counts is not None:
+        # Path 1: use full_counts (36k genes) → subset to HVG columns
+        _full_var_list  = _saved_full_var_names  # list of 36k gene names
+        _full_var_idx   = {g: i for i, g in enumerate(_full_var_list)}
+        _hvg_col_in_full = [_full_var_idx[g]
+                            for g in hvg_names_for_counts
+                            if g in _full_var_idx]
+
+        if len(_hvg_col_in_full) == len(hvg_names_for_counts):
+            _fc_aligned = _saved_full_counts.tocsr()[_counts_row_idx, :]
+            adata_query_out.layers["counts"] = (
+                _fc_aligned[:, _hvg_col_in_full].tocsr().astype(np.float32)
+            )
+            logger.info(
+                f"layers['counts'] restored from full_counts snapshot — "
+                f"{adata_query_out.n_obs} cells × {len(hvg_names_for_counts)} HVGs "
+                f"(original Module 1 raw counts)."
+            )
+            _counts_layer_written = True
+        else:
+            logger.warning(
+                f"layers['counts']: only {len(_hvg_col_in_full)}/"
+                f"{len(hvg_names_for_counts)} HVGs found in full_counts var names."
+            )
+
+    if not _counts_layer_written and _saved_raw_counts is not None:
+        # Path 2: fallback — use intersection-space raw_counts (23k genes)
+        _cg_idx_map   = {g: i for i, g in enumerate(common_genes)}
+        _hvg_col_in_cg = [_cg_idx_map[g]
+                          for g in hvg_names_for_counts
+                          if g in _cg_idx_map]
+
+        if (len(_counts_row_idx) == adata_query_out.n_obs
+                and len(_hvg_col_in_cg) == len(hvg_names_for_counts)):
+            _rc_aligned = (
+                _saved_raw_counts.tocsr()[_counts_row_idx, :]
+                if sp.issparse(_saved_raw_counts)
+                else _saved_raw_counts[_counts_row_idx, :]
+            )
+            adata_query_out.layers["counts"] = (
+                _rc_aligned.tocsr()[:, _hvg_col_in_cg].astype(np.float32)
+            )
+            logger.info(
+                f"layers['counts'] restored from raw_counts (intersection fallback) — "
+                f"{adata_query_out.n_obs} cells × {len(hvg_names_for_counts)} HVGs."
+            )
+            _counts_layer_written = True
+        else:
+            logger.warning(
+                "layers['counts']: fallback raw_counts column-subsetting failed. "
+                "Raw counts layer will NOT be present in the output h5ad."
+            )
+
+    if not _counts_layer_written:
+        logger.error(
+            "layers['counts'] could NOT be restored — "
+            "neither full_counts nor raw_counts snapshot was usable. "
+            "final_popv_annotated.h5ad will not contain raw counts."
+        )
+
     # --- FIX 8 verification -------------------------------------------------
     _verify_full_counts_layer(adata_query_out)
 
