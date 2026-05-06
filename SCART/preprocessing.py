@@ -49,6 +49,9 @@ KEY FIXES
 
 FIX 1   Full-gene route priority for scMalignantFinder.
 FIX 2   SCEVAN reference subsampled to scevan_ref_max_cells (default 100).
+        Reference epithelial cells selected by substring match on
+        "epithelial cell" in cell_ontology_class (covers all variants:
+        "ovarian surface epithelial cell", "glandular epithelial cell", etc.)
 FIX 3   DEG uses pvals_adj (BH-adjusted).
 FIX 5   _get_raw_counts_from_adata prefers layers['counts'] → raw → .X.
 FIX 6   scMalignantFinder predictions aligned by obs_names.
@@ -58,6 +61,10 @@ FIX 10  SCEVAN runs via fresh Rscript subprocess.
         Rscript resolved via sys.executable bin dir FIRST — the only
         reliable signal inside a Jupyter kernel. CONDA_PREFIX and PATH
         are fallbacks only.
+FIX 11  Epithelial cell selection uses str.contains("epithelial cell")
+        (case-insensitive) instead of str.endswith("epithelial cell"),
+        so "ovarian surface epithelial cell", "glandular epithelial cell",
+        "lung epithelial cell", etc. are all captured correctly.
 QC FIX  QC thresholds read from adata.uns['qc_params'] (set by Module 1).
         If absent, QC is SKIPPED ENTIRELY.
 """
@@ -190,12 +197,6 @@ def _get_raw_counts_from_adata(adata, context=""):
       3. layers['scvi_counts'] — scVI internal counts
       4. adata.raw.X           — legacy raw slot
       5. adata.X               — last resort (WARNING: may be log1p)
-
-    For the log1p mode (when PopV was run with input_type='log1p'), layers
-    ['counts'] will be absent from the PopV output.  In that case Route 4/5
-    is used here, and callers that need true raw counts should fall back to
-    reading Module 1's GSE*_tumor.h5ad directly (done in
-    _build_fullgene_adata_for_scm via Route A-rescue).
     """
     tag = f"[{context}] " if context else ""
 
@@ -229,7 +230,7 @@ def _get_raw_counts_from_adata(adata, context=""):
 def _get_raw_matrix(adata):
     """
     Return dense float64 (cells × genes) raw count matrix.
-    Kept for backward-compat with CopyKAT/SCEVAN helpers that use float64.
+    Kept for backward-compat with SCEVAN helpers that use float64.
     Wraps _get_raw_counts_from_adata.
     """
     return _get_raw_counts_from_adata(adata).astype(np.float64)
@@ -260,10 +261,7 @@ def _build_fullgene_adata_for_scm(adata, feature_tsv, tumor_h5ad_path=None):
         af.X = sp.csr_matrix(af.X)
         return af
 
-    # Route A-new: use layers['counts'] from popv output (raw mode)
-    # This is now the FIRST priority since popv_annotation.py saves
-    # layers['counts'] with the original Module 1 raw counts (4000 HVGs).
-    # If that overlap is too low, fall through to rescue routes.
+    # Route A-layer: use layers['counts'] from popv output (raw mode)
     for lyr in ("counts", "raw_counts"):
         if lyr in adata.layers:
             ov = _pct(adata.var_names)
@@ -350,7 +348,7 @@ def _build_fullgene_adata_for_scm(adata, feature_tsv, tumor_h5ad_path=None):
                     logger.info(f"scMalignantFinder → Route B (layers['{lyr}']).")
                     return af
 
-    # Route C — last resort (4000 HVGs from .X — already log-normalised by Step 3)
+    # Route C — last resort (HVGs from .X — already log-normalised)
     ov_hvg = _pct(adata.var_names)
     logger.warning(
         f"All routes failed. Falling back to {adata.n_vars} HVGs ({ov_hvg:.1f}% overlap).\n"
@@ -423,14 +421,12 @@ def _build_r_env(r_home):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SCEVAN subprocess runner (replaces CopyKAT)
+# SCEVAN subprocess runner
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _run_scevan(
     adata_query,
     adata_ref,
-    ref_epithelial_key="cell_ontology_class",
-    ref_epithelial_values=None,
     ref_max_cells=100,
     sample_name="SCEVAN_run",
     organism="human",
@@ -442,28 +438,23 @@ def _run_scevan(
     """
     Run SCEVAN via a fresh Rscript subprocess.
 
-    Data flow (mirroring Input_SCEVAN.ipynb + SCEVAN.ipynb):
-      1. Python: extract raw counts from query epithelial + normal ref cells
-      2. Python: subset to common genes, combine, write genes×cells CSV
-      3. Python: write normal barcodes list
-      4. Python: write R driver script that runs pipelineCNA() in batches
-      5. Rscript subprocess: run driver, write per-batch CSV + scevan_full_results.csv
-      6. Python: read results, return per-cell prediction DataFrame
+    Reference normal cells are selected from adata_ref by substring-matching
+    "epithelial cell" (case-insensitive) in the 'cell_ontology_class' column.
+    This automatically covers all variants:
+      - "epithelial cell"
+      - "ovarian surface epithelial cell"
+      - "glandular epithelial cell"
+      - "lung epithelial cell"
+      - etc.
 
     Parameters
     ----------
     adata_query : AnnData
         Epithelial query cells (from adata_epi after QC).
-        Raw counts must be recoverable via layers['counts'] / 'raw_counts'
-        or adata.raw.X.
     adata_ref : AnnData
-        Tabula Sapiens (or user) reference h5ad — same file used in Module 2.
-    ref_epithelial_key : str
-        obs column in adata_ref containing cell type labels.
-    ref_epithelial_values : list of str
-        Labels in ref_epithelial_key to use as normal reference.
+        Tabula Sapiens (or user) reference h5ad.
     ref_max_cells : int
-        Max normal reference cells to subsample (FIX 2).
+        Max normal reference cells to subsample (default 100).
     sample_name : str
         Prefix for SCEVAN output files.
     organism : str
@@ -473,7 +464,7 @@ def _run_scevan(
     subclones : bool
         Whether to infer subclones.
     batch_size : int
-        Query cells per batch (default 3000, matching SCEVAN.ipynb).
+        Query cells per batch (default 3000).
     save_dir : str or None
         Directory to write intermediate files and results.
 
@@ -482,10 +473,6 @@ def _run_scevan(
     pd.DataFrame  columns: barcode, scevan_prediction
                   values:  "tumor" | "normal" | "filtered" | "not.defined"
     """
-    if ref_epithelial_values is None:
-        ref_epithelial_values = ["epithelial cell", "glandular epithelial cell",
-                                 "ovarian surface epithelial cell"]
-
     q_barcodes   = np.array(adata_query.obs_names)
     empty_result = pd.DataFrame({
         "barcode"           : list(q_barcodes),
@@ -525,18 +512,31 @@ def _run_scevan(
         logger.error(f"SCEVAN verification failed: {exc}")
         return empty_result
 
-    # ── FIX 2: filter reference to normal epithelial cells + subsample ────
-    if ref_epithelial_key in adata_ref.obs.columns:
-        ref_vals_lower = [v.lower() for v in ref_epithelial_values]
-        ep_mask        = adata_ref.obs[ref_epithelial_key].str.lower().isin(ref_vals_lower)
-        adata_ref_ep   = adata_ref[ep_mask].copy() if ep_mask.any() else adata_ref.copy()
-        logger.info(f"SCEVAN reference epithelial cells before subsample: {adata_ref_ep.n_obs}")
+    # ── FIX 2 + FIX 11: select reference epithelial cells by substring match ──
+    # "epithelial cell" substring covers all variants without needing an
+    # explicit list (ovarian surface epithelial cell, glandular epithelial
+    # cell, lung epithelial cell, etc.)
+    if "cell_ontology_class" in adata_ref.obs.columns:
+        ep_mask = adata_ref.obs["cell_ontology_class"].str.contains(
+            "epithelial cell", case=False, na=False
+        )
+        adata_ref_ep = adata_ref[ep_mask].copy() if ep_mask.any() else adata_ref.copy()
+        logger.info(
+            f"SCEVAN reference: {ep_mask.sum()} epithelial cells found via "
+            f"substring match on 'cell_ontology_class' (contains 'epithelial cell')."
+        )
+        if not ep_mask.any():
+            logger.warning(
+                "No cells containing 'epithelial cell' in cell_ontology_class. "
+                "Using full reference as fallback."
+            )
     else:
         logger.warning(
-            f"ref_epithelial_key '{ref_epithelial_key}' not in adata_ref.obs — "
-            "using full reference."
+            "'cell_ontology_class' not in adata_ref.obs — using full reference."
         )
         adata_ref_ep = adata_ref.copy()
+
+    logger.info(f"SCEVAN reference epithelial cells before subsample: {adata_ref_ep.n_obs}")
 
     if adata_ref_ep.n_obs > ref_max_cells:
         rng = np.random.default_rng(seed=42)
@@ -575,11 +575,9 @@ def _run_scevan(
     q_idx = np.where(np.isin(q_genes, common_genes))[0]
     r_idx = np.where(np.isin(r_genes, common_genes))[0]
 
-    # Normal reference barcodes (prefixed so they are identifiable)
-    r_barcodes = np.array(["REF_" + b for b in adata_ref_ep.obs_names])
+    r_barcodes     = np.array(["REF_" + b for b in adata_ref_ep.obs_names])
     q_barcodes_arr = np.array(adata_query.obs_names)
 
-    # Combined genes × cells matrix (query + ref), matching Input_SCEVAN.ipynb
     mat_combined = np.hstack([
         mat_query[q_idx, :],
         mat_ref[r_idx, :],
@@ -606,7 +604,6 @@ def _run_scevan(
         results_csv   = os.path.join(save_dir, "scevan_full_results.csv")
         malignant_csv = os.path.join(save_dir, "scevan_malignant_cells.csv")
 
-        # Write genes × cells count CSV (mirrors Input_SCEVAN.ipynb count_df)
         logger.info(f"SCEVAN: writing count matrix ({mat_combined.shape}) ...")
         count_df = pd.DataFrame(
             mat_combined,
@@ -616,13 +613,11 @@ def _run_scevan(
         count_df.to_csv(counts_csv)
         logger.info(f"SCEVAN count matrix written: {counts_csv}")
 
-        # Write normal barcodes (mirrors normal_barcodes.csv in Input_SCEVAN.ipynb)
         pd.Series(r_barcodes.tolist()).to_csv(norm_csv, index=False, header=False)
         logger.info(f"SCEVAN normal barcodes written: {norm_csv} ({len(r_barcodes)} cells)")
 
-        # Write R driver script (mirrors SCEVAN.ipynb logic with batch processing)
-        subclones_r   = "TRUE"  if subclones   else "FALSE"
-        fixed_norm_r  = "TRUE"
+        subclones_r  = "TRUE" if subclones else "FALSE"
+        fixed_norm_r = "TRUE"
 
         with open(driver_r, "w") as f:
             f.write(f"""\
@@ -651,7 +646,7 @@ cat("Matrix dims:", nrow(count_mat), "genes x", ncol(count_mat), "cells\\n")
 normal_cells <- readLines("{norm_csv}")
 cat("Normal reference cells:", length(normal_cells), "\\n")
 
-# ── Batch setup (mirrors SCEVAN.ipynb) ───────────────────────────────────
+# ── Batch setup ───────────────────────────────────────────────────────────
 query_cells <- setdiff(colnames(count_mat), normal_cells)
 batch_size  <- {batch_size}
 batches     <- split(query_cells, ceiling(seq_along(query_cells) / batch_size))
@@ -687,7 +682,6 @@ for (i in seq_along(batches)) {{
       organism           = "{organism}"
     )
 
-    # Keep only query cells (exclude normal ref rows)
     res_query <- res[rownames(res) %in% batches[[i]], , drop = FALSE]
 
     write.csv(res_query, save_file)
@@ -746,10 +740,9 @@ cat("Done!\\n")
             return empty_result
 
         # ── Parse results ─────────────────────────────────────────────────
-        pred_df = pd.read_csv(results_csv, index_col=0)
+        pred_df   = pd.read_csv(results_csv, index_col=0)
         logger.info(f"SCEVAN results columns: {list(pred_df.columns)}")
 
-        # 'class' column contains 'tumor' / 'normal' / 'filtered'
         class_col = "class" if "class" in pred_df.columns else pred_df.columns[0]
 
         pred_df = pred_df.reset_index().rename(columns={"index": "barcode"})
@@ -764,7 +757,6 @@ cat("Done!\\n")
             .fillna("not.defined")
         )
 
-        # Left-join to ensure all query cells are represented
         result_full = pd.DataFrame({"barcode": list(q_barcodes_arr)})
         result_full = result_full.merge(pred_df, on="barcode", how="left")
         result_full["scevan_prediction"] = (
@@ -804,9 +796,7 @@ def run_preprocessing_pipeline(
     scmalignant_model_dir=None,
     surfaceome_path=None,
     malignant_strategy="intersection",
-    # SCEVAN parameters (replaces CopyKAT)
-    scevan_ref_epithelial_key="cell_ontology_class",
-    scevan_ref_epithelial_values=None,
+    # SCEVAN parameters
     scevan_ref_max_cells=100,
     scevan_sample_name="SCEVAN_run",
     scevan_organism="human",
@@ -820,30 +810,18 @@ def run_preprocessing_pipeline(
     QC thresholds (min_genes, max_mt) are read from adata.uns['qc_params']
     written by Module 1.  If absent, QC is skipped entirely.
 
-    Raw counts handling:
-      - If PopV was run with input_type='raw', layers['counts'] is present
-        in final_popv_annotated.h5ad and is used automatically.
-      - If PopV was run with input_type='log1p', layers['counts'] is absent.
-        _get_raw_counts_from_adata() will fall through to adata.raw or .X
-        (with a warning), and scMalignantFinder will use Route A-rescue
-        (Module 1 tumor h5ad) for full-gene raw counts.
-      - SCEVAN always needs raw integer counts; if only log1p data is
-        available, the pipeline prints a warning and SCEVAN may produce
-        unreliable CNV calls.
+    Epithelial cell selection (FIX 11):
+      Uses str.contains("epithelial cell", case=False) on
+      popv_majority_vote_prediction, so ANY cell type label containing
+      "epithelial cell" is captured — e.g. "ovarian surface epithelial cell",
+      "glandular epithelial cell", "lung epithelial cell", etc.
+
+    SCEVAN reference normal cells (FIX 2 + FIX 11):
+      Selected from the reference h5ad by substring-matching "epithelial cell"
+      in 'cell_ontology_class'.  No explicit list of cell type values needed.
 
     malignant_strategy: 'intersection' | 'scMalignant' | 'scevan'
-
-    SCEVAN runs via Rscript subprocess using the same logic as SCEVAN.ipynb
-    (batched pipelineCNA calls with normal reference cells included in each
-    batch, classifyTumorCells patched to use lapply instead of parLapply).
     """
-    if scevan_ref_epithelial_values is None:
-        scevan_ref_epithelial_values = [
-            "epithelial cell",
-            "glandular epithelial cell",
-            "ovarian surface epithelial cell",
-        ]
-
     print("\n========== START ==========\n")
 
     if save_dir is None:
@@ -898,21 +876,29 @@ def run_preprocessing_pipeline(
     min_genes, max_mt, qc_active, qc_source = _read_qc_params(adata_full)
 
     # STEP 3 — Extract epithelial cells → QC
+    # FIX 11: use str.contains("epithelial cell") to capture ALL variants:
+    #   "epithelial cell", "ovarian surface epithelial cell",
+    #   "glandular epithelial cell", "lung epithelial cell", etc.
     print("\n--- Step 3: Epithelial selection" +
           (" + QC ---" if qc_active else " ---"))
 
     labels  = adata_full.obs["popv_majority_vote_prediction"].astype(str)
-    ep_mask = labels.str.endswith("epithelial cell")
-    print(f"Epithelial cells: {ep_mask.sum()} / {adata_full.n_obs} total")
+    ep_mask = labels.str.contains("epithelial cell", case=False, na=False)
+
+    print(f"Epithelial cells (contains 'epithelial cell'): "
+          f"{ep_mask.sum()} / {adata_full.n_obs} total")
     print(f"Non-epithelial cells (will be 'rest' group for DEG): {(~ep_mask).sum()}")
+
+    # Log which unique epithelial labels were matched
+    matched_labels = labels[ep_mask].unique()
+    logger.info(
+        f"Epithelial labels matched: {sorted(matched_labels)}"
+    )
 
     adata_epi = adata_full[ep_mask].copy()
     before_qc = adata_epi.n_obs
 
     if qc_active:
-        # QC requires raw counts: try layers['counts'] first, fall back to .X
-        # Note: sc.pp.calculate_qc_metrics uses .X, so we temporarily set
-        # .X to raw counts for accurate n_genes_by_counts / pct_counts_mt.
         _raw_for_qc = _get_raw_counts_from_adata(adata_epi, "QC")
         _X_backup   = adata_epi.X.copy()
         adata_epi.X = sp.csr_matrix(_raw_for_qc)
@@ -921,7 +907,6 @@ def run_preprocessing_pipeline(
         sc.pp.calculate_qc_metrics(adata_epi, qc_vars=["mt"], inplace=True)
         print(f"Mean MT% BEFORE QC: {adata_epi.obs['pct_counts_mt'].mean():.2f}")
 
-        # Restore .X after metrics are computed
         adata_epi.X = _X_backup
 
         filters = np.ones(adata_epi.n_obs, dtype=bool)
@@ -940,15 +925,13 @@ def run_preprocessing_pipeline(
     else:
         print(f"QC filtering SKIPPED — all {adata_epi.n_obs} epithelial cells proceed.\n")
 
-    # Set .X to raw counts for downstream tools that need them (SCEVAN, scMalignantFinder)
-    # layers['raw_for_cna'] stores integer counts before normalisation.
+    # Set .X to raw counts; store in layers['raw_for_cna'] before normalisation
     print("Setting up raw counts for epithelial cells...")
     _raw_epi = _get_raw_counts_from_adata(adata_epi, "epithelial-raw-setup")
-    adata_epi.X                  = sp.csr_matrix(_raw_epi)
+    adata_epi.X                     = sp.csr_matrix(_raw_epi)
     adata_epi.layers["raw_for_cna"] = adata_epi.X.copy()
     print(f"  layers['raw_for_cna'] stored ({adata_epi.n_obs} × {adata_epi.n_vars})")
 
-    # Now normalise .X for scMalignantFinder (Route C fallback uses log1p .X)
     adata_epi.var_names_make_unique()
     sc.pp.normalize_total(adata_epi, target_sum=1e4)
     sc.pp.log1p(adata_epi)
@@ -957,7 +940,6 @@ def run_preprocessing_pipeline(
     print("\n--- Step 4a: scMalignantFinder ---")
     feature_tsv = os.path.join(scmalignant_model_dir, "ordered_feature.tsv")
 
-    # Report which gene-space route will be used
     _raw_layers_epi = [l for l in ("counts", "raw_counts") if l in adata_epi.layers]
     if _raw_layers_epi:
         print(f"Gene-space: Route A-layer (layers['{_raw_layers_epi[0]}'], "
@@ -971,7 +953,7 @@ def run_preprocessing_pipeline(
         elif adata_epi.raw is not None:
             print(f"Gene-space: Route A-old (adata.raw, {adata_epi.raw.n_vars} genes)")
         else:
-            print("Gene-space: Route C (4000-HVG fallback — low overlap expected)")
+            print("Gene-space: Route C (HVG fallback — low overlap expected)")
 
     adata_scm = _build_fullgene_adata_for_scm(adata_epi, feature_tsv, tumor_h5ad)
     print(f"  Gene space used: {adata_scm.n_vars} genes")
@@ -1018,7 +1000,6 @@ def run_preprocessing_pipeline(
             if _inserted and _scm_external_dir in sys.path:
                 sys.path.remove(_scm_external_dir)
 
-    # norm_type=False: adata_scm already log-normalised by _build_fullgene_adata_for_scm
     model = _clf_mod.scMalignantFinder(
         test_input          = adata_scm,
         celltype_annotation = False,
@@ -1045,9 +1026,9 @@ def run_preprocessing_pipeline(
     print("scMalignantFinder completed:")
     print(adata_epi.obs[scm_col].value_counts().to_string())
 
-    # STEP 4b — SCEVAN (replaces CopyKAT)
-    scevan_available  = False
-    scevan_result_df  = None
+    # STEP 4b — SCEVAN
+    scevan_available = False
+    scevan_result_df = None
 
     if malignant_strategy in ("scevan", "intersection"):
         if reference_h5ad is None:
@@ -1062,51 +1043,44 @@ def run_preprocessing_pipeline(
             _rh = _get_r_home(_rs) if _rs else "NOT FOUND"
             print(
                 f"\n--- Step 4b: SCEVAN (subprocess) ---\n"
-                f"  Reference h5ad:       {reference_h5ad}\n"
-                f"  ref_epithelial_key:   {scevan_ref_epithelial_key}\n"
-                f"  ref_epithelial_vals:  {scevan_ref_epithelial_values}\n"
-                f"  ref_max_cells:        {scevan_ref_max_cells}\n"
-                f"  sample_name:          {scevan_sample_name}\n"
-                f"  organism:             {scevan_organism}\n"
-                f"  par_cores:            {scevan_par_cores}\n"
-                f"  subclones:            {scevan_subclones}\n"
-                f"  batch_size:           {scevan_batch_size}\n"
-                f"  Rscript:              {_rs}\n"
-                f"  R home:               {_rh}"
+                f"  Reference h5ad:  {reference_h5ad}\n"
+                f"  ref_max_cells:   {scevan_ref_max_cells}\n"
+                f"  sample_name:     {scevan_sample_name}\n"
+                f"  organism:        {scevan_organism}\n"
+                f"  par_cores:       {scevan_par_cores}\n"
+                f"  subclones:       {scevan_subclones}\n"
+                f"  batch_size:      {scevan_batch_size}\n"
+                f"  Rscript:         {_rs}\n"
+                f"  R home:          {_rh}\n"
+                f"  Ref selection:   contains 'epithelial cell' in cell_ontology_class"
             )
 
-            # Warn if raw counts may not be available for SCEVAN
             if not _raw_layers_present:
                 print(
                     "\n  WARNING: No raw count layers in PopV output "
                     "(input_type='log1p' path).\n"
                     "  SCEVAN requires integer raw counts for reliable CNV inference.\n"
-                    "  The pipeline will attempt to use adata.raw or adata.X — "
-                    "results may be unreliable."
+                    "  Results may be unreliable."
                 )
 
             try:
-                # Use raw counts for SCEVAN (layers['raw_for_cna'] = integer counts)
                 adata_raw_cna   = adata_epi.copy()
                 adata_raw_cna.X = adata_epi.layers["raw_for_cna"]
                 adata_ref_full  = sc.read_h5ad(reference_h5ad)
 
-                # SCEVAN intermediate files go into save_dir/scevan/
                 scevan_work_dir = os.path.join(save_dir, "scevan")
                 os.makedirs(scevan_work_dir, exist_ok=True)
 
                 scevan_result_df = _run_scevan(
-                    adata_query             = adata_raw_cna,
-                    adata_ref               = adata_ref_full,
-                    ref_epithelial_key      = scevan_ref_epithelial_key,
-                    ref_epithelial_values   = scevan_ref_epithelial_values,
-                    ref_max_cells           = scevan_ref_max_cells,
-                    sample_name             = scevan_sample_name,
-                    organism                = scevan_organism,
-                    par_cores               = scevan_par_cores,
-                    subclones               = scevan_subclones,
-                    batch_size              = scevan_batch_size,
-                    save_dir                = scevan_work_dir,
+                    adata_query   = adata_raw_cna,
+                    adata_ref     = adata_ref_full,
+                    ref_max_cells = scevan_ref_max_cells,
+                    sample_name   = scevan_sample_name,
+                    organism      = scevan_organism,
+                    par_cores     = scevan_par_cores,
+                    subclones     = scevan_subclones,
+                    batch_size    = scevan_batch_size,
+                    save_dir      = scevan_work_dir,
                 )
 
                 bc_to_pred = dict(zip(
@@ -1132,7 +1106,6 @@ def run_preprocessing_pipeline(
     scm_mal = adata_epi.obs[scm_col].str.lower() == "malignant"
 
     if scevan_available:
-        # SCEVAN labels tumor cells as "tumor"
         sv_mal = adata_epi.obs["scevan_prediction"].str.lower() == "tumor"
         if malignant_strategy == "intersection":
             malignant_mask = scm_mal & sv_mal
@@ -1172,17 +1145,16 @@ def run_preprocessing_pipeline(
     adata_rest = adata_full[rest_mask].copy()
     print(f"Non-epithelial 'rest' cells: {adata_rest.n_obs}")
 
-    # Set .X to raw counts then normalise for DEG
-    _raw_rest = _get_raw_counts_from_adata(adata_rest, "rest-group")
+    _raw_rest    = _get_raw_counts_from_adata(adata_rest, "rest-group")
     adata_rest.X = sp.csr_matrix(_raw_rest)
     sc.pp.normalize_total(adata_rest, target_sum=1e4)
     sc.pp.log1p(adata_rest)
 
     # STEP 7 — Surfaceome filter
     print("\n--- Step 7: Surfaceome filter (GESP file) ---")
-    surfaceome        = pd.read_csv(surfaceome_path)
+    surfaceome         = pd.read_csv(surfaceome_path)
     surfaceome.columns = surfaceome.columns.str.strip()
-    surf_genes        = surfaceome["Gene"].astype(str).tolist()
+    surf_genes         = surfaceome["Gene"].astype(str).tolist()
     print(f"Surfaceome genes in GESP file: {len(surf_genes)}")
 
     surf_in_mal  = adata_mal.var_names.intersection(surf_genes)
