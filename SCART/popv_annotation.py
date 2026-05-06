@@ -909,8 +909,6 @@ def run_popv_annotation(
 
     has_two_batches = has_real_batches
 
-
-
     # --- ONCLASS dict patch (popv 0.4.2) ------------------------------------
     def _patch_onclass(label_to_id_map):
         import contextlib
@@ -1156,11 +1154,35 @@ def run_popv_annotation(
             obs = adata_query_out.obs.copy(),
             var = pd.DataFrame(index=_saved_full_var_names),
         )
+
+        # ---------------------------------------------------------------
+        # FIX: raw_counts (23k intersection genes) and full_counts (36k
+        # genes) have different column counts.  Assigning raw_counts
+        # directly as a layer of the sidecar (which has 36k .var) raises
+        # a shape ValueError.  Store raw_counts in uns instead when the
+        # column counts differ; store as a layer only when they match.
+        # ---------------------------------------------------------------
         if rc_out is not None:
-            # raw_counts has intersection genes; align var names
-            sidecar.layers["raw_counts"] = rc_out if rc_out.shape[1] == full_X_out.shape[1] else rc_out
-            # store intersection gene names in uns for clarity
-            sidecar.uns["raw_counts_var_names"] = common_genes
+            if rc_out.shape[1] == full_X_out.shape[1]:
+                # Same gene space — safe to attach as a layer
+                sidecar.layers["raw_counts"] = rc_out
+                logger.info(
+                    f"Sidecar: raw_counts attached as layer "
+                    f"({rc_out.shape[1]} genes match full_counts)."
+                )
+            else:
+                # Intersection space (23k) differs from full space (36k).
+                # Store as a sparse matrix in uns so Module 3 can still
+                # access original raw counts in intersection gene space.
+                logger.info(
+                    f"Sidecar: raw_counts ({rc_out.shape[1]} genes) differs "
+                    f"from full_counts ({full_X_out.shape[1]} genes) — "
+                    "storing raw_counts in uns['raw_counts_matrix'], "
+                    "not as a layer."
+                )
+                sidecar.uns["raw_counts_matrix"] = rc_out
+            sidecar.uns["raw_counts_var_names"] = list(common_genes)
+
         _clean_obs_for_h5ad(sidecar)
 
         sidecar_path = os.path.join(output_dir, "full_counts_for_module3.h5ad")
@@ -1339,4 +1361,4 @@ def auto_run_popv(
         n_samples_per_label=nsamples,
         drop_reference_columns=drop_reference_columns,
         n_jobs=n_jobs,
-        )
+    )
