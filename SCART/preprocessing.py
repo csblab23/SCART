@@ -8,24 +8,53 @@ CORRECT BIOLOGICAL PIPELINE DESIGN
 
 Step 1  Load the full PopV-annotated h5ad (all cell types, e.g. 15202 cells).
 Step 2  Extract epithelial cells only → apply QC filters if set in Module 1.
-Step 3  Run scMalignantFinder + CopyKAT on epithelial cells.
+Step 3  Run scMalignantFinder + SCEVAN on epithelial cells.
 Step 4  Keep ONLY malignant epithelial cells.
 Step 5  From adata_full, take all NON-EPITHELIAL cells as the "rest" group.
 Step 6  DEG: malignant epithelial vs non-epithelial rest (surfaceome genes).
 Step 7  Binarise ONLY the malignant epithelial AnnData, store DEG, save.
 
 ═══════════════════════════════════════════════════════════════════════════════
+RAW COUNT HANDLING (input_type from Module 2)
+═══════════════════════════════════════════════════════════════════════════════
+
+Module 2 (PopV) can be run with two input_type modes:
+
+  input_type='raw'   → all 8 methods run; Module 2 saves layers['counts']
+                       in final_popv_annotated.h5ad (original integer counts
+                       subsetted to 4000 HVGs, restored by popv_annotation.py).
+
+  input_type='log1p' → only CELLTYPIST runs; .X was already log-normalised
+                       when passed to Module 2; NO raw counts layer is saved
+                       because Module 2 never had integer counts to snapshot.
+
+This module handles both cases via _get_raw_counts_from_adata():
+
+  Priority order for extracting raw counts from adata_epi / adata_rest:
+    1. layers['counts']      ← written by updated popv_annotation.py (raw mode)
+    2. layers['raw_counts']  ← alternate name
+    3. layers['scvi_counts'] ← scVI internal counts (less preferred)
+    4. adata.raw.X           ← legacy path
+    5. adata.X               ← last resort; may be log1p — a WARNING is logged
+
+  If only log1p data is available (input_type='log1p' path), steps that
+  REQUIRE raw counts (QC, CNA, scMalignantFinder normalisation) will still
+  work because _build_fullgene_adata_for_scm() reads from the Module 1
+  tumor h5ad (Route A-rescue) which always has layers['counts'] with the
+  original integer counts from GEO.
+
+═══════════════════════════════════════════════════════════════════════════════
 KEY FIXES
 ═══════════════════════════════════════════════════════════════════════════════
 
 FIX 1   Full-gene route priority for scMalignantFinder.
-FIX 2   CopyKAT reference subsampled to copykat_ref_max_cells (default 100).
+FIX 2   SCEVAN reference subsampled to scevan_ref_max_cells (default 100).
 FIX 3   DEG uses pvals_adj (BH-adjusted).
-FIX 5   _get_raw_matrix prefers adata.raw over HVG layers.
+FIX 5   _get_raw_counts_from_adata prefers layers['counts'] → raw → .X.
 FIX 6   scMalignantFinder predictions aligned by obs_names.
-FIX 8   CopyKAT results saved in full detail in adata.uns['copykat_results'].
+FIX 8   SCEVAN results saved in full detail in adata.uns['scevan_results'].
 FIX 9   Correct DEG: malignant epithelial vs NON-EPITHELIAL cells.
-FIX 10  CopyKAT runs via fresh Rscript subprocess (not rpy2).
+FIX 10  SCEVAN runs via fresh Rscript subprocess.
         Rscript resolved via sys.executable bin dir FIRST — the only
         reliable signal inside a Jupyter kernel. CONDA_PREFIX and PATH
         are fallbacks only.
@@ -151,34 +180,59 @@ def _read_qc_params(adata):
 # FIX 5 — raw count extractor
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _get_raw_matrix(adata):
-    """Return dense float64 (cells × genes) raw count matrix."""
-    if adata.raw is not None:
-        raw_n   = adata.raw.n_vars
-        layer_n = max(
-            (adata.layers[l].shape[1]
-             for l in ("full_counts", "scvi_counts", "raw_counts", "counts")
-             if l in adata.layers),
-            default=0,
-        )
-        if raw_n > layer_n:
-            logger.info(f"Raw counts: adata.raw ({raw_n} genes > best layer {layer_n})")
-            X = adata.raw.X
-            if sp.issparse(X):
-                X = X.toarray()
-            return np.array(X, dtype=np.float64)
-    for lyr in ("full_counts", "scvi_counts", "raw_counts", "counts"):
+def _get_raw_counts_from_adata(adata, context=""):
+    """
+    Return a dense float32 (cells × genes) raw count matrix from adata.
+
+    Priority:
+      1. layers['counts']      — written by popv_annotation.py (raw mode)
+      2. layers['raw_counts']  — alternate name
+      3. layers['scvi_counts'] — scVI internal counts
+      4. adata.raw.X           — legacy raw slot
+      5. adata.X               — last resort (WARNING: may be log1p)
+
+    For the log1p mode (when PopV was run with input_type='log1p'), layers
+    ['counts'] will be absent from the PopV output.  In that case Route 4/5
+    is used here, and callers that need true raw counts should fall back to
+    reading Module 1's GSE*_tumor.h5ad directly (done in
+    _build_fullgene_adata_for_scm via Route A-rescue).
+    """
+    tag = f"[{context}] " if context else ""
+
+    for lyr in ("counts", "raw_counts", "scvi_counts"):
         if lyr in adata.layers:
-            logger.info(f"Raw counts: layers['{lyr}']")
+            logger.info(f"{tag}Raw counts source: layers['{lyr}']")
             X = adata.layers[lyr]
             if sp.issparse(X):
                 X = X.toarray()
-            return np.array(X, dtype=np.float64)
-    src = adata.raw.X if adata.raw is not None else adata.X
-    logger.warning("Using adata.X as raw counts — may be log-normalised.")
-    if sp.issparse(src):
-        src = src.toarray()
-    return np.array(src, dtype=np.float64)
+            return np.array(X, dtype=np.float32)
+
+    if adata.raw is not None:
+        logger.info(f"{tag}Raw counts source: adata.raw.X ({adata.raw.n_vars} genes)")
+        X = adata.raw.X
+        if sp.issparse(X):
+            X = X.toarray()
+        return np.array(X, dtype=np.float32)
+
+    logger.warning(
+        f"{tag}No raw counts layer found — using adata.X. "
+        "If PopV was run with input_type='log1p', this may be log-normalised. "
+        "QC metrics and CNA tools require true raw counts. "
+        "Consider providing tumor_h5ad= to load raw counts from Module 1."
+    )
+    X = adata.X
+    if sp.issparse(X):
+        X = X.toarray()
+    return np.array(X, dtype=np.float32)
+
+
+def _get_raw_matrix(adata):
+    """
+    Return dense float64 (cells × genes) raw count matrix.
+    Kept for backward-compat with CopyKAT/SCEVAN helpers that use float64.
+    Wraps _get_raw_counts_from_adata.
+    """
+    return _get_raw_counts_from_adata(adata).astype(np.float64)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -206,7 +260,26 @@ def _build_fullgene_adata_for_scm(adata, feature_tsv, tumor_h5ad_path=None):
         af.X = sp.csr_matrix(af.X)
         return af
 
-    # Route A-new
+    # Route A-new: use layers['counts'] from popv output (raw mode)
+    # This is now the FIRST priority since popv_annotation.py saves
+    # layers['counts'] with the original Module 1 raw counts (4000 HVGs).
+    # If that overlap is too low, fall through to rescue routes.
+    for lyr in ("counts", "raw_counts"):
+        if lyr in adata.layers:
+            ov = _pct(adata.var_names)
+            logger.info(
+                f"Route A-layer (layers['{lyr}']): {adata.n_vars} genes, {ov:.1f}% overlap"
+            )
+            if ov >= 50:
+                af = _make_adata(adata.layers[lyr], adata.obs, adata.var)
+                logger.info(f"scMalignantFinder → Route A-layer ({af.n_vars} genes).")
+                return af
+            logger.warning(
+                f"Route A-layer overlap {ov:.1f}% < 50% — trying full-gene routes."
+            )
+            break
+
+    # Route A-new: full_counts layer with var names in uns (36k genes)
     if "full_counts" in adata.layers:
         vn = adata.uns.get("full_counts_var_names")
         if vn is not None and len(vn) == adata.layers["full_counts"].shape[1]:
@@ -220,7 +293,7 @@ def _build_fullgene_adata_for_scm(adata, feature_tsv, tumor_h5ad_path=None):
         else:
             logger.warning("full_counts gene names mismatch — trying A-rescue.")
 
-    # Route A-rescue
+    # Route A-rescue: read from Module 1 tumor h5ad (always has full gene space)
     rescue = tumor_h5ad_path or _auto_tumor_h5ad()
     if rescue and os.path.exists(rescue):
         logger.info(f"Route A-rescue: {rescue}")
@@ -277,7 +350,7 @@ def _build_fullgene_adata_for_scm(adata, feature_tsv, tumor_h5ad_path=None):
                     logger.info(f"scMalignantFinder → Route B (layers['{lyr}']).")
                     return af
 
-    # Route C — last resort
+    # Route C — last resort (4000 HVGs from .X — already log-normalised by Step 3)
     ov_hvg = _pct(adata.var_names)
     logger.warning(
         f"All routes failed. Falling back to {adata.n_vars} HVGs ({ov_hvg:.1f}% overlap).\n"
@@ -296,19 +369,15 @@ def _find_rscript():
 
     Priority:
       1. dirname(sys.executable)/Rscript  ← MOST reliable in Jupyter kernels
-         sys.executable always points to the kernel's env, even when
-         CONDA_PREFIX points to a different (server) env.
       2. $CONDA_PREFIX/bin/Rscript        ← fallback; unreliable in Jupyter
       3. shutil.which("Rscript")          ← PATH fallback, last resort
     """
-    # 1. Same bin/ as the active Python interpreter — always correct in Jupyter
     py_bin = os.path.dirname(os.path.abspath(sys.executable))
     cand   = os.path.join(py_bin, "Rscript")
     if os.path.isfile(cand):
         logger.info(f"Rscript found via sys.executable dir: {cand}")
         return cand
 
-    # 2. CONDA_PREFIX — reliable only when launched from the correct env shell
     conda_prefix = os.environ.get("CONDA_PREFIX", "")
     if conda_prefix:
         cand = os.path.join(conda_prefix, "bin", "Rscript")
@@ -320,7 +389,6 @@ def _find_rscript():
             )
             return cand
 
-    # 3. PATH fallback
     cand = shutil.which("Rscript")
     if cand:
         logger.warning(f"Rscript found via PATH (may be wrong env): {cand}")
@@ -355,108 +423,118 @@ def _build_r_env(r_home):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# FIX 10 — CopyKAT subprocess runner
+# SCEVAN subprocess runner (replaces CopyKAT)
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _run_copykat(
+def _run_scevan(
     adata_query,
     adata_ref,
-    genome="hg20",
-    id_type="S",
-    ngene_chr=10,
-    win_size=50,
-    ks_cut=0.1,
-    distance="euclidean",
-    n_cores=2,
-    plot_genes=True,
-    output_seg=False,
-    ref_max_cells=100,
-    sam_name="copykat_run",
     ref_epithelial_key="cell_ontology_class",
     ref_epithelial_values=None,
+    ref_max_cells=100,
+    sample_name="SCEVAN_run",
+    organism="human",
+    par_cores=1,
+    subclones=False,
+    batch_size=3000,
+    save_dir=None,
 ):
     """
-    Run CopyKAT via a fresh Rscript subprocess (FIX 10).
+    Run SCEVAN via a fresh Rscript subprocess.
 
-    Rscript is resolved via sys.executable bin dir first, guaranteeing the
-    correct conda environment R is used even when CONDA_PREFIX is wrong.
+    Data flow (mirroring Input_SCEVAN.ipynb + SCEVAN.ipynb):
+      1. Python: extract raw counts from query epithelial + normal ref cells
+      2. Python: subset to common genes, combine, write genes×cells CSV
+      3. Python: write normal barcodes list
+      4. Python: write R driver script that runs pipelineCNA() in batches
+      5. Rscript subprocess: run driver, write per-batch CSV + scevan_full_results.csv
+      6. Python: read results, return per-cell prediction DataFrame
 
-    Data flow:
-      Python → numpy .npy + text files
-             → prep.R (builds R matrix RDS)
-             → run_copykat.R (runs copykat, writes prediction CSV)
-             → pandas DataFrame
+    Parameters
+    ----------
+    adata_query : AnnData
+        Epithelial query cells (from adata_epi after QC).
+        Raw counts must be recoverable via layers['counts'] / 'raw_counts'
+        or adata.raw.X.
+    adata_ref : AnnData
+        Tabula Sapiens (or user) reference h5ad — same file used in Module 2.
+    ref_epithelial_key : str
+        obs column in adata_ref containing cell type labels.
+    ref_epithelial_values : list of str
+        Labels in ref_epithelial_key to use as normal reference.
+    ref_max_cells : int
+        Max normal reference cells to subsample (FIX 2).
+    sample_name : str
+        Prefix for SCEVAN output files.
+    organism : str
+        'human' or 'mouse'.
+    par_cores : int
+        Cores per batch passed to pipelineCNA().
+    subclones : bool
+        Whether to infer subclones.
+    batch_size : int
+        Query cells per batch (default 3000, matching SCEVAN.ipynb).
+    save_dir : str or None
+        Directory to write intermediate files and results.
 
     Returns
     -------
-    pd.DataFrame  columns: barcode, copykat_prediction
-                  values:  "aneuploid" | "diploid" | "not.defined"
+    pd.DataFrame  columns: barcode, scevan_prediction
+                  values:  "tumor" | "normal" | "filtered" | "not.defined"
     """
     if ref_epithelial_values is None:
-        ref_epithelial_values = ["epithelial cell"]
+        ref_epithelial_values = ["epithelial cell", "glandular epithelial cell",
+                                 "ovarian surface epithelial cell"]
 
     q_barcodes   = np.array(adata_query.obs_names)
     empty_result = pd.DataFrame({
-        "barcode"            : list(q_barcodes),
-        "copykat_prediction" : "not.defined",
+        "barcode"           : list(q_barcodes),
+        "scevan_prediction" : "not.defined",
     })
 
-    # Locate Rscript via sys.executable first (FIX 10)
+    # Locate Rscript
     rscript_bin = _find_rscript()
     if rscript_bin is None:
-        logger.error("Rscript not found. CopyKAT skipped.")
+        logger.error("Rscript not found. SCEVAN skipped.")
         return empty_result
 
     r_home  = _get_r_home(rscript_bin)
     sub_env = _build_r_env(r_home)
 
-    # Verify copykat is installed in THIS R
+    # Verify SCEVAN is installed
     try:
         check = subprocess.run(
             [rscript_bin, "--vanilla", "-e",
-             "if (!requireNamespace('copykat', quietly=TRUE)) "
+             "if (!requireNamespace('SCEVAN', quietly=TRUE)) "
              "{ cat('NOT_INSTALLED'); quit(status=1) } else { cat('OK') }"],
             capture_output=True, text=True, env=sub_env,
         )
         if "NOT_INSTALLED" in check.stdout or check.returncode != 0:
             raise ImportError(
-                f"R package 'copykat' is not installed in the R used by:\n"
+                f"R package 'SCEVAN' is not installed in the R used by:\n"
                 f"  {rscript_bin}\n"
                 f"R home: {r_home}\n"
-                f"Install it:\n"
-                f"  {rscript_bin} -e \"devtools::install_github('navinlabcode/copykat')\""
+                f"Install it with:\n"
+                f"  {rscript_bin} -e \"devtools::install_github('miccec/yaGST')\"\n"
+                f"  {rscript_bin} -e \"devtools::install_github('AntonioDeFalco/SCEVAN')\""
             )
-        logger.info(f"copykat verified OK in {rscript_bin}")
+        logger.info(f"SCEVAN verified OK in {rscript_bin}")
     except ImportError:
         raise
     except Exception as exc:
-        logger.error(f"copykat verification failed: {exc}")
+        logger.error(f"SCEVAN verification failed: {exc}")
         return empty_result
 
-    # Locate bundled run_copykat.R
-    runner_script = _find_scart_resource("external/run_copykat.R")
-    if runner_script is None:
-        runner_script = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "external", "run_copykat.R"
-        )
-    if not os.path.isfile(runner_script):
-        raise FileNotFoundError(
-            f"CopyKAT runner script not found.\n"
-            f"Expected: SCART/external/run_copykat.R\n"
-            f"Checked:  {runner_script}"
-        )
-    logger.info(f"CopyKAT runner script: {runner_script}")
-
-    # FIX 2 — filter reference to normal epithelial cells and subsample
+    # ── FIX 2: filter reference to normal epithelial cells + subsample ────
     if ref_epithelial_key in adata_ref.obs.columns:
         ref_vals_lower = [v.lower() for v in ref_epithelial_values]
         ep_mask        = adata_ref.obs[ref_epithelial_key].str.lower().isin(ref_vals_lower)
         adata_ref_ep   = adata_ref[ep_mask].copy() if ep_mask.any() else adata_ref.copy()
-        logger.info(f"CopyKAT reference epithelial cells: {adata_ref_ep.n_obs}")
+        logger.info(f"SCEVAN reference epithelial cells before subsample: {adata_ref_ep.n_obs}")
     else:
         logger.warning(
-            f"ref_epithelial_key '{ref_epithelial_key}' not found. "
-            "Using full reference."
+            f"ref_epithelial_key '{ref_epithelial_key}' not in adata_ref.obs — "
+            "using full reference."
         )
         adata_ref_ep = adata_ref.copy()
 
@@ -464,16 +542,16 @@ def _run_copykat(
         rng = np.random.default_rng(seed=42)
         idx = rng.choice(adata_ref_ep.n_obs, size=ref_max_cells, replace=False)
         adata_ref_ep = adata_ref_ep[np.sort(idx)].copy()
-        logger.info(f"CopyKAT reference subsampled to {ref_max_cells} cells.")
+        logger.info(f"SCEVAN reference subsampled to {ref_max_cells} cells.")
 
     if adata_ref_ep.n_obs == 0:
-        logger.warning("CopyKAT: no reference cells after filtering. Skipping.")
+        logger.warning("SCEVAN: no reference cells after filtering. Skipping.")
         return empty_result
 
-    # Build combined genes × cells raw count matrix
-    logger.info("CopyKAT: extracting raw counts ...")
-    mat_query = _get_raw_matrix(adata_query).T
-    mat_ref   = _get_raw_matrix(adata_ref_ep).T
+    # ── Extract raw counts ────────────────────────────────────────────────
+    logger.info("SCEVAN: extracting raw counts from query and reference...")
+    mat_query = _get_raw_counts_from_adata(adata_query, "SCEVAN-query").T   # genes × cells
+    mat_ref   = _get_raw_counts_from_adata(adata_ref_ep, "SCEVAN-ref").T    # genes × cells
 
     q_genes = np.array(adata_query.var_names)
     r_genes = (
@@ -483,167 +561,232 @@ def _run_copykat(
     )
     if mat_ref.shape[0] != len(r_genes):
         r_genes = np.array(adata_ref_ep.var_names)
-        mat_ref = _get_raw_matrix(adata_ref_ep).T
+        mat_ref = _get_raw_counts_from_adata(adata_ref_ep, "SCEVAN-ref-retry").T
 
     common_genes = np.intersect1d(q_genes, r_genes)
-    logger.info(f"CopyKAT common genes: {len(common_genes)}")
+    logger.info(f"SCEVAN common genes: {len(common_genes)}")
 
     if len(common_genes) < 200:
         raise ValueError(
-            f"Only {len(common_genes)} common genes. Need >= 200. "
-            "Both datasets must use HGNC gene symbols."
+            f"Only {len(common_genes)} common genes between query and reference. "
+            "Need >= 200. Both datasets must use HGNC gene symbols."
         )
-    if len(common_genes) < 2000:
-        logger.warning(f"Only {len(common_genes)} common genes — CopyKAT prefers more.")
 
     q_idx = np.where(np.isin(q_genes, common_genes))[0]
     r_idx = np.where(np.isin(r_genes, common_genes))[0]
 
-    q_barcodes_sub = np.array(adata_query.obs_names)
-    r_barcodes_sub = np.array(["REF_" + b for b in adata_ref_ep.obs_names])
-    mat_combined   = np.hstack([mat_query[q_idx, :], mat_ref[r_idx, :]])
-    all_barcodes   = np.concatenate([q_barcodes_sub, r_barcodes_sub])
-    normal_cells   = r_barcodes_sub.tolist()
+    # Normal reference barcodes (prefixed so they are identifiable)
+    r_barcodes = np.array(["REF_" + b for b in adata_ref_ep.obs_names])
+    q_barcodes_arr = np.array(adata_query.obs_names)
+
+    # Combined genes × cells matrix (query + ref), matching Input_SCEVAN.ipynb
+    mat_combined = np.hstack([
+        mat_query[q_idx, :],
+        mat_ref[r_idx, :],
+    ])
+    all_barcodes = np.concatenate([q_barcodes_arr, r_barcodes])
 
     logger.info(
-        f"CopyKAT combined matrix: {mat_combined.shape[0]} genes × "
+        f"SCEVAN combined matrix: {mat_combined.shape[0]} genes × "
         f"{mat_combined.shape[1]} cells "
-        f"({len(q_barcodes_sub)} query + {len(r_barcodes_sub)} ref)"
+        f"({len(q_barcodes_arr)} query + {len(r_barcodes)} ref)"
     )
 
-    tmpdir = tempfile.mkdtemp(prefix="scart_copykat_")
+    if save_dir is None:
+        save_dir = tempfile.mkdtemp(prefix="scart_scevan_")
+        _tmpdir_created = True
+    else:
+        os.makedirs(save_dir, exist_ok=True)
+        _tmpdir_created = False
+
     try:
-        mat_path      = os.path.join(tmpdir, "matrix.npy")
-        genes_path    = os.path.join(tmpdir, "genes.txt")
-        barcodes_path = os.path.join(tmpdir, "barcodes.txt")
-        norm_path     = os.path.join(tmpdir, "norm_cells.txt")
-        rds_path      = os.path.join(tmpdir, "copykat_input.rds")
-        output_csv    = os.path.join(tmpdir, "copykat_pred.csv")
-        prep_r        = os.path.join(tmpdir, "prep.R")
+        counts_csv    = os.path.join(save_dir, "scevan_counts.csv")
+        norm_csv      = os.path.join(save_dir, "normal_barcodes.csv")
+        driver_r      = os.path.join(save_dir, "run_scevan.R")
+        results_csv   = os.path.join(save_dir, "scevan_full_results.csv")
+        malignant_csv = os.path.join(save_dir, "scevan_malignant_cells.csv")
 
-        n_genes = mat_combined.shape[0]
-        n_cells = mat_combined.shape[1]
+        # Write genes × cells count CSV (mirrors Input_SCEVAN.ipynb count_df)
+        logger.info(f"SCEVAN: writing count matrix ({mat_combined.shape}) ...")
+        count_df = pd.DataFrame(
+            mat_combined,
+            index=common_genes,
+            columns=all_barcodes,
+        )
+        count_df.to_csv(counts_csv)
+        logger.info(f"SCEVAN count matrix written: {counts_csv}")
 
-        np.save(mat_path, mat_combined.astype(np.float32))
-        np.savetxt(genes_path,    common_genes, fmt="%s")
-        np.savetxt(barcodes_path, all_barcodes, fmt="%s")
-        np.savetxt(norm_path,     normal_cells, fmt="%s")
+        # Write normal barcodes (mirrors normal_barcodes.csv in Input_SCEVAN.ipynb)
+        pd.Series(r_barcodes.tolist()).to_csv(norm_csv, index=False, header=False)
+        logger.info(f"SCEVAN normal barcodes written: {norm_csv} ({len(r_barcodes)} cells)")
 
-        # prep.R — reconstruct genes × cells matrix from numpy binary, save RDS
-        # numpy saves float32 C-order (row-major) with 128-byte header.
-        # byrow=TRUE in matrix() restores the genes × cells layout.
-        with open(prep_r, "w") as f:
+        # Write R driver script (mirrors SCEVAN.ipynb logic with batch processing)
+        subclones_r   = "TRUE"  if subclones   else "FALSE"
+        fixed_norm_r  = "TRUE"
+
+        with open(driver_r, "w") as f:
             f.write(f"""\
-genes      <- readLines("{genes_path}")
-barcodes   <- readLines("{barcodes_path}")
-norm_cells <- readLines("{norm_path}")
-n_genes <- {n_genes}
-n_cells <- {n_cells}
-raw_bytes  <- readBin("{mat_path}", what = "raw",
-                      n = file.info("{mat_path}")$size)
-data_bytes <- raw_bytes[-(1:128)]
-vals       <- readBin(data_bytes, what = "numeric",
-                      n = n_genes * n_cells, size = 4, endian = "little")
-r_mat <- matrix(vals, nrow = n_genes, ncol = n_cells, byrow = TRUE)
-rownames(r_mat) <- genes
-colnames(r_mat) <- barcodes
-saveRDS(list(mat = r_mat, norm_cells = norm_cells), "{rds_path}")
-cat("[prep.R] RDS saved — dims:", nrow(r_mat), "x", ncol(r_mat), "\\n")
+suppressPackageStartupMessages({{
+  library(SCEVAN)
+  library(Matrix)
+}})
+
+# ── Patch classifyTumorCells to use lapply instead of parLapply ─────────
+original_fn <- get("classifyTumorCells", envir = asNamespace("SCEVAN"))
+modified_fn <- original_fn
+body_text   <- deparse(body(original_fn))
+body_text   <- gsub("parallel::parLapply\\\\(cl,", "lapply(", body_text)
+body_text   <- gsub("parLapply\\\\(cl,", "lapply(", body_text)
+new_body    <- parse(text = paste(body_text, collapse = "\\n"))
+body(modified_fn) <- as.call(c(as.name("{{"), new_body))
+environment(modified_fn) <- asNamespace("SCEVAN")
+assignInNamespace("classifyTumorCells", modified_fn, "SCEVAN")
+
+# ── Load data ────────────────────────────────────────────────────────────
+cat("Loading count matrix...\\n")
+count_mat  <- read.csv("{counts_csv}", row.names = 1, check.names = FALSE)
+count_mat  <- as.matrix(count_mat)
+cat("Matrix dims:", nrow(count_mat), "genes x", ncol(count_mat), "cells\\n")
+
+normal_cells <- readLines("{norm_csv}")
+cat("Normal reference cells:", length(normal_cells), "\\n")
+
+# ── Batch setup (mirrors SCEVAN.ipynb) ───────────────────────────────────
+query_cells <- setdiff(colnames(count_mat), normal_cells)
+batch_size  <- {batch_size}
+batches     <- split(query_cells, ceiling(seq_along(query_cells) / batch_size))
+all_results <- list()
+
+cat("Total query cells  :", length(query_cells), "\\n")
+cat("Batch size         :", batch_size, "\\n")
+cat("Total batches      :", length(batches), "\\n")
+
+for (i in seq_along(batches)) {{
+  save_file <- file.path("{save_dir}", paste0("scevan_batch_", i, "_results.csv"))
+
+  if (file.exists(save_file)) {{
+    cat("Batch", i, "already done — loading from file\\n")
+    all_results[[i]] <- read.csv(save_file, row.names = 1, check.names = FALSE)
+    next
+  }}
+
+  cat("\\n--- Batch", i, "of", length(batches),
+      "| Started:", format(Sys.time()), "---\\n")
+
+  batch_cells     <- c(normal_cells, batches[[i]])
+  count_mat_batch <- count_mat[, batch_cells]
+
+  tryCatch({{
+    res <- pipelineCNA(
+      count_mtx          = count_mat_batch,
+      norm_cell          = normal_cells,
+      sample             = paste0("{sample_name}_batch_", i),
+      par_cores          = {par_cores},
+      SUBCLONES          = {subclones_r},
+      FIXED_NORMAL_CELLS = {fixed_norm_r},
+      organism           = "{organism}"
+    )
+
+    # Keep only query cells (exclude normal ref rows)
+    res_query <- res[rownames(res) %in% batches[[i]], , drop = FALSE]
+
+    write.csv(res_query, save_file)
+    all_results[[i]] <- res_query
+
+    cat("Batch", i, "done |",
+        nrow(res_query), "cells |",
+        sum(res_query$class == "tumor"), "tumor |",
+        "Finished:", format(Sys.time()), "\\n")
+
+  }}, error = function(e) {{
+    cat("Batch", i, "failed:", conditionMessage(e), "\\n")
+  }})
+
+  gc()
+}}
+
+# ── Combine all batches ───────────────────────────────────────────────────
+cat("\\nCombining all batches...\\n")
+final_results <- do.call(rbind, Filter(Negate(is.null), all_results))
+
+cat("\\n=== Final Results ===\\n")
+print(table(final_results$class))
+cat("Total classified:", nrow(final_results), "\\n")
+
+write.csv(final_results, "{results_csv}")
+write.csv(
+  data.frame(cell = rownames(final_results[final_results$class == "tumor", ])),
+  "{malignant_csv}",
+  row.names = FALSE
+)
+cat("Done!\\n")
 """)
 
-        logger.info("CopyKAT: building RDS via prep.R ...")
-        prep_result = subprocess.run(
-            [rscript_bin, "--vanilla", prep_r],
-            capture_output=True, text=True, env=sub_env,
-        )
-        for line in prep_result.stdout.strip().splitlines():
-            logger.info(f"[prep.R] {line}")
-        for line in prep_result.stderr.strip().splitlines():
-            logger.debug(f"[prep.R stderr] {line}")
-        if prep_result.returncode != 0:
-            logger.error(f"prep.R failed.\n" + prep_result.stderr[-2000:])
-            return empty_result
-        if not os.path.exists(rds_path):
-            logger.error("prep.R completed but RDS not created.")
-            return empty_result
-        logger.info("CopyKAT: RDS ready.")
+        logger.info(f"SCEVAN driver script written: {driver_r}")
+        logger.info("SCEVAN: launching Rscript (this may take ~15-20 min per batch)...")
 
-        cmd = [
-            rscript_bin, "--vanilla", runner_script,
-            rds_path, output_csv, sam_name, genome, id_type,
-            str(ngene_chr), str(win_size), str(ks_cut), distance,
-            str(n_cores), str(plot_genes).upper(), str(output_seg).upper(),
-        ]
-        logger.info("CopyKAT: launching run_copykat.R ...")
         run_result = subprocess.run(
-            cmd, capture_output=True, text=True, env=sub_env, cwd=tmpdir,
+            [rscript_bin, "--vanilla", driver_r],
+            capture_output=True, text=True, env=sub_env, cwd=save_dir,
         )
         for line in run_result.stdout.strip().splitlines():
-            logger.info(f"[run_copykat.R] {line}")
+            logger.info(f"[SCEVAN] {line}")
         for line in run_result.stderr.strip().splitlines():
-            logger.debug(f"[run_copykat.R stderr] {line}")
+            logger.debug(f"[SCEVAN stderr] {line}")
+
         if run_result.returncode != 0:
             logger.error(
-                f"run_copykat.R exited {run_result.returncode}.\n"
-                + "\n".join(run_result.stderr.strip().splitlines()[-30:])
+                f"SCEVAN Rscript exited {run_result.returncode}.\n"
+                + "\n".join(run_result.stderr.strip().splitlines()[-40:])
             )
             return empty_result
 
-        if not os.path.exists(output_csv):
-            logger.error(f"run_copykat.R completed but CSV not found: {output_csv}")
+        if not os.path.exists(results_csv):
+            logger.error(f"SCEVAN completed but results CSV not found: {results_csv}")
             return empty_result
 
-        pred_df = pd.read_csv(output_csv)
-        logger.info(f"CopyKAT raw prediction columns: {list(pred_df.columns)}")
+        # ── Parse results ─────────────────────────────────────────────────
+        pred_df = pd.read_csv(results_csv, index_col=0)
+        logger.info(f"SCEVAN results columns: {list(pred_df.columns)}")
 
-        if "cell.names" in pred_df.columns:
-            barcode_col = "cell.names"
-        elif "barcodes" in pred_df.columns:
-            barcode_col = "barcodes"
-        else:
-            pred_df     = pred_df.reset_index()
-            barcode_col = pred_df.columns[0]
+        # 'class' column contains 'tumor' / 'normal' / 'filtered'
+        class_col = "class" if "class" in pred_df.columns else pred_df.columns[0]
 
-        pred_col = (
-            "copykat.pred" if "copykat.pred" in pred_df.columns
-            else pred_df.columns[-1]
-        )
-
-        pred_df = pred_df[
-            ~pred_df[barcode_col].astype(str).str.startswith("REF_")
-        ].copy()
-        pred_df = pred_df.rename(columns={
-            barcode_col : "barcode",
-            pred_col    : "copykat_prediction",
-        })[["barcode", "copykat_prediction"]]
-        pred_df["copykat_prediction"] = (
-            pred_df["copykat_prediction"]
+        pred_df = pred_df.reset_index().rename(columns={"index": "barcode"})
+        pred_df = pred_df[~pred_df["barcode"].astype(str).str.startswith("REF_")]
+        pred_df = pred_df.rename(columns={class_col: "scevan_prediction"})[
+            ["barcode", "scevan_prediction"]
+        ]
+        pred_df["scevan_prediction"] = (
+            pred_df["scevan_prediction"]
             .astype(str).str.strip().str.lower()
             .replace("nan", "not.defined")
             .fillna("not.defined")
         )
 
-        result_full = pd.DataFrame({"barcode": list(q_barcodes)})
+        # Left-join to ensure all query cells are represented
+        result_full = pd.DataFrame({"barcode": list(q_barcodes_arr)})
         result_full = result_full.merge(pred_df, on="barcode", how="left")
-        result_full["copykat_prediction"] = (
-            result_full["copykat_prediction"].fillna("not.defined")
+        result_full["scevan_prediction"] = (
+            result_full["scevan_prediction"].fillna("not.defined")
         )
 
         logger.info(
-            "CopyKAT predictions:\n"
-            + result_full["copykat_prediction"].value_counts().to_string()
+            "SCEVAN predictions:\n"
+            + result_full["scevan_prediction"].value_counts().to_string()
         )
         return result_full
 
     except Exception as exc:
-        logger.error(f"CopyKAT subprocess runner failed: {exc}")
+        logger.error(f"SCEVAN subprocess runner failed: {exc}")
         logger.exception("Full traceback:")
         return empty_result
     finally:
-        try:
-            shutil.rmtree(tmpdir)
-        except Exception:
-            pass
+        if _tmpdir_created:
+            try:
+                shutil.rmtree(save_dir)
+            except Exception:
+                pass
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -661,19 +804,15 @@ def run_preprocessing_pipeline(
     scmalignant_model_dir=None,
     surfaceome_path=None,
     malignant_strategy="intersection",
-    copykat_genome="hg20",
-    copykat_id_type="S",
-    copykat_ngene_chr=10,
-    copykat_win_size=50,
-    copykat_ks_cut=0.1,
-    copykat_distance="euclidean",
-    copykat_n_cores=2,
-    copykat_plot_genes=True,
-    copykat_output_seg=False,
-    copykat_ref_max_cells=100,
-    copykat_sam_name="copykat_run",
-    copykat_ref_epithelial_key="cell_ontology_class",
-    copykat_ref_epithelial_values=None,
+    # SCEVAN parameters (replaces CopyKAT)
+    scevan_ref_epithelial_key="cell_ontology_class",
+    scevan_ref_epithelial_values=None,
+    scevan_ref_max_cells=100,
+    scevan_sample_name="SCEVAN_run",
+    scevan_organism="human",
+    scevan_par_cores=1,
+    scevan_subclones=False,
+    scevan_batch_size=3000,
 ):
     """
     Full preprocessing pipeline — see module docstring for details.
@@ -681,13 +820,29 @@ def run_preprocessing_pipeline(
     QC thresholds (min_genes, max_mt) are read from adata.uns['qc_params']
     written by Module 1.  If absent, QC is skipped entirely.
 
-    malignant_strategy: 'intersection' | 'scMalignant' | 'copykat'
+    Raw counts handling:
+      - If PopV was run with input_type='raw', layers['counts'] is present
+        in final_popv_annotated.h5ad and is used automatically.
+      - If PopV was run with input_type='log1p', layers['counts'] is absent.
+        _get_raw_counts_from_adata() will fall through to adata.raw or .X
+        (with a warning), and scMalignantFinder will use Route A-rescue
+        (Module 1 tumor h5ad) for full-gene raw counts.
+      - SCEVAN always needs raw integer counts; if only log1p data is
+        available, the pipeline prints a warning and SCEVAN may produce
+        unreliable CNV calls.
 
-    CopyKAT runs via subprocess (FIX 10) using the Rscript found in
-    dirname(sys.executable) — the correct env in Jupyter kernels.
+    malignant_strategy: 'intersection' | 'scMalignant' | 'scevan'
+
+    SCEVAN runs via Rscript subprocess using the same logic as SCEVAN.ipynb
+    (batched pipelineCNA calls with normal reference cells included in each
+    batch, classifyTumorCells patched to use lapply instead of parLapply).
     """
-    if copykat_ref_epithelial_values is None:
-        copykat_ref_epithelial_values = ["epithelial cell"]
+    if scevan_ref_epithelial_values is None:
+        scevan_ref_epithelial_values = [
+            "epithelial cell",
+            "glandular epithelial cell",
+            "ovarian surface epithelial cell",
+        ]
 
     print("\n========== START ==========\n")
 
@@ -722,6 +877,23 @@ def run_preprocessing_pipeline(
     adata_full = adata.copy()
     print(f"Full dataset loaded: {adata_full.n_obs} cells × {adata_full.n_vars} genes")
 
+    # Report what raw count source is available
+    _raw_layers_present = [
+        l for l in ("counts", "raw_counts", "scvi_counts")
+        if l in adata_full.layers
+    ]
+    if _raw_layers_present:
+        print(f"Raw count layers available: {_raw_layers_present} "
+              f"(PopV was run with input_type='raw')")
+    else:
+        print(
+            "WARNING: No raw count layers found in PopV output.\n"
+            "  PopV was likely run with input_type='log1p'.\n"
+            "  Steps requiring raw counts (QC, SCEVAN, scMalignantFinder)\n"
+            "  will attempt Route A-rescue from the Module 1 tumor h5ad.\n"
+            f"  Provide tumor_h5ad= explicitly or place GSE*_tumor.h5ad in cwd."
+        )
+
     # STEP 2 — Read QC thresholds
     min_genes, max_mt, qc_active, qc_source = _read_qc_params(adata_full)
 
@@ -738,9 +910,20 @@ def run_preprocessing_pipeline(
     before_qc = adata_epi.n_obs
 
     if qc_active:
+        # QC requires raw counts: try layers['counts'] first, fall back to .X
+        # Note: sc.pp.calculate_qc_metrics uses .X, so we temporarily set
+        # .X to raw counts for accurate n_genes_by_counts / pct_counts_mt.
+        _raw_for_qc = _get_raw_counts_from_adata(adata_epi, "QC")
+        _X_backup   = adata_epi.X.copy()
+        adata_epi.X = sp.csr_matrix(_raw_for_qc)
+
         adata_epi.var["mt"] = adata_epi.var_names.str.startswith("MT-")
         sc.pp.calculate_qc_metrics(adata_epi, qc_vars=["mt"], inplace=True)
         print(f"Mean MT% BEFORE QC: {adata_epi.obs['pct_counts_mt'].mean():.2f}")
+
+        # Restore .X after metrics are computed
+        adata_epi.X = _X_backup
+
         filters = np.ones(adata_epi.n_obs, dtype=bool)
         if min_genes is not None:
             filters &= adata_epi.obs["n_genes_by_counts"] > min_genes
@@ -757,21 +940,16 @@ def run_preprocessing_pipeline(
     else:
         print(f"QC filtering SKIPPED — all {adata_epi.n_obs} epithelial cells proceed.\n")
 
-    print("Detecting raw count source for epithelial cells...")
-    for lyr in ("scvi_counts", "raw_counts", "counts"):
-        if lyr in adata_epi.layers:
-            print(f"  Using layers['{lyr}'] as raw counts.")
-            adata_epi.X = adata_epi.layers[lyr].copy()
-            break
-    else:
-        if adata_epi.raw is not None:
-            print("  Using adata.raw.X as raw counts.")
-            adata_epi.X = adata_epi.raw.X.copy()
-        else:
-            print("  No raw layer — assuming .X is raw counts.")
-
-    adata_epi.var_names_make_unique()
+    # Set .X to raw counts for downstream tools that need them (SCEVAN, scMalignantFinder)
+    # layers['raw_for_cna'] stores integer counts before normalisation.
+    print("Setting up raw counts for epithelial cells...")
+    _raw_epi = _get_raw_counts_from_adata(adata_epi, "epithelial-raw-setup")
+    adata_epi.X                  = sp.csr_matrix(_raw_epi)
     adata_epi.layers["raw_for_cna"] = adata_epi.X.copy()
+    print(f"  layers['raw_for_cna'] stored ({adata_epi.n_obs} × {adata_epi.n_vars})")
+
+    # Now normalise .X for scMalignantFinder (Route C fallback uses log1p .X)
+    adata_epi.var_names_make_unique()
     sc.pp.normalize_total(adata_epi, target_sum=1e4)
     sc.pp.log1p(adata_epi)
 
@@ -779,7 +957,12 @@ def run_preprocessing_pipeline(
     print("\n--- Step 4a: scMalignantFinder ---")
     feature_tsv = os.path.join(scmalignant_model_dir, "ordered_feature.tsv")
 
-    if "full_counts" in adata_epi.layers and adata_epi.uns.get("full_counts_var_names"):
+    # Report which gene-space route will be used
+    _raw_layers_epi = [l for l in ("counts", "raw_counts") if l in adata_epi.layers]
+    if _raw_layers_epi:
+        print(f"Gene-space: Route A-layer (layers['{_raw_layers_epi[0]}'], "
+              f"{adata_epi.n_vars} HVGs)")
+    elif "full_counts" in adata_epi.layers and adata_epi.uns.get("full_counts_var_names"):
         print(f"Gene-space: Route A-new ({len(adata_epi.uns['full_counts_var_names'])} genes)")
     else:
         rescue = tumor_h5ad or _auto_tumor_h5ad()
@@ -788,7 +971,7 @@ def run_preprocessing_pipeline(
         elif adata_epi.raw is not None:
             print(f"Gene-space: Route A-old (adata.raw, {adata_epi.raw.n_vars} genes)")
         else:
-            print("Gene-space: Route C (4000-HVG fallback)")
+            print("Gene-space: Route C (4000-HVG fallback — low overlap expected)")
 
     adata_scm = _build_fullgene_adata_for_scm(adata_epi, feature_tsv, tumor_h5ad)
     print(f"  Gene space used: {adata_scm.n_vars} genes")
@@ -835,7 +1018,6 @@ def run_preprocessing_pipeline(
             if _inserted and _scm_external_dir in sys.path:
                 sys.path.remove(_scm_external_dir)
 
-    # pretrain_dir = directory with model.joblib + ordered_feature.tsv
     # norm_type=False: adata_scm already log-normalised by _build_fullgene_adata_for_scm
     model = _clf_mod.scMalignantFinder(
         test_input          = adata_scm,
@@ -863,91 +1045,101 @@ def run_preprocessing_pipeline(
     print("scMalignantFinder completed:")
     print(adata_epi.obs[scm_col].value_counts().to_string())
 
-    # STEP 4b — CopyKAT (subprocess, FIX 10)
-    copykat_available = False
-    copykat_result_df = None
+    # STEP 4b — SCEVAN (replaces CopyKAT)
+    scevan_available  = False
+    scevan_result_df  = None
 
-    if malignant_strategy in ("copykat", "intersection"):
+    if malignant_strategy in ("scevan", "intersection"):
         if reference_h5ad is None:
-            print("\nWarning: CopyKAT skipped — no reference_h5ad provided.\n"
-                  "  Falling back to scMalignantFinder only.")
+            print(
+                "\nWarning: SCEVAN skipped — no reference_h5ad provided.\n"
+                "  Falling back to scMalignantFinder only.\n"
+                "  Pass reference_h5ad= to enable SCEVAN."
+            )
             malignant_strategy = "scMalignant"
         else:
             _rs = _find_rscript()
             _rh = _get_r_home(_rs) if _rs else "NOT FOUND"
             print(
-                f"\n--- Step 4b: CopyKAT (subprocess) ---\n"
-                f"  Reference:           {reference_h5ad}\n"
-                f"  Genome:              {copykat_genome}\n"
-                f"  id.type:             {copykat_id_type}\n"
-                f"  ngene.chr:           {copykat_ngene_chr}\n"
-                f"  win.size:            {copykat_win_size}\n"
-                f"  KS.cut:              {copykat_ks_cut}\n"
-                f"  distance:            {copykat_distance}\n"
-                f"  n.cores:             {copykat_n_cores}\n"
-                f"  plot.genes:          {copykat_plot_genes}\n"
-                f"  output.seg:          {copykat_output_seg}\n"
-                f"  ref_max_cells:       {copykat_ref_max_cells}\n"
-                f"  sam_name:            {copykat_sam_name}\n"
-                f"  ref_epithelial_key:  {copykat_ref_epithelial_key}\n"
-                f"  ref_epithelial_vals: {copykat_ref_epithelial_values}\n"
-                f"  Rscript:             {_rs}\n"
-                f"  R home:              {_rh}"
+                f"\n--- Step 4b: SCEVAN (subprocess) ---\n"
+                f"  Reference h5ad:       {reference_h5ad}\n"
+                f"  ref_epithelial_key:   {scevan_ref_epithelial_key}\n"
+                f"  ref_epithelial_vals:  {scevan_ref_epithelial_values}\n"
+                f"  ref_max_cells:        {scevan_ref_max_cells}\n"
+                f"  sample_name:          {scevan_sample_name}\n"
+                f"  organism:             {scevan_organism}\n"
+                f"  par_cores:            {scevan_par_cores}\n"
+                f"  subclones:            {scevan_subclones}\n"
+                f"  batch_size:           {scevan_batch_size}\n"
+                f"  Rscript:              {_rs}\n"
+                f"  R home:               {_rh}"
             )
 
+            # Warn if raw counts may not be available for SCEVAN
+            if not _raw_layers_present:
+                print(
+                    "\n  WARNING: No raw count layers in PopV output "
+                    "(input_type='log1p' path).\n"
+                    "  SCEVAN requires integer raw counts for reliable CNV inference.\n"
+                    "  The pipeline will attempt to use adata.raw or adata.X — "
+                    "results may be unreliable."
+                )
+
             try:
+                # Use raw counts for SCEVAN (layers['raw_for_cna'] = integer counts)
                 adata_raw_cna   = adata_epi.copy()
                 adata_raw_cna.X = adata_epi.layers["raw_for_cna"]
                 adata_ref_full  = sc.read_h5ad(reference_h5ad)
 
-                copykat_result_df = _run_copykat(
-                    adata_query           = adata_raw_cna,
-                    adata_ref             = adata_ref_full,
-                    genome                = copykat_genome,
-                    id_type               = copykat_id_type,
-                    ngene_chr             = copykat_ngene_chr,
-                    win_size              = copykat_win_size,
-                    ks_cut                = copykat_ks_cut,
-                    distance              = copykat_distance,
-                    n_cores               = copykat_n_cores,
-                    plot_genes            = copykat_plot_genes,
-                    output_seg            = copykat_output_seg,
-                    ref_max_cells         = copykat_ref_max_cells,
-                    sam_name              = copykat_sam_name,
-                    ref_epithelial_key    = copykat_ref_epithelial_key,
-                    ref_epithelial_values = copykat_ref_epithelial_values,
+                # SCEVAN intermediate files go into save_dir/scevan/
+                scevan_work_dir = os.path.join(save_dir, "scevan")
+                os.makedirs(scevan_work_dir, exist_ok=True)
+
+                scevan_result_df = _run_scevan(
+                    adata_query             = adata_raw_cna,
+                    adata_ref               = adata_ref_full,
+                    ref_epithelial_key      = scevan_ref_epithelial_key,
+                    ref_epithelial_values   = scevan_ref_epithelial_values,
+                    ref_max_cells           = scevan_ref_max_cells,
+                    sample_name             = scevan_sample_name,
+                    organism                = scevan_organism,
+                    par_cores               = scevan_par_cores,
+                    subclones               = scevan_subclones,
+                    batch_size              = scevan_batch_size,
+                    save_dir                = scevan_work_dir,
                 )
 
                 bc_to_pred = dict(zip(
-                    copykat_result_df["barcode"],
-                    copykat_result_df["copykat_prediction"],
+                    scevan_result_df["barcode"],
+                    scevan_result_df["scevan_prediction"],
                 ))
-                adata_epi.obs["copykat_prediction"] = [
+                adata_epi.obs["scevan_prediction"] = [
                     bc_to_pred.get(b, "not.defined") for b in adata_epi.obs_names
                 ]
-                copykat_available = True
-                print("\nCopyKAT completed.")
+                scevan_available = True
+                print("\nSCEVAN completed.")
                 print("  Prediction counts:")
-                print(adata_epi.obs["copykat_prediction"].value_counts().to_string())
+                print(adata_epi.obs["scevan_prediction"].value_counts().to_string())
 
             except Exception as exc:
-                print(f"\nWarning: CopyKAT failed — {type(exc).__name__}: {exc}\n"
+                print(f"\nWarning: SCEVAN failed — {type(exc).__name__}: {exc}\n"
                       "  Falling back to scMalignantFinder only.")
-                logger.exception("CopyKAT error:")
+                logger.exception("SCEVAN error:")
                 malignant_strategy = "scMalignant"
 
     # STEP 4c — Combine malignancy calls
     print("\n--- Step 4c: Combine malignancy calls ---")
     scm_mal = adata_epi.obs[scm_col].str.lower() == "malignant"
 
-    if copykat_available:
-        ck_mal = adata_epi.obs["copykat_prediction"].str.lower() == "aneuploid"
+    if scevan_available:
+        # SCEVAN labels tumor cells as "tumor"
+        sv_mal = adata_epi.obs["scevan_prediction"].str.lower() == "tumor"
         if malignant_strategy == "intersection":
-            malignant_mask = scm_mal & ck_mal
-            strategy_label = "intersection (scMalignantFinder AND CopyKAT)"
-        elif malignant_strategy == "copykat":
-            malignant_mask = ck_mal
-            strategy_label = "CopyKAT only"
+            malignant_mask = scm_mal & sv_mal
+            strategy_label = "intersection (scMalignantFinder AND SCEVAN)"
+        elif malignant_strategy == "scevan":
+            malignant_mask = sv_mal
+            strategy_label = "SCEVAN only"
         else:
             malignant_mask = scm_mal
             strategy_label = "scMalignantFinder only"
@@ -980,13 +1172,9 @@ def run_preprocessing_pipeline(
     adata_rest = adata_full[rest_mask].copy()
     print(f"Non-epithelial 'rest' cells: {adata_rest.n_obs}")
 
-    for lyr in ("scvi_counts", "raw_counts", "counts"):
-        if lyr in adata_rest.layers:
-            adata_rest.X = adata_rest.layers[lyr].copy()
-            break
-    else:
-        if adata_rest.raw is not None:
-            adata_rest.X = adata_rest.raw.X.copy()
+    # Set .X to raw counts then normalise for DEG
+    _raw_rest = _get_raw_counts_from_adata(adata_rest, "rest-group")
+    adata_rest.X = sp.csr_matrix(_raw_rest)
     sc.pp.normalize_total(adata_rest, target_sum=1e4)
     sc.pp.log1p(adata_rest)
 
@@ -1083,22 +1271,23 @@ def run_preprocessing_pipeline(
         {"min_genes": min_genes, "max_mt": max_mt} if qc_active else None
     )
 
-    if copykat_result_df is not None:
+    # FIX 8 — store SCEVAN results in full detail
+    if scevan_result_df is not None:
         final_barcodes = set(adata_mal.obs_names)
-        copykat_stored = copykat_result_df.copy()
-        copykat_stored["in_final_output"] = copykat_stored["barcode"].isin(final_barcodes)
-        adata_mal.uns["copykat_results"] = copykat_stored
+        scevan_stored  = scevan_result_df.copy()
+        scevan_stored["in_final_output"] = scevan_stored["barcode"].isin(final_barcodes)
+        adata_mal.uns["scevan_results"] = scevan_stored
         print(
-            f"\nCopyKAT results stored in adata.uns['copykat_results']:\n"
-            f"  Shape: {copykat_stored.shape[0]} rows × {copykat_stored.shape[1]} columns\n"
-            f"  Columns: {list(copykat_stored.columns)}\n"
+            f"\nSCEVAN results stored in adata.uns['scevan_results']:\n"
+            f"  Shape: {scevan_stored.shape[0]} rows × {scevan_stored.shape[1]} columns\n"
+            f"  Columns: {list(scevan_stored.columns)}\n"
             f"  Prediction summary:\n"
-            + copykat_stored["copykat_prediction"].value_counts().to_string()
-            + f"\n  Cells in final output: {copykat_stored['in_final_output'].sum()}"
+            + scevan_stored["scevan_prediction"].value_counts().to_string()
+            + f"\n  Cells in final output: {scevan_stored['in_final_output'].sum()}"
         )
     else:
-        adata_mal.uns["copykat_results"] = None
-        print("\nCopyKAT was not run — adata.uns['copykat_results'] = None")
+        adata_mal.uns["scevan_results"] = None
+        print("\nSCEVAN was not run — adata.uns['scevan_results'] = None")
 
     for col in adata_mal.obs.columns:
         if adata_mal.obs[col].dtype == object:
