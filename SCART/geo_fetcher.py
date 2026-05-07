@@ -65,25 +65,62 @@ class SampleAnnotator:
         in Module 3.  Stored alongside ``min_genes`` in
         ``adata.uns['qc_params']``.
         If not provided (default: None), the QC step is skipped in Module 3.
+    manual_annotation_col : str or None, optional
+        ONLY relevant when providing your own .h5ad file (not a GEO ID).
 
-    Usage
+        Name of the column in adata.obs that contains your cell-type
+        annotations.  When provided, Module 2 (PopV) is skipped entirely
+        and your annotations are used directly in Module 3 (preprocessing).
+
+        Requirements for the annotation column
+        ---------------------------------------
+        - Must exist in adata.obs of every h5ad file you pass.
+        - Must contain string cell-type labels for every cell.
+        - The column that identifies epithelial cells used by Module 3
+          must contain labels ending with the phrase "epithelial cell"
+          (case-insensitive).  Examples of valid epithelial labels:
+              "epithelial cell"
+              "glandular epithelial cell"
+              "ovarian surface epithelial cell"
+          Non-epithelial cells (all other labels) are used as the
+          comparison "rest" group in the DEG step.
+        - The column value is copied into a new column called
+          "popv_majority_vote_prediction" so that Module 3 can find it
+          without any changes to the downstream pipeline.
+
+        What is stored in the h5ad
+        --------------------------
+        adata.uns['manual_annotation_col'] = <your column name>
+            Tells downstream modules that PopV was skipped and which
+            obs column holds the cell-type labels.
+        adata.uns['skip_popv'] = True
+            Explicit flag so Module 2 auto_run_popv() can detect and
+            skip the PopV pipeline automatically.
+
+        Usage example
+        -------------
+        annotator = SampleAnnotator(
+            "my_data.h5ad",
+            manual_annotation_col="cell_type",   # your obs column name
+            min_genes=200,
+            max_mt=40,
+        )
+
+        If not provided (default: None), PopV runs normally on the h5ad.
+
+    Notes
     -----
-    # QC disabled entirely (default) — Module 3 will skip QC filtering
-    annotator = SampleAnnotator("GSE158937")
-
-    # Both QC thresholds set
-    annotator = SampleAnnotator("GSE158937", min_genes=200, max_mt=40)
-
-    # Only gene count threshold
-    annotator = SampleAnnotator("GSE158937", min_genes=300)
-
-    # Only MT threshold
-    annotator = SampleAnnotator("GSE158937", max_mt=25)
-
-    normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = annotator.run()
+    GEO ID inputs always run the full PopV pipeline regardless of
+    manual_annotation_col — the parameter is silently ignored for GEO IDs.
     """
 
-    def __init__(self, *inputs, min_genes: int = None, max_mt: float = None):
+    def __init__(
+        self,
+        *inputs,
+        min_genes: int = None,
+        max_mt: float = None,
+        manual_annotation_col: str = None,
+    ):
 
         self.inputs    = list(inputs)
         self.base_dir  = "GSE_data"
@@ -91,6 +128,9 @@ class SampleAnnotator:
         # ── QC parameters: None means "user did not set this → skip QC" ───
         self.min_genes = min_genes
         self.max_mt    = max_mt
+
+        # ── Manual annotation: only used when h5ad files are provided ──────
+        self.manual_annotation_col = manual_annotation_col
 
         os.makedirs(self.base_dir, exist_ok=True)
 
@@ -125,13 +165,98 @@ class SampleAnnotator:
             "max_mt":    self.max_mt,
         }
 
+    def _store_manual_annotation(self, adata, source_file: str):
+        """
+        Validate and store manual annotation metadata when the user has
+        supplied manual_annotation_col.
+
+        What this does
+        --------------
+        1. Checks the column exists in adata.obs — raises ValueError if not.
+        2. Copies the column into 'popv_majority_vote_prediction' so that
+           Module 3 (preprocessing.py) can find it without any code changes.
+           If 'popv_majority_vote_prediction' already exists it is overwritten
+           and a warning is printed.
+        3. Stores adata.uns['manual_annotation_col'] = column name so any
+           downstream module can know which original column was used.
+        4. Stores adata.uns['skip_popv'] = True so Module 2
+           (auto_run_popv) can detect and skip the PopV pipeline.
+        5. Prints a summary of unique labels found in the column so the
+           user can verify their annotation is being read correctly.
+
+        Parameters
+        ----------
+        adata       : AnnData object loaded from the user-supplied h5ad.
+        source_file : path string used only for error messages.
+        """
+        col = self.manual_annotation_col
+
+        # ── 1. Validate column exists ────────────────────────────────────
+        if col not in adata.obs.columns:
+            available = list(adata.obs.columns)
+            raise ValueError(
+                f"\nmanual_annotation_col='{col}' not found in adata.obs "
+                f"of '{source_file}'.\n"
+                f"Available obs columns: {available}\n\n"
+                "Please check the column name and try again.\n"
+                "See the README section 'Manual annotation requirements' "
+                "for full details."
+            )
+
+        # ── 2. Copy into popv_majority_vote_prediction ───────────────────
+        if "popv_majority_vote_prediction" in adata.obs.columns:
+            print(
+                f"  WARNING: 'popv_majority_vote_prediction' already exists "
+                f"in adata.obs — overwriting with values from '{col}'."
+            )
+        adata.obs["popv_majority_vote_prediction"] = (
+            adata.obs[col].astype(str)
+        )
+
+        # ── 3 & 4. Store metadata flags ──────────────────────────────────
+        adata.uns["manual_annotation_col"] = col
+        adata.uns["skip_popv"]             = True
+
+        # ── 5. Print label summary for user verification ─────────────────
+        unique_labels = sorted(adata.obs["popv_majority_vote_prediction"].unique())
+        epithelial    = [l for l in unique_labels
+                         if "epithelial cell" in l.lower()]
+        non_epithelial = [l for l in unique_labels
+                          if "epithelial cell" not in l.lower()]
+
+        print(f"\n  Manual annotation column : '{col}'")
+        print(f"  Copied to               : 'popv_majority_vote_prediction'")
+        print(f"  Total unique labels     : {len(unique_labels)}")
+        print(f"  Epithelial labels found : {epithelial if epithelial else 'NONE — check your label names!'}")
+        print(f"  Non-epithelial labels   : {non_epithelial}")
+        print( "  PopV will be SKIPPED for this file (adata.uns['skip_popv'] = True)")
+
+        if not epithelial:
+            print(
+                "\n  ⚠ WARNING: No epithelial labels detected.\n"
+                "  Module 3 identifies epithelial cells by matching labels that\n"
+                "  END WITH 'epithelial cell' (case-insensitive), for example:\n"
+                "    'epithelial cell'\n"
+                "    'glandular epithelial cell'\n"
+                "    'ovarian surface epithelial cell'\n"
+                f"  Your labels in '{col}' do not match this pattern.\n"
+                "  Module 3 will find 0 epithelial cells and may fail.\n"
+                "  Please rename your epithelial label(s) to end with "
+                "'epithelial cell'."
+            )
+
     def _print_reference_guidance(self, cancer_type):
 
         print("\n========== REFERENCE GUIDANCE ==========")
 
         if self.h5ad_inputs:
-            print("👉 You provided your own h5ad file.")
-            print("👉 Please provide your own reference file for PopV.")
+            if self.manual_annotation_col:
+                print("👉 You provided your own h5ad file WITH manual annotations.")
+                print("👉 PopV (Module 2) will be SKIPPED automatically.")
+                print("👉 Proceed directly to Module 3 (preprocessing).")
+            else:
+                print("👉 You provided your own h5ad file.")
+                print("👉 Please provide your own reference file for PopV.")
             return
 
         if cancer_type is None:
@@ -201,6 +326,11 @@ class SampleAnnotator:
             adata.layers["counts"] = adata.X.copy()
             adata.raw = adata
 
+            # ── Handle manual annotation if provided ─────────────────────
+            if self.manual_annotation_col is not None:
+                print("\n  Manual annotation mode activated.")
+                self._store_manual_annotation(adata, file)
+
             # Store QC params in user-supplied h5ad too (only if user set them)
             self._store_qc_params(adata)
 
@@ -233,6 +363,15 @@ class SampleAnnotator:
                 print("\n========== h5ad created ==========")
                 print(f"{filename} is created successfully")
 
+                if self.manual_annotation_col is not None:
+                    print(
+                        f"Manual annotation stored  → "
+                        f"col='{self.manual_annotation_col}', "
+                        f"skip_popv=True"
+                    )
+                    print("Next step: run Module 3 (preprocessing) directly.")
+                    print("           Module 2 (PopV) is not needed.")
+
                 if self.min_genes is not None or self.max_mt is not None:
                     print(
                         f"QC params stored → "
@@ -256,6 +395,24 @@ class SampleAnnotator:
             combined.layers["counts"] = combined.X.copy()
             combined.raw = combined
 
+            # ── Re-apply manual annotation to combined object ─────────────
+            # ad.concat does not carry uns from individual objects, so we
+            # re-derive popv_majority_vote_prediction from the column that
+            # was already copied into each individual adata before concat.
+            if self.manual_annotation_col is not None:
+                if "popv_majority_vote_prediction" in combined.obs.columns:
+                    combined.uns["manual_annotation_col"] = self.manual_annotation_col
+                    combined.uns["skip_popv"]             = True
+                    print(
+                        "\n  Combined h5ad: manual annotation carried through "
+                        f"from column '{self.manual_annotation_col}'."
+                    )
+                else:
+                    print(
+                        "\n  WARNING: 'popv_majority_vote_prediction' lost during "
+                        "concat — manual annotation NOT stored in combined h5ad."
+                    )
+
             # Store QC params in the combined h5ad (only if user set them)
             self._store_qc_params(combined)
 
@@ -263,6 +420,14 @@ class SampleAnnotator:
 
             print("\n========== h5ad created ==========")
             print("combined_tumor.h5ad is created successfully")
+
+            if self.manual_annotation_col is not None:
+                print(
+                    f"Manual annotation stored  → "
+                    f"col='{self.manual_annotation_col}', "
+                    f"skip_popv=True"
+                )
+                print("Next step: run Module 3 (preprocessing) directly.")
 
             if self.min_genes is not None or self.max_mt is not None:
                 print(
