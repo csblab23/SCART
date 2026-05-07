@@ -21,6 +21,7 @@
   - [Module 3 — Preprocessing & Malignancy Detection](#module-3--preprocessing--malignancy-detection-preprocessingpy)
   - [Module 4a — Single-Gene Scoring](#module-4a--single-gene-scoring-one_gene_combinationpy)
   - [Module 4b — Two-Gene Logic-Gate Scoring](#module-4b--two-gene-logic-gate-scoring-two_gene_combinationpy)
+- [Manual Annotation — Skip PopV with Your Own Labels](#manual-annotation--skip-popv-with-your-own-labels)
 - [Output Files](#output-files)
 - [Parameter Reference](#parameter-reference)
 
@@ -31,8 +32,8 @@
 CAR-T therapy requires surface targets that are highly expressed on tumour cells and absent on healthy tissue. SCART automates this discovery by:
 
 1. Downloading and parsing scRNA-seq datasets from GEO
-2. Annotating cell types with PopV (multi-method consensus)
-3. Identifying malignant epithelial cells via scMalignantFinder and inferCNA
+2. Annotating cell types with PopV (multi-method consensus) — or using your own pre-existing annotations
+3. Identifying malignant epithelial cells via scMalignantFinder and SCEVAN
 4. Computing differentially expressed surfaceome genes (tumour vs stromal/immune)
 5. Scoring every candidate gene — or gene pair with a logic gate — for efficacy (tumour coverage) and safety (healthy tissue sparing)
 
@@ -65,9 +66,9 @@ conda activate scart_env
 pip install git+https://github.com/csblab23/SCART.git
 ```
 
-### 3. Install R and Bioconductor dependencies
+### 3. Install R and SCEVAN dependencies
 
-These are required for inferCNA (Module 3). Run inside your activated conda environment:
+These are required for SCEVAN (Module 3). Run inside your activated conda environment:
 
 ```bash
 conda install -c conda-forge -c bioconda \
@@ -78,22 +79,26 @@ conda install -c conda-forge -c bioconda \
 ```
 
 ```bash
-conda install -c bioconda \
-  bioconductor-annotationdbi bioconductor-go.db \
-  bioconductor-org.hs.eg.db bioconductor-biomart \
-  bioconductor-scran bioconductor-genomicfeatures \
-  bioconductor-rtracklayer \
-  bioconductor-txdb.hsapiens.ucsc.hg19.knowngene \
-  bioconductor-clusterprofiler bioconductor-enrichplot \
-  bioconductor-ggtree bioconductor-homo.sapiens
+conda install -c bioconda -c conda-forge \
+  r-fgsea \
+  bioconductor-genomeinfoDb \
+  bioconductor-genomicranges \
+  bioconductor-summarizedexperiment \
+  bioconductor-singlecellexperiment \
+  bioconductor-scuttle \
+  bioconductor-scran \
+  r-rcurl -y
 ```
 
 Then inside R:
 
 ```r
-remotes::install_github("hrbrmstr/hrbrthemes")
-remotes::install_github("jlaffy/scalop")
-remotes::install_github("jlaffy/infercna")
+library(devtools)
+install_github("miccec/yaGST")
+install_github("AntonioDeFalco/SCEVAN")
+
+# Verify installation
+library(SCEVAN)
 ```
 
 ### 4. Set up Jupyter Notebook
@@ -138,6 +143,15 @@ annotator = SampleAnnotator("/path/to/my_data.h5ad",
 annotator = SampleAnnotator("GSE158937", "/path/to/extra_data.h5ad",
                              min_genes=200, max_mt=40)
 
+# ── Option 8: User h5ad WITH manual cell-type annotations ────────────────
+# Skips Module 2 (PopV) entirely — go straight to Module 3 after this
+annotator = SampleAnnotator(
+    "my_data.h5ad",
+    manual_annotation_col="cell_type",   # name of your obs column
+    min_genes=200,
+    max_mt=40,
+)
+
 # ── Run (same call for all options above) ────────────────────────────────
 normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = annotator.run()
 
@@ -156,9 +170,17 @@ normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = 
 > - Multiple inputs → `combined_tumor.h5ad`
 > - User h5ad input → `input_tumor.h5ad`
 
+> **Manual annotation note**
+> When `manual_annotation_col` is provided, Module 1 stores `adata.uns['skip_popv'] = True`
+> and copies your column into `popv_majority_vote_prediction`. Skip Module 2 entirely
+> and proceed directly to Module 3. See [Manual Annotation](#manual-annotation--skip-popv-with-your-own-labels) for full details.
+
 ---
 
 ### Module 2 — Cell-Type Annotation
+
+> **Skip this module** if you used `manual_annotation_col` in Module 1
+> (`adata.uns['skip_popv'] == True`). Go directly to Module 3.
 
 ```python
 from SCART import popv_annotation
@@ -219,33 +241,28 @@ adata = popv_annotation.auto_run_popv(
 ```python
 from SCART import preprocessing
 
-# ── Option 1: Standard run with inferCNA + scMalignantFinder ─────────────
+# ── Option 1: Standard run with SCEVAN + scMalignantFinder ───────────────
 # Both tools used; a cell must be called malignant by BOTH (intersection)
 adata_preprocessed = preprocessing.run_preprocessing_pipeline(
-    reference_h5ad            = "/path/to/tissue_reference.h5ad",
-    log2fc_threshold          = 2.0,
-    pval_adj_threshold        = 0.05,
-    malignant_strategy        = "intersection",
-    infercna_genome           = "hg19",
-    infercna_n                = 5000,
-    infercna_noise            = 0.1,
-    infercna_signal_threshold = 0.9,
-    infercna_ref_max_cells    = 2000,
+    reference_h5ad     = "/path/to/tissue_reference.h5ad",
+    log2fc_threshold   = 2.0,
+    pval_adj_threshold = 0.05,
+    malignant_strategy = "intersection",
 )
 
-# ── Option 2: scMalignantFinder only (no inferCNA) ───────────────────────
-# Use when no tissue reference is available, or to skip the R/rpy2 step
+# ── Option 2: scMalignantFinder only (no SCEVAN) ─────────────────────────
+# Use when no tissue reference is available, or to skip the R/SCEVAN step
 adata_preprocessed = preprocessing.run_preprocessing_pipeline(
     malignant_strategy = "scMalignant",
     log2fc_threshold   = 2.0,
     pval_adj_threshold = 0.05,
 )
 
-# ── Option 3: inferCNA only ───────────────────────────────────────────────
+# ── Option 3: SCEVAN only ─────────────────────────────────────────────────
 # Use when you trust CNA profiling more than the ML classifier
 adata_preprocessed = preprocessing.run_preprocessing_pipeline(
     reference_h5ad     = "/path/to/tissue_reference.h5ad",
-    malignant_strategy = "infercna",
+    malignant_strategy = "scevan",
     log2fc_threshold   = 2.0,
     pval_adj_threshold = 0.05,
 )
@@ -258,11 +275,11 @@ adata_preprocessed = preprocessing.run_preprocessing_pipeline(
     pval_adj_threshold = 0.10,   # less strict p-value
 )
 
-# ── Option 5: hg38 genome (for newer datasets) ───────────────────────────
+# ── Option 5: Tune SCEVAN reference cell count ────────────────────────────
 adata_preprocessed = preprocessing.run_preprocessing_pipeline(
-    reference_h5ad     = "/path/to/tissue_reference.h5ad",
-    malignant_strategy = "intersection",
-    infercna_genome    = "hg38",
+    reference_h5ad       = "/path/to/tissue_reference.h5ad",
+    malignant_strategy   = "intersection",
+    scevan_ref_max_cells = 200,   # default 100; increase for more stable CNV calls
 )
 
 # ── Option 6: Explicit file paths (if auto-detection fails) ───────────────
@@ -273,20 +290,22 @@ adata_preprocessed = preprocessing.run_preprocessing_pipeline(
     save_dir       = "/path/to/my_output_dir/",
 )
 
-# ── Option 7: Faster inferCNA (fewer reference cells, smaller n) ──────────
+# ── Option 7: Manual annotation path (after skipping PopV) ───────────────
+# input_tumor.h5ad already has popv_majority_vote_prediction set by Module 1
 adata_preprocessed = preprocessing.run_preprocessing_pipeline(
-    reference_h5ad         = "/path/to/tissue_reference.h5ad",
-    infercna_n             = 2000,   # fewer genes → faster
-    infercna_ref_max_cells = 500,    # fewer ref cells → faster
+    adata              = sc.read_h5ad("input_tumor.h5ad"),
+    reference_h5ad     = "/path/to/tissue_reference.h5ad",
+    malignant_strategy = "intersection",
+    log2fc_threshold   = 2.0,
+    pval_adj_threshold = 0.05,
 )
 
 # ── What you get ──────────────────────────────────────────────────────────
 # adata_preprocessed → malignant epithelial cells only, binarised expression
 # adata_preprocessed.obs columns:
-#   scMalignantFinder_prediction, infercna_prediction,
-#   infercna_cna_signal, infercna_cna_cor, final_malignant
+#   scMalignantFinder_prediction, scevan_prediction, final_malignant
 # adata_preprocessed.uns keys:
-#   filtered_deg, all_deg, deg_params, infercna_results, qc_params
+#   filtered_deg, all_deg, deg_params, scevan_results, qc_params
 print(adata_preprocessed.uns["filtered_deg"].head(10))
 ```
 
@@ -472,7 +491,8 @@ Downloads GEO datasets or accepts existing h5ad files, classifies samples as tum
 ```python
 from SCART.geo_fetcher import SampleAnnotator
 
-annotator = SampleAnnotator(*inputs, min_genes=None, max_mt=None)
+annotator = SampleAnnotator(*inputs, min_genes=None, max_mt=None,
+                             manual_annotation_col=None)
 normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = annotator.run()
 ```
 
@@ -483,6 +503,7 @@ normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = 
 | `*inputs` | str | — | One or more GEO accession IDs (e.g. `"GSE158937"`) or paths to `.h5ad` files |
 | `min_genes` | int or None | `None` | Minimum genes per cell for QC in Module 3. `None` = QC skipped |
 | `max_mt` | float or None | `None` | Maximum mitochondrial % per cell. `None` = QC skipped |
+| `manual_annotation_col` | str or None | `None` | Name of the obs column in your h5ad that contains cell-type labels. When set, Module 2 (PopV) is skipped. Only applies to h5ad inputs — ignored for GEO IDs |
 
 **Usage examples**
 
@@ -498,6 +519,11 @@ annotator = SampleAnnotator("GSE158937", "GSE184880", min_genes=200, max_mt=40)
 
 # User-supplied h5ad
 annotator = SampleAnnotator("/path/to/my_data.h5ad", min_genes=200, max_mt=40)
+
+# User h5ad with manual annotations — skips PopV
+annotator = SampleAnnotator("/path/to/my_data.h5ad",
+                             manual_annotation_col="cell_type",
+                             min_genes=200, max_mt=40)
 
 # Mixed GEO + h5ad
 annotator = SampleAnnotator("GSE158937", "/path/to/extra.h5ad")
@@ -515,11 +541,19 @@ annotator = SampleAnnotator("GSE158937", "/path/to/extra.h5ad")
 
 QC thresholds set here are stored in `adata.uns['qc_params']` and automatically read by Module 3. If neither `min_genes` nor `max_mt` is provided, the QC step in Module 3 is skipped entirely — no defaults are silently applied.
 
+**Manual annotation flow**
+
+When `manual_annotation_col` is set on an h5ad input, Module 1 copies that column into `adata.obs['popv_majority_vote_prediction']` and sets `adata.uns['skip_popv'] = True`. Module 3 reads `popv_majority_vote_prediction` identically regardless of whether it came from PopV or manual annotation. See [Manual Annotation](#manual-annotation--skip-popv-with-your-own-labels) for label requirements.
+
 ---
 
 ### Module 2 — Cell-Type Annotation (`popv_annotation.py`)
 
-Annotates cell types using PopV, a consensus framework that runs multiple methods (CELLTYPIST, KNN-BBKNN, KNN-SCVI, KNN-HARMONY, ONCLASS, SCANVI, Support Vector, XGBoost) and reports a majority-vote prediction.
+Annotates cell types using PopV, a consensus framework that runs multiple methods (CELLTYPIST, KNN-BBKNN, KNN-SCVI, KNN-HARMONY, ONCLASS, SCANVI, Support Vector, Random Forest) and reports a majority-vote prediction.
+
+> **This module can be skipped** when `manual_annotation_col` was provided in Module 1.
+> The output h5ad will contain `adata.uns['skip_popv'] = True` — if you call
+> `auto_run_popv()` on such a file it will exit immediately with a clear message.
 
 ```python
 from SCART import popv_annotation
@@ -554,27 +588,32 @@ Module 1 prints the recommended reference file for the detected cancer type at t
 
 | File | Description |
 |---|---|
-| `popv_results/final_popv_annotated.h5ad` | Full dataset with `popv_majority_vote_prediction` column and `layers['full_counts']` for Module 3 |
+| `popv_results/final_popv_annotated.h5ad` | Full dataset with `popv_majority_vote_prediction` column and `layers['counts']` for Module 3 |
 
 ---
 
 ### Module 3 — Preprocessing & Malignancy Detection (`preprocessing.py`)
 
-Identifies malignant epithelial cells using scMalignantFinder and inferCNA, performs surfaceome differential expression analysis, and outputs a binarised tumour matrix for Module 4.
+Identifies malignant epithelial cells using scMalignantFinder and SCEVAN, performs surfaceome differential expression analysis, and outputs a binarised tumour matrix for Module 4.
+
+Epithelial cells are selected by substring-matching `"epithelial cell"` (case-insensitive) in `popv_majority_vote_prediction` — this captures all variants such as `"ovarian surface epithelial cell"`, `"glandular epithelial cell"`, `"lung epithelial cell"`, etc.
+
+When the input h5ad has `adata.uns['skip_popv'] = True` (manual annotation path), Module 3 detects this automatically, validates the label column, and proceeds identically — no code changes needed.
 
 ```python
 from SCART import preprocessing
 
 adata_preprocessed = preprocessing.run_preprocessing_pipeline(
-    reference_h5ad            = "/path/to/tissue_reference.h5ad",
-    log2fc_threshold          = 2.0,
-    pval_adj_threshold        = 0.05,
-    malignant_strategy        = "intersection",
-    infercna_genome           = "hg19",
-    infercna_n                = 5000,
-    infercna_noise            = 0.1,
-    infercna_signal_threshold = 0.9,
-    infercna_ref_max_cells    = 2000,
+    reference_h5ad     = "/path/to/tissue_reference.h5ad",
+    log2fc_threshold   = 2.0,
+    pval_adj_threshold = 0.05,
+    malignant_strategy = "intersection",
+    scevan_ref_max_cells = 100,
+    scevan_sample_name   = "SCEVAN_run",
+    scevan_organism      = "human",
+    scevan_par_cores     = 1,
+    scevan_subclones     = False,
+    scevan_batch_size    = 3000,
 )
 ```
 
@@ -586,36 +625,38 @@ adata_preprocessed = preprocessing.run_preprocessing_pipeline(
 | `popv_path` | str or None | `None` | Explicit path to PopV h5ad |
 | `log2fc_threshold` | float | `1.0` | DEG log2 fold-change cutoff |
 | `pval_adj_threshold` | float | `0.05` | DEG BH-adjusted p-value cutoff |
-| `reference_h5ad` | str or None | `None` | Tabula Sapiens h5ad for inferCNA normal reference. inferCNA skipped if None |
+| `reference_h5ad` | str or None | `None` | Tabula Sapiens h5ad for SCEVAN normal reference. SCEVAN skipped if None |
 | `tumor_h5ad` | str or None | `None` | Module 1 h5ad for scMalignantFinder full-gene recovery. Auto-detected if None |
 | `save_dir` | str or None | `None` | Output directory. Default: `<cwd>/preprocessing_results/` |
-| `malignant_strategy` | str | `"intersection"` | `"intersection"` (both tools must agree), `"scMalignant"`, or `"infercna"` |
-| `infercna_genome` | str | `"hg19"` | `"hg19"` or `"hg38"` — must match your data's genome build |
-| `infercna_n` | int | `5000` | Top variable genes for CNA profiling. Auto-capped to available common genes |
-| `infercna_noise` | float | `0.1` | CNA noise floor. Range 0.05–0.5. Lower = more sensitive |
-| `infercna_signal_threshold` | float | `0.9` | Top fraction of CNA values used for malignancy signal score |
-| `infercna_ref_max_cells` | int | `2000` | Maximum reference cells subsampled for inferCNA |
+| `malignant_strategy` | str | `"intersection"` | `"intersection"` (both tools must agree), `"scMalignant"`, or `"scevan"` |
+| `scevan_ref_max_cells` | int | `100` | Maximum normal reference cells subsampled for SCEVAN |
+| `scevan_sample_name` | str | `"SCEVAN_run"` | Prefix for SCEVAN output files |
+| `scevan_organism` | str | `"human"` | `"human"` or `"mouse"` |
+| `scevan_par_cores` | int | `1` | CPU cores per SCEVAN batch |
+| `scevan_subclones` | bool | `False` | Whether SCEVAN infers tumour subclones |
+| `scevan_batch_size` | int | `3000` | Query cells per SCEVAN batch |
 
 **QC thresholds** are not parameters here — they are read automatically from `adata.uns['qc_params']` set in Module 1.
 
 **Pipeline steps**
 
-1. Load full PopV-annotated dataset
-2. Read QC thresholds from `adata.uns['qc_params']` (skipped if absent)
-3. Extract epithelial cells → apply QC filters if set
-4. Run **scMalignantFinder** (machine learning classifier) on full gene space
-5. Run **inferCNA** (copy number alteration profiling) against normal reference
-6. Combine predictions with chosen strategy → `final_malignant` column
-7. Keep only malignant epithelial cells; extract non-epithelial cells as DEG reference
-8. Filter both groups to surfaceome genes (GESP database)
-9. Wilcoxon DEG: malignant epithelial vs non-epithelial rest
-10. Binarise expression matrix (0/1), store DEG results, save
+1. Load full PopV-annotated dataset (or manual-annotation h5ad)
+2. Detect manual annotation mode (`skip_popv`) — validate labels if present
+3. Read QC thresholds from `adata.uns['qc_params']` (skipped if absent)
+4. Extract epithelial cells via substring match on `"epithelial cell"` → apply QC filters if set
+5. Run **scMalignantFinder** (machine learning classifier) on full gene space
+6. Run **SCEVAN** (copy number alteration profiling) against normal reference cells selected by substring match on `"epithelial cell"` in `cell_ontology_class`
+7. Combine predictions with chosen strategy → `final_malignant` column
+8. Keep only malignant epithelial cells; extract non-epithelial cells as DEG reference
+9. Filter both groups to surfaceome genes (GESP database)
+10. Wilcoxon DEG: malignant epithelial vs non-epithelial rest
+11. Binarise expression matrix (0/1), store DEG results, save
 
 **Output files**
 
 | File | Description |
 |---|---|
-| `preprocessing_results/final_tumor.h5ad` | Malignant epithelial cells, surfaceome-filtered, binarised. Contains `obs['final_malignant']`, DEG in `uns['filtered_deg']`, inferCNA scores in `uns['infercna_results']` |
+| `preprocessing_results/final_tumor.h5ad` | Malignant epithelial cells, surfaceome-filtered, binarised. Contains `obs['final_malignant']`, DEG in `uns['filtered_deg']`, SCEVAN scores in `uns['scevan_results']` |
 
 ---
 
@@ -730,13 +771,87 @@ two_gene_combination.run(pop_size=2000, Gmax=200, patience=100, n_cpus=40, n_run
 
 ---
 
+## Manual Annotation — Skip PopV with Your Own Labels
+
+If you already have cell-type annotations (from Seurat, Scanpy, CellTypist, or any other tool), you can skip Module 2 (PopV) entirely by providing your annotation column in Module 1.
+
+### When to use this
+
+Use `manual_annotation_col` when you supply your own `.h5ad` file and already have reliable cell-type labels. GEO ID inputs always run the full PopV pipeline regardless of this parameter.
+
+### How to use it
+
+```python
+from SCART.geo_fetcher import SampleAnnotator
+
+annotator = SampleAnnotator(
+    "my_data.h5ad",
+    manual_annotation_col="cell_type",   # name of your obs column
+    min_genes=200,
+    max_mt=40,
+)
+normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = annotator.run()
+```
+
+After `run()` completes, skip Module 2 entirely and go straight to Module 3:
+
+```python
+from SCART import preprocessing
+adata_mal = preprocessing.run_preprocessing_pipeline(
+    reference_h5ad     = "/path/to/tissue_reference.h5ad",
+    malignant_strategy = "intersection",
+)
+```
+
+### Requirements for your annotation column
+
+**Column must exist in adata.obs.** A clear error listing all available columns is raised if it is missing.
+
+**Epithelial labels must contain "epithelial cell".** Module 3 identifies epithelial cells by substring-matching `"epithelial cell"` (case-insensitive) anywhere in the label. Examples:
+
+| Label | Valid? |
+|---|---|
+| `epithelial cell` | ✅ |
+| `glandular epithelial cell` | ✅ |
+| `ovarian surface epithelial cell` | ✅ |
+| `luminal epithelial cell` | ✅ |
+| `epithelial` | ❌ — does not contain "epithelial cell" |
+| `Epithelial_cells` | ❌ — does not contain "epithelial cell" |
+| `cancer cell` | ❌ — not recognised as epithelial |
+
+Module 1 prints a warning immediately if no epithelial labels are detected, before any files are written. Module 3 raises a descriptive error with fix instructions if the column is missing or empty.
+
+**All other labels are treated as non-epithelial** (the "rest" comparison group for DEG). Any string label is accepted for non-epithelial cells.
+
+### What is stored in the output h5ad
+
+| Key | Location | Value |
+|---|---|---|
+| `manual_annotation_col` | `adata.uns` | your column name |
+| `skip_popv` | `adata.uns` | `True` |
+| `popv_majority_vote_prediction` | `adata.obs` | copy of your annotation column |
+
+### Multiple h5ad files
+
+`manual_annotation_col` applies to all h5ad files passed. All files must share the same column name. The `popv_majority_vote_prediction` column is preserved through concatenation automatically.
+
+```python
+annotator = SampleAnnotator(
+    "dataset1.h5ad",
+    "dataset2.h5ad",
+    manual_annotation_col="cell_type",
+)
+```
+
+---
+
 ## Output Files
 
 | Module | File | Contents |
 |---|---|---|
-| 1 | `GSE*_tumor.h5ad` / `combined_tumor.h5ad` | Raw tumour counts, cancer type, optional QC params |
-| 2 | `popv_results/final_popv_annotated.h5ad` | Cell-type labels, full gene counts layer |
-| 3 | `preprocessing_results/final_tumor.h5ad` | Malignant cells, binarised expression, DEG results, inferCNA scores |
+| 1 | `GSE*_tumor.h5ad` / `combined_tumor.h5ad` / `input_tumor.h5ad` | Raw tumour counts, cancer type, optional QC params, optional manual annotation flags |
+| 2 | `popv_results/final_popv_annotated.h5ad` | Cell-type labels, raw counts layer |
+| 3 | `preprocessing_results/final_tumor.h5ad` | Malignant cells, binarised expression, DEG results, SCEVAN scores |
 | 4a | `single_gene_results.csv` | Per-gene efficacy and safety scores |
 | 4b | `two_gene_hof.csv` | Best gene pairs with logic gates |
 | 4b | `two_gene_complete.csv` | Full GA search history |
@@ -745,15 +860,16 @@ two_gene_combination.run(pop_size=2000, Gmax=200, patience=100, n_cpus=40, n_run
 
 ## Parameter Reference
 
-### inferCNA parameters (Module 3)
+### SCEVAN parameters (Module 3)
 
-| Parameter | Default | Range | Effect of increasing | Effect of decreasing |
+| Parameter | Default | Range / Options | Effect of increasing | Effect of decreasing |
 |---|---|---|---|---|
-| `infercna_genome` | `"hg19"` | `"hg19"` / `"hg38"` | — | — |
-| `infercna_n` | `5000` | `500–20000` | More genes → smoother, slower | Fewer genes → faster, noisier |
-| `infercna_noise` | `0.1` | `0.05–0.5` | More conservative, fewer false positives | More sensitive, more false positives |
-| `infercna_signal_threshold` | `0.9` | `0.7–0.99` | Stricter — fewer cells called malignant | More permissive — more cells called malignant |
-| `infercna_ref_max_cells` | `2000` | `500–5000` | More accurate, slower | Faster, marginally less accurate |
+| `scevan_ref_max_cells` | `100` | `50–500` | More stable CNV baseline, slower | Faster, marginally less stable |
+| `scevan_batch_size` | `3000` | `500–5000` | Fewer batches, more RAM per batch | More batches, less RAM per batch |
+| `scevan_par_cores` | `1` | `1–N` | Faster per-batch classification | — |
+| `scevan_subclones` | `False` | `True / False` | Infers tumour subclone structure | Runs faster, no subclone output |
+| `scevan_organism` | `"human"` | `"human"` / `"mouse"` | — | — |
+| `scevan_sample_name` | `"SCEVAN_run"` | any string | — | — |
 
 ### Safety threshold (Modules 4a, 4b)
 
