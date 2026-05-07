@@ -855,6 +855,70 @@ def run_preprocessing_pipeline(
     adata_full = adata.copy()
     print(f"Full dataset loaded: {adata_full.n_obs} cells × {adata_full.n_vars} genes")
 
+    # ── Manual annotation detection (Module 1 skip_popv path) ────────────
+    # When SampleAnnotator was run with manual_annotation_col=, it sets:
+    #   adata.uns['skip_popv'] = True
+    #   adata.obs['popv_majority_vote_prediction'] = copy of the user column
+    # Detect this and inform the user; no code change needed downstream
+    # because popv_majority_vote_prediction is already present and named
+    # correctly for Step 3 to consume.
+    _skip_popv = adata_full.uns.get("skip_popv", False)
+    _manual_col = adata_full.uns.get("manual_annotation_col", None)
+
+    if _skip_popv:
+        print(
+            f"\n  *** Manual annotation mode detected ***\n"
+            f"  adata.uns['skip_popv']            = True\n"
+            f"  adata.uns['manual_annotation_col'] = '{_manual_col}'\n"
+            f"  PopV was skipped — using 'popv_majority_vote_prediction' "
+            f"copied from column '{_manual_col}' by SampleAnnotator.\n"
+        )
+        # Validate the required column is present
+        if "popv_majority_vote_prediction" not in adata_full.obs.columns:
+            raise ValueError(
+                "adata.uns['skip_popv'] is True but "
+                "'popv_majority_vote_prediction' is missing from adata.obs.\n"
+                f"Expected it to be a copy of obs column '{_manual_col}'.\n"
+                "Re-run SampleAnnotator with manual_annotation_col= to regenerate "
+                "the h5ad, or add 'popv_majority_vote_prediction' manually."
+            )
+        # Show label summary so user can verify
+        _label_counts = adata_full.obs["popv_majority_vote_prediction"].value_counts()
+        _epi_labels   = [
+            l for l in _label_counts.index
+            if "epithelial cell" in str(l).lower()
+        ]
+        print(
+            f"  Label summary (popv_majority_vote_prediction):\n"
+            + _label_counts.to_string()
+            + f"\n\n  Epithelial labels that will be selected in Step 3:\n"
+            + ("  " + "\n  ".join(_epi_labels) if _epi_labels
+               else "  *** NONE FOUND — check your label names! ***")
+            + "\n"
+        )
+        if not _epi_labels:
+            raise ValueError(
+                "Manual annotation mode: no labels containing 'epithelial cell' "
+                f"found in 'popv_majority_vote_prediction'.\n"
+                f"Unique labels present: {list(_label_counts.index)}\n"
+                "Epithelial labels must contain the phrase 'epithelial cell' "
+                "(case-insensitive), e.g.:\n"
+                "  'epithelial cell'\n"
+                "  'ovarian surface epithelial cell'\n"
+                "  'glandular epithelial cell'\n"
+                "Please rename your epithelial labels in the source h5ad and "
+                "re-run SampleAnnotator."
+            )
+    else:
+        # Normal PopV path — column must exist from Module 2
+        if "popv_majority_vote_prediction" not in adata_full.obs.columns:
+            raise ValueError(
+                "'popv_majority_vote_prediction' not found in adata.obs.\n"
+                "Expected this column from Module 2 (PopV annotation).\n"
+                "If you want to use your own annotations, re-run Module 1 "
+                "(SampleAnnotator) with manual_annotation_col= set."
+            )
+
     # Report what raw count source is available
     _raw_layers_present = [
         l for l in ("counts", "raw_counts", "scvi_counts")
