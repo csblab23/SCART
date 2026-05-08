@@ -42,6 +42,9 @@ TABULA_FILES = {
     "vasculature_cancer": "Vasculature_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad",
 }
 
+# Valid cancer type keys for user reference
+VALID_CANCER_TYPES = sorted(TABULA_FILES.keys())
+
 
 class SampleAnnotator:
     """
@@ -65,6 +68,35 @@ class SampleAnnotator:
         in Module 3.  Stored alongside ``min_genes`` in
         ``adata.uns['qc_params']``.
         If not provided (default: None), the QC step is skipped in Module 3.
+    cancer_type : str or None, optional
+        Manually specify the cancer type instead of auto-detecting it from
+        GEO metadata.  Must be one of the keys in ``TABULA_FILES`` (e.g.
+        ``"ovary_cancer"``, ``"lung_cancer"``).  When provided, auto-detection
+        is skipped entirely and the supplied value is used for reference
+        guidance.
+
+        Accepted values
+        ---------------
+        Any key from ``TABULA_FILES``:
+            bladder_cancer, blood_cancer, bone_marrow_cancer, breast_cancer,
+            ear_cancer, eye_cancer, fat_cancer, heart_cancer, kidney_cancer,
+            large_intestine_cancer, liver_cancer, lung_cancer,
+            lymph_node_cancer, muscle_cancer, ovary_cancer, pancreas_cancer,
+            prostate_cancer, salivary_gland_cancer, skin_cancer,
+            small_intestine_cancer, spleen_cancer, stomach_cancer,
+            testis_cancer, thymus_cancer, tongue_cancer, trachea_cancer,
+            uterus_cancer, vasculature_cancer.
+
+        Multiple types can be provided as a comma-separated string:
+            ``"ovary_cancer, lung_cancer"``
+
+        To print all valid values:
+            ``from SCART.geo_fetcher import VALID_CANCER_TYPES``
+            ``print(VALID_CANCER_TYPES)``
+
+        If not provided (default: None), cancer type is inferred
+        automatically from GEO metadata text.
+
     manual_annotation_col : str or None, optional
         ONLY relevant when providing your own .h5ad file (not a GEO ID).
 
@@ -119,6 +151,7 @@ class SampleAnnotator:
         *inputs,
         min_genes: int = None,
         max_mt: float = None,
+        cancer_type: str = None,
         manual_annotation_col: str = None,
     ):
 
@@ -128,6 +161,11 @@ class SampleAnnotator:
         # ── QC parameters: None means "user did not set this → skip QC" ───
         self.min_genes = min_genes
         self.max_mt    = max_mt
+
+        # ── Manual cancer type override ────────────────────────────────────
+        self._user_cancer_type = None
+        if cancer_type is not None:
+            self._user_cancer_type = self._validate_cancer_type(cancer_type)
 
         # ── Manual annotation: only used when h5ad files are provided ──────
         self.manual_annotation_col = manual_annotation_col
@@ -146,6 +184,34 @@ class SampleAnnotator:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _validate_cancer_type(self, cancer_type: str) -> str:
+        """
+        Validate a user-supplied cancer type string.
+
+        Accepts a single key or a comma-separated list of keys.  Each token
+        is checked against TABULA_FILES.  A ValueError is raised if any token
+        is unrecognised so the user gets immediate, actionable feedback.
+
+        Returns the normalised (stripped) string unchanged.
+        """
+        tokens = [t.strip() for t in cancer_type.split(",")]
+        invalid = [t for t in tokens if t not in TABULA_FILES]
+
+        if invalid:
+            raise ValueError(
+                f"\ncancer_type contains unrecognised value(s): {invalid}\n\n"
+                f"Valid cancer types are:\n"
+                + "\n".join(f"  {k}" for k in VALID_CANCER_TYPES)
+                + "\n\nPass them as a string, e.g.:\n"
+                "  cancer_type='ovary_cancer'\n"
+                "  cancer_type='ovary_cancer, lung_cancer'\n\n"
+                "To see all valid values:\n"
+                "  from SCART.geo_fetcher import VALID_CANCER_TYPES\n"
+                "  print(VALID_CANCER_TYPES)"
+            )
+
+        return ", ".join(tokens)
 
     def _store_qc_params(self, adata):
         """
@@ -249,6 +315,9 @@ class SampleAnnotator:
 
         print("\n========== REFERENCE GUIDANCE ==========")
 
+        if self._user_cancer_type is not None:
+            print("ℹ️  Cancer type was provided manually (auto-detection skipped).")
+
         if self.h5ad_inputs:
             if self.manual_annotation_col:
                 print("👉 You provided your own h5ad file WITH manual annotations.")
@@ -303,13 +372,18 @@ class SampleAnnotator:
 
             annotation_info.update(ann)
 
+            # ── Use user-supplied cancer type if provided, else auto-detected
+            if self._user_cancer_type is not None:
+                ct = self._user_cancer_type
+
             if ct and cancer_type is None:
                 cancer_type = ct
 
             adata = self._build_h5ad(
                 gse_id,
                 t,
-                save_single=(len(self.gse_ids) == 1 and len(self.h5ad_inputs) == 0)
+                save_single=(len(self.gse_ids) == 1 and len(self.h5ad_inputs) == 0),
+                cancer_type_override=self._user_cancer_type,
             )
 
             if adata is not None:
@@ -326,6 +400,11 @@ class SampleAnnotator:
             adata.layers["counts"] = adata.X.copy()
             adata.raw = adata
 
+            # ── Store user-supplied cancer type in h5ad if provided ───────
+            if self._user_cancer_type is not None:
+                adata.uns["cancer_type"] = self._user_cancer_type
+                print(f"  cancer_type stored (user-supplied): {self._user_cancer_type}")
+
             # ── Handle manual annotation if provided ─────────────────────
             if self.manual_annotation_col is not None:
                 print("\n  Manual annotation mode activated.")
@@ -336,7 +415,7 @@ class SampleAnnotator:
 
             tumor_adatas.append(adata)
 
-            results[file] = ([], [], [], {}, None, None)
+            results[file] = ([], [], [], {}, None, self._user_cancer_type)
 
         query_h5ad  = None
         total_inputs = len(self.gse_ids) + len(self.h5ad_inputs)
@@ -386,7 +465,7 @@ class SampleAnnotator:
                 query_h5ad = filename
                 key        = self.h5ad_inputs[0]
 
-                results[key] = ([], [], [], {}, query_h5ad, None)
+                results[key] = ([], [], [], {}, query_h5ad, self._user_cancer_type)
 
         elif total_inputs > 1 and len(tumor_adatas) > 0:
 
@@ -394,6 +473,12 @@ class SampleAnnotator:
             combined.obs_names_make_unique()
             combined.layers["counts"] = combined.X.copy()
             combined.raw = combined
+
+            # ── Store user-supplied cancer type in combined h5ad ──────────
+            if self._user_cancer_type is not None:
+                combined.uns["cancer_type"] = self._user_cancer_type
+                print(f"\n  cancer_type stored in combined h5ad (user-supplied): "
+                      f"{self._user_cancer_type}")
 
             # ── Re-apply manual annotation to combined object ─────────────
             # ad.concat does not carry uns from individual objects, so we
@@ -446,6 +531,10 @@ class SampleAnnotator:
                 n, t, u, ann, _, ct = results[key]
                 results[key]        = (n, t, u, ann, query_h5ad, ct)
 
+        # ── Final cancer type: user-supplied always wins ──────────────────
+        if self._user_cancer_type is not None:
+            cancer_type = self._user_cancer_type
+
         self._print_reference_guidance(cancer_type)
 
         return normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results
@@ -470,7 +559,12 @@ class SampleAnnotator:
         excluded_non_scrna  = []
         excluded_non_human  = []
 
-        cancer_type = self._predict_cancer_type(gse)
+        # ── Cancer type: user-supplied overrides auto-detection ───────────
+        if self._user_cancer_type is not None:
+            cancer_type = self._user_cancer_type
+            print(f"\n  Cancer type (user-supplied): {cancer_type}")
+        else:
+            cancer_type = self._predict_cancer_type(gse)
 
         tumor_keywords  = [
             "tumor", "tumour", "cancer", "carcinoma",
@@ -594,7 +688,8 @@ class SampleAnnotator:
 
     # ------------------------------------------------------------------
 
-    def _build_h5ad(self, gse_id, tumor_samples, save_single=False):
+    def _build_h5ad(self, gse_id, tumor_samples, save_single=False,
+                    cancer_type_override=None):
 
         if len(tumor_samples) == 0:
             return None
@@ -699,13 +794,17 @@ class SampleAnnotator:
         combined.obs["gsm_id"] = combined.obs["gsm_id"].astype("category")
         combined.obs["gse_id"] = combined.obs["gse_id"].astype("category")
 
-        # Store cancer type
-        cancer_type = self._predict_cancer_type(
-            GEOparse.get_GEO(geo=gse_id, destdir=self.base_dir)
-        )
-        if cancer_type is not None:
-            combined.uns["cancer_type"] = cancer_type
-            print(f"... stored cancer_type in h5ad: {cancer_type}")
+        # ── Store cancer type: user-supplied takes priority ───────────────
+        if cancer_type_override is not None:
+            combined.uns["cancer_type"] = cancer_type_override
+            print(f"... stored cancer_type in h5ad (user-supplied): {cancer_type_override}")
+        else:
+            cancer_type = self._predict_cancer_type(
+                GEOparse.get_GEO(geo=gse_id, destdir=self.base_dir)
+            )
+            if cancer_type is not None:
+                combined.uns["cancer_type"] = cancer_type
+                print(f"... stored cancer_type in h5ad: {cancer_type}")
 
         # ── Store QC params only when user explicitly provided them ────────
         self._store_qc_params(combined)
