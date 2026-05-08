@@ -127,28 +127,28 @@ from SCART.geo_fetcher import SampleAnnotator
 
 # ── Option 1: Single GEO ID, QC disabled (default) ───────────────────────
 # QC step in Module 3 will be skipped entirely
-annotator = SampleAnnotator("your_GEO_accession_ID")
+annotator = SampleAnnotator("GEO_accession_ID")
 
 # ── Option 2: Single GEO ID with both QC thresholds ──────────────────────
-annotator = SampleAnnotator("your_GEO_accession_ID", min_genes=200, max_mt=40)
+annotator = SampleAnnotator("GEO_accession_ID", min_genes=200, max_mt=40)
 
 # ── Option 3: Single GEO ID with gene-count filter only ──────────────────
-annotator = SampleAnnotator("your_GEO_accession_ID", min_genes=300)
+annotator = SampleAnnotator("GEO_accession_ID", min_genes=300)
 
 # ── Option 4: Single GEO ID with MT filter only ───────────────────────────
-annotator = SampleAnnotator("your_GEO_accession_ID", max_mt=25)
+annotator = SampleAnnotator("GEO_accession_ID", max_mt=25)
 
 # ── Option 5: Single GEO ID with manually specified cancer type ───────────
 # Auto-detection is skipped; the provided value is used directly
-annotator = SampleAnnotator("your_GEO_accession_ID", cancer_type="ovary_cancer",
+annotator = SampleAnnotator("GEO_accession_ID", cancer_type="ovary_cancer",
                              min_genes=200, max_mt=40)
 
 # ── Option 6: Multiple GEO IDs → saves combined_tumor.h5ad ───────────────
-annotator = SampleAnnotator("your_GEO_accession_ID_1", "your_GEO_accession_ID_2",
-                             "your_GEO_accession_ID_3", min_genes=200, max_mt=40)
+annotator = SampleAnnotator("GEO_accession_ID_1", "GEO_accession_ID_2",
+                             "GEO_accession_ID_3", min_genes=200, max_mt=40)
 
 # ── Option 7: Multiple GEO IDs with manual cancer type ───────────────────
-annotator = SampleAnnotator("your_GEO_accession_ID_1", "your_GEO_accession_ID_2",
+annotator = SampleAnnotator("GEO_accession_ID_1", "GEO_accession_ID_2",
                              cancer_type="ovary_cancer",
                              min_genes=200, max_mt=40)
 
@@ -157,7 +157,7 @@ annotator = SampleAnnotator("/path/to/my_data.h5ad",
                              min_genes=200, max_mt=40)
 
 # ── Option 9: Mixed — GEO ID + user h5ad combined ────────────────────────
-annotator = SampleAnnotator("your_GEO_accession_ID", "/path/to/extra_data.h5ad",
+annotator = SampleAnnotator("GEO_accession_ID", "/path/to/extra_data.h5ad",
                              min_genes=200, max_mt=40)
 
 # ── Option 10: User h5ad WITH manual cell-type annotations ───────────────
