@@ -3,7 +3,7 @@
 
 ---
 
-![SCART Overview](SCART/external/Screenshot.png)
+![SCART Overview](SCART/external/Screenshot1.png)
 
 ---
 
