@@ -7,6 +7,10 @@
 
 ---
 
+![Module 4 Workflow](SCART/external/Screenshot2.png)
+
+---
+
 ## Table of Contents
 
 - [Overview](#overview)
