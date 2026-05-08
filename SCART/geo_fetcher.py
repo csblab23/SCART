@@ -718,7 +718,7 @@ class SampleAnnotator:
             ],
             "blood": [
                 "leukemia", "pbmc", "peripheral blood mononuclear",
-                "aml", "cml", "all", "cll",
+                "aml", "cml", "all", "cll", "myeloma",
                 "acute myeloid leukemia", "chronic myeloid leukemia",
                 "acute lymphoblastic leukemia", "chronic lymphocytic leukemia",
                 "t-cell leukemia", "hairy cell leukemia",
