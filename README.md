@@ -46,12 +46,6 @@ CAR-T therapy requires surface targets that are highly expressed on tumour cells
 
 ---
 
-## Pipeline Architecture
-
-To be added
-
----
-
 ## Installation
 
 ### 1. Create and activate the conda environment
