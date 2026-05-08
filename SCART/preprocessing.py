@@ -44,14 +44,54 @@ This module handles both cases via _get_raw_counts_from_adata():
   original integer counts from GEO.
 
 ═══════════════════════════════════════════════════════════════════════════════
+SCEVAN REFERENCE — HOW IT WORKS
+═══════════════════════════════════════════════════════════════════════════════
+
+SCEVAN requires integer raw counts from:
+  (a) A query AnnData  — the epithelial cells to classify (tumour vs normal)
+  (b) A reference AnnData — KNOWN NORMAL epithelial cells as CNV baseline
+
+The reference is loaded from reference_h5ad (Tabula Sapiens or user-supplied).
+
+Epithelial cells are extracted from the reference using ONE of three methods,
+controlled by scevan_ref_cell_col and scevan_ref_epithelial_values:
+
+  Method A — Default (Tabula Sapiens, cell_ontology_class column):
+    scevan_ref_cell_col        = "cell_ontology_class"   (default)
+    scevan_ref_epithelial_values = None                  (default)
+    → substring match: any value containing "epithelial cell" (case-insensitive)
+    → captures: "ovarian surface epithelial cell", "glandular epithelial cell", etc.
+
+  Method B — User supplies exact label list:
+    scevan_ref_cell_col        = "cell_type"             (your column name)
+    scevan_ref_epithelial_values = ["Normal Epithelial cells"]
+    → exact match: only cells whose column value is in the provided list
+
+  Method C — User supplies a pre-filtered reference (already epithelial only):
+    scevan_ref_cell_col        = None
+    scevan_ref_epithelial_values = None
+    → uses the entire reference h5ad as-is (no filtering)
+
+After selection, the reference is subsampled to scevan_ref_max_cells (default=500).
+Setting scevan_ref_max_cells=None uses ALL available reference epithelial cells.
+
+Gene alignment follows the notebook approach:
+  1. Common genes between query and reference are found FIRST.
+  2. Both matrices are subset to common genes BEFORE building the count CSV.
+  3. The combined matrix (query + REF_ prefixed reference) is passed to SCEVAN.
+  4. Normal barcodes CSV lists only the REF_ prefixed cells.
+
+═══════════════════════════════════════════════════════════════════════════════
 KEY FIXES
 ═══════════════════════════════════════════════════════════════════════════════
 
 FIX 1   Full-gene route priority for scMalignantFinder.
-FIX 2   SCEVAN reference subsampled to scevan_ref_max_cells (default 100).
-        Reference epithelial cells selected by substring match on
-        "epithelial cell" in cell_ontology_class (covers all variants:
-        "ovarian surface epithelial cell", "glandular epithelial cell", etc.)
+FIX 2   SCEVAN reference selection now mirrors Input_SCEVAN.ipynb exactly:
+        - common genes found FIRST (query ∩ reference)
+        - both subsetted BEFORE matrix extraction
+        - ref_max_cells default raised to 500 (notebook uses all 476)
+        - user can supply scevan_ref_cell_col + scevan_ref_epithelial_values
+          for custom references, or pass a pre-filtered reference directly.
 FIX 3   DEG uses pvals_adj (BH-adjusted).
 FIX 5   _get_raw_counts_from_adata prefers layers['counts'] → raw → .X.
 FIX 6   scMalignantFinder predictions aligned by obs_names.
@@ -421,13 +461,143 @@ def _build_r_env(r_home):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SCEVAN subprocess runner
+# SCEVAN reference preparation (mirrors Input_SCEVAN.ipynb exactly)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _prepare_scevan_reference(
+    adata_ref_full,
+    ref_cell_col,
+    ref_epithelial_values,
+    ref_max_cells,
+):
+    """
+    Select and subsample epithelial cells from the reference AnnData.
+
+    This mirrors the notebook logic:
+
+        mapping = {
+            'glandular epithelial cell': 'Normal Epithelial cells',
+            'ovarian surface epithelial cell': 'Normal Epithelial cells'
+        }
+        adata_ref.obs['cell_type'] = adata_ref.obs['cell_ontology_class'].replace(mapping)
+        adata_ref = adata_ref[adata_ref.obs['cell_type'] == "Normal Epithelial cells"]
+
+    Parameters
+    ----------
+    adata_ref_full : AnnData
+        Full reference h5ad loaded from disk.
+    ref_cell_col : str or None
+        Column in adata_ref.obs that contains cell type labels.
+        - If None → skip filtering; use entire reference as-is.
+        - Default ("cell_ontology_class") → substring match on "epithelial cell".
+    ref_epithelial_values : list of str or None
+        Exact label values to keep from ref_cell_col.
+        - If None and ref_cell_col is "cell_ontology_class" →
+          substring match (contains "epithelial cell", case-insensitive).
+        - If None and ref_cell_col is something else →
+          substring match on "epithelial cell" in that column.
+        - If a list → exact match; only rows whose ref_cell_col value is in
+          this list are kept.
+    ref_max_cells : int or None
+        Maximum number of reference cells to use after filtering.
+        None = use all available cells (recommended for small references).
+
+    Returns
+    -------
+    AnnData  — filtered (and optionally subsampled) reference.
+    int      — number of cells selected before subsampling.
+    """
+    # Case 1: no filtering requested — use entire reference
+    if ref_cell_col is None:
+        n_before = adata_ref_full.n_obs
+        logger.info(
+            f"SCEVAN reference: scevan_ref_cell_col=None — "
+            f"using entire reference as-is ({n_before} cells)."
+        )
+        adata_ref_ep = adata_ref_full.copy()
+
+    elif ref_cell_col not in adata_ref_full.obs.columns:
+        # Column missing — warn and fall back to full reference
+        logger.warning(
+            f"SCEVAN reference: column '{ref_cell_col}' not found in reference obs.\n"
+            f"  Available columns: {list(adata_ref_full.obs.columns)}\n"
+            f"  Falling back to using full reference ({adata_ref_full.n_obs} cells)."
+        )
+        n_before = adata_ref_full.n_obs
+        adata_ref_ep = adata_ref_full.copy()
+
+    elif ref_epithelial_values is not None:
+        # Case 2: user supplied exact label list — exact match
+        values_set = set(ref_epithelial_values)
+        ep_mask = adata_ref_full.obs[ref_cell_col].isin(values_set)
+        n_before = ep_mask.sum()
+        logger.info(
+            f"SCEVAN reference: exact match on '{ref_cell_col}' "
+            f"for values {ref_epithelial_values} → {n_before} cells."
+        )
+        if n_before == 0:
+            # Show unique values to help the user debug
+            unique_vals = adata_ref_full.obs[ref_cell_col].value_counts().to_string()
+            raise ValueError(
+                f"SCEVAN reference: no cells matched for column='{ref_cell_col}' "
+                f"with values={ref_epithelial_values}.\n"
+                f"Unique values in '{ref_cell_col}':\n{unique_vals}\n\n"
+                f"Fix: update scevan_ref_epithelial_values= to match your labels,\n"
+                f"or set scevan_ref_cell_col=None to use the full reference."
+            )
+        adata_ref_ep = adata_ref_full[ep_mask].copy()
+
+    else:
+        # Case 3: default substring match on "epithelial cell" (Tabula Sapiens default)
+        ep_mask = adata_ref_full.obs[ref_cell_col].astype(str).str.contains(
+            "epithelial cell", case=False, na=False
+        )
+        n_before = ep_mask.sum()
+        logger.info(
+            f"SCEVAN reference: substring match (contains 'epithelial cell') "
+            f"on '{ref_cell_col}' → {n_before} cells."
+        )
+        if n_before == 0:
+            unique_vals = adata_ref_full.obs[ref_cell_col].value_counts().to_string()
+            raise ValueError(
+                f"SCEVAN reference: no cells found containing 'epithelial cell' "
+                f"in column '{ref_cell_col}'.\n"
+                f"Unique values:\n{unique_vals}\n\n"
+                f"Fix: supply scevan_ref_epithelial_values=['YourLabelHere'] and "
+                f"scevan_ref_cell_col='{ref_cell_col}',\n"
+                f"or set scevan_ref_cell_col=None to use the full reference."
+            )
+        adata_ref_ep = adata_ref_full[ep_mask].copy()
+
+    # Print matched label breakdown so user can verify
+    if ref_cell_col is not None and ref_cell_col in adata_ref_full.obs.columns:
+        matched_counts = adata_ref_ep.obs[ref_cell_col].value_counts()
+        print(f"  Reference epithelial cells selected ({n_before} total):")
+        for lbl, cnt in matched_counts.items():
+            print(f"    {lbl}: {cnt}")
+
+    # Subsample
+    if ref_max_cells is not None and adata_ref_ep.n_obs > ref_max_cells:
+        rng = np.random.default_rng(seed=42)
+        idx = rng.choice(adata_ref_ep.n_obs, size=ref_max_cells, replace=False)
+        adata_ref_ep = adata_ref_ep[np.sort(idx)].copy()
+        print(f"  Reference subsampled to {ref_max_cells} cells (from {n_before}).")
+    else:
+        print(f"  Using all {adata_ref_ep.n_obs} reference epithelial cells (no subsampling).")
+
+    return adata_ref_ep, n_before
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SCEVAN subprocess runner — notebook-aligned
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _run_scevan(
     adata_query,
     adata_ref,
-    ref_max_cells=100,
+    ref_cell_col="cell_ontology_class",
+    ref_epithelial_values=None,
+    ref_max_cells=500,
     sample_name="SCEVAN_run",
     organism="human",
     par_cores=1,
@@ -438,23 +608,27 @@ def _run_scevan(
     """
     Run SCEVAN via a fresh Rscript subprocess.
 
-    Reference normal cells are selected from adata_ref by substring-matching
-    "epithelial cell" (case-insensitive) in the 'cell_ontology_class' column.
-    This automatically covers all variants:
-      - "epithelial cell"
-      - "ovarian surface epithelial cell"
-      - "glandular epithelial cell"
-      - "lung epithelial cell"
-      - etc.
+    Mirrors Input_SCEVAN.ipynb:
+      1. Select reference epithelial cells (via _prepare_scevan_reference).
+      2. Find common genes between query and reference FIRST.
+      3. Subset BOTH to common genes.
+      4. Combine into a single genes × cells count matrix (query + REF_ ref).
+      5. Write count CSV and normal_barcodes CSV.
+      6. Run SCEVAN pipelineCNA() in batches via Rscript subprocess.
+      7. Parse and return per-cell predictions.
 
     Parameters
     ----------
     adata_query : AnnData
-        Epithelial query cells (from adata_epi after QC).
+        Epithelial query cells (raw counts in layers['raw_for_cna']).
     adata_ref : AnnData
-        Tabula Sapiens (or user) reference h5ad.
-    ref_max_cells : int
-        Max normal reference cells to subsample (default 100).
+        Full reference h5ad (will be filtered internally).
+    ref_cell_col : str or None
+        Column in reference obs for cell type labels. None = no filtering.
+    ref_epithelial_values : list of str or None
+        Exact label values to keep. None = substring match on "epithelial cell".
+    ref_max_cells : int or None
+        Max reference cells after filtering. None = use all.
     sample_name : str
         Prefix for SCEVAN output files.
     organism : str
@@ -479,7 +653,7 @@ def _run_scevan(
         "scevan_prediction" : "not.defined",
     })
 
-    # Locate Rscript
+    # ── Locate Rscript ────────────────────────────────────────────────────
     rscript_bin = _find_rscript()
     if rscript_bin is None:
         logger.error("Rscript not found. SCEVAN skipped.")
@@ -488,7 +662,7 @@ def _run_scevan(
     r_home  = _get_r_home(rscript_bin)
     sub_env = _build_r_env(r_home)
 
-    # Verify SCEVAN is installed
+    # ── Verify SCEVAN is installed ────────────────────────────────────────
     try:
         check = subprocess.run(
             [rscript_bin, "--vanilla", "-e",
@@ -512,90 +686,86 @@ def _run_scevan(
         logger.error(f"SCEVAN verification failed: {exc}")
         return empty_result
 
-    # ── FIX 2 + FIX 11: select reference epithelial cells by substring match ──
-    # "epithelial cell" substring covers all variants without needing an
-    # explicit list (ovarian surface epithelial cell, glandular epithelial
-    # cell, lung epithelial cell, etc.)
-    if "cell_ontology_class" in adata_ref.obs.columns:
-        ep_mask = adata_ref.obs["cell_ontology_class"].str.contains(
-            "epithelial cell", case=False, na=False
+    # ── Step 1: Select reference epithelial cells ─────────────────────────
+    print("  Preparing SCEVAN reference cells...")
+    try:
+        adata_ref_ep, n_ref_before = _prepare_scevan_reference(
+            adata_ref_full       = adata_ref,
+            ref_cell_col         = ref_cell_col,
+            ref_epithelial_values= ref_epithelial_values,
+            ref_max_cells        = ref_max_cells,
         )
-        adata_ref_ep = adata_ref[ep_mask].copy() if ep_mask.any() else adata_ref.copy()
-        logger.info(
-            f"SCEVAN reference: {ep_mask.sum()} epithelial cells found via "
-            f"substring match on 'cell_ontology_class' (contains 'epithelial cell')."
-        )
-        if not ep_mask.any():
-            logger.warning(
-                "No cells containing 'epithelial cell' in cell_ontology_class. "
-                "Using full reference as fallback."
-            )
-    else:
-        logger.warning(
-            "'cell_ontology_class' not in adata_ref.obs — using full reference."
-        )
-        adata_ref_ep = adata_ref.copy()
-
-    logger.info(f"SCEVAN reference epithelial cells before subsample: {adata_ref_ep.n_obs}")
-
-    if adata_ref_ep.n_obs > ref_max_cells:
-        rng = np.random.default_rng(seed=42)
-        idx = rng.choice(adata_ref_ep.n_obs, size=ref_max_cells, replace=False)
-        adata_ref_ep = adata_ref_ep[np.sort(idx)].copy()
-        logger.info(f"SCEVAN reference subsampled to {ref_max_cells} cells.")
+    except ValueError as exc:
+        logger.error(f"SCEVAN reference preparation failed:\n{exc}")
+        return empty_result
 
     if adata_ref_ep.n_obs == 0:
         logger.warning("SCEVAN: no reference cells after filtering. Skipping.")
         return empty_result
 
-    # ── Extract raw counts ────────────────────────────────────────────────
-    logger.info("SCEVAN: extracting raw counts from query and reference...")
-    mat_query = _get_raw_counts_from_adata(adata_query, "SCEVAN-query").T   # genes × cells
-    mat_ref   = _get_raw_counts_from_adata(adata_ref_ep, "SCEVAN-ref").T    # genes × cells
+    # ── Step 2: Find common genes FIRST (mirrors notebook) ───────────────
+    # Notebook:
+    #   common_genes = adata_epi.var_names.intersection(adata_ref.var_names)
+    #   adata_epi = adata_epi[:, common_genes]
+    #   adata_ref = adata_ref[:, common_genes]
+    q_gene_index   = adata_query.var_names
+    ref_gene_index = adata_ref_ep.var_names
 
-    q_genes = np.array(adata_query.var_names)
-    r_genes = (
-        np.array(adata_ref_ep.raw.var_names)
-        if adata_ref_ep.raw is not None and adata_ref_ep.raw.n_vars >= mat_ref.shape[0]
-        else np.array(adata_ref_ep.var_names)
+    common_gene_index = q_gene_index.intersection(ref_gene_index)
+    n_common = len(common_gene_index)
+    logger.info(
+        f"SCEVAN gene overlap: {adata_query.n_vars} query genes ∩ "
+        f"{adata_ref_ep.n_vars} ref genes = {n_common} common genes."
     )
-    if mat_ref.shape[0] != len(r_genes):
-        r_genes = np.array(adata_ref_ep.var_names)
-        mat_ref = _get_raw_counts_from_adata(adata_ref_ep, "SCEVAN-ref-retry").T
+    print(
+        f"  Gene overlap: {adata_query.n_vars} query ∩ "
+        f"{adata_ref_ep.n_vars} reference = {n_common} common genes."
+    )
 
-    common_genes = np.intersect1d(q_genes, r_genes)
-    logger.info(f"SCEVAN common genes: {len(common_genes)}")
-
-    if len(common_genes) < 200:
+    if n_common < 200:
         raise ValueError(
-            f"Only {len(common_genes)} common genes between query and reference. "
-            "Need >= 200. Both datasets must use HGNC gene symbols."
+            f"Only {n_common} common genes between query and reference. "
+            "Need >= 200. Both datasets must use HGNC gene symbols.\n"
+            f"  Query gene examples:     {list(q_gene_index[:5])}\n"
+            f"  Reference gene examples: {list(ref_gene_index[:5])}"
         )
 
-    q_idx = np.where(np.isin(q_genes, common_genes))[0]
-    r_idx = np.where(np.isin(r_genes, common_genes))[0]
+    # ── Step 3: Subset both to common genes (mirrors notebook) ───────────
+    adata_query_sub = adata_query[:, common_gene_index].copy()
+    adata_ref_sub   = adata_ref_ep[:, common_gene_index].copy()
 
-    r_barcodes     = np.array(["REF_" + b for b in adata_ref_ep.obs_names])
-    q_barcodes_arr = np.array(adata_query.obs_names)
+    # ── Step 4: Extract raw counts (mirrors notebook: combined.X) ─────────
+    # Notebook:
+    #   raw = combined.X     # combined.X contains raw counts
+    #   if sp.issparse(raw): raw = raw.toarray()
+    #   count_df = pd.DataFrame(raw.T, index=combined.var_names, columns=combined.obs_names)
+    logger.info("SCEVAN: extracting raw counts from query and reference (after gene alignment)...")
+    mat_query = _get_raw_counts_from_adata(adata_query_sub, "SCEVAN-query")  # cells × genes
+    mat_ref   = _get_raw_counts_from_adata(adata_ref_sub,   "SCEVAN-ref")    # cells × genes
 
-    mat_combined = np.hstack([
-        mat_query[q_idx, :],
-        mat_ref[r_idx, :],
-    ])
+    # Prefix reference barcodes with REF_ to avoid collisions (notebook: keys=['tumor','normal'])
+    q_barcodes_arr = np.array(adata_query_sub.obs_names)
+    r_barcodes     = np.array(["REF_" + b for b in adata_ref_sub.obs_names])
+    common_genes   = np.array(common_gene_index)
+
+    # Stack cells: query on top, ref below → then transpose to genes × cells
+    # Mirrors notebook: ad.concat([adata_epi, adata_ref]) then raw.T
+    mat_combined = np.vstack([mat_query, mat_ref]).T   # genes × (query + ref) cells
     all_barcodes = np.concatenate([q_barcodes_arr, r_barcodes])
 
-    logger.info(
-        f"SCEVAN combined matrix: {mat_combined.shape[0]} genes × "
+    print(
+        f"  Combined matrix: {mat_combined.shape[0]} genes × "
         f"{mat_combined.shape[1]} cells "
         f"({len(q_barcodes_arr)} query + {len(r_barcodes)} ref)"
     )
 
+    # ── Step 5: Write CSVs and run SCEVAN R script ────────────────────────
+    _tmpdir_created = False
     if save_dir is None:
         save_dir = tempfile.mkdtemp(prefix="scart_scevan_")
         _tmpdir_created = True
     else:
         os.makedirs(save_dir, exist_ok=True)
-        _tmpdir_created = False
 
     try:
         counts_csv    = os.path.join(save_dir, "scevan_counts.csv")
@@ -604,15 +774,20 @@ def _run_scevan(
         results_csv   = os.path.join(save_dir, "scevan_full_results.csv")
         malignant_csv = os.path.join(save_dir, "scevan_malignant_cells.csv")
 
+        # Write count matrix (genes × cells) — mirrors notebook count_df.to_csv(...)
         logger.info(f"SCEVAN: writing count matrix ({mat_combined.shape}) ...")
         count_df = pd.DataFrame(
             mat_combined,
-            index=common_genes,
-            columns=all_barcodes,
+            index   = common_genes,
+            columns = all_barcodes,
         )
         count_df.to_csv(counts_csv)
         logger.info(f"SCEVAN count matrix written: {counts_csv}")
 
+        # Write normal barcodes — mirrors notebook normal_barcodes.csv
+        # Notebook: normal_mask = combined.obs['popv_prediction'] == 'Normal Epithelial cells'
+        #           normal_barcodes = combined.obs_names[normal_mask].tolist()
+        #           pd.Series(normal_barcodes).to_csv(...)
         pd.Series(r_barcodes.tolist()).to_csv(norm_csv, index=False, header=False)
         logger.info(f"SCEVAN normal barcodes written: {norm_csv} ({len(r_barcodes)} cells)")
 
@@ -739,7 +914,7 @@ cat("Done!\\n")
             logger.error(f"SCEVAN completed but results CSV not found: {results_csv}")
             return empty_result
 
-        # ── Parse results ─────────────────────────────────────────────────
+        # ── Step 6: Parse results ──────────────────────────────────────────
         pred_df   = pd.read_csv(results_csv, index_col=0)
         logger.info(f"SCEVAN results columns: {list(pred_df.columns)}")
 
@@ -757,6 +932,7 @@ cat("Done!\\n")
             .fillna("not.defined")
         )
 
+        # Left-join back to original query barcodes to handle any missing cells
         result_full = pd.DataFrame({"barcode": list(q_barcodes_arr)})
         result_full = result_full.merge(pred_df, on="barcode", how="left")
         result_full["scevan_prediction"] = (
@@ -797,7 +973,9 @@ def run_preprocessing_pipeline(
     surfaceome_path=None,
     malignant_strategy="intersection",
     # SCEVAN parameters
-    scevan_ref_max_cells=100,
+    scevan_ref_max_cells=500,
+    scevan_ref_cell_col="cell_ontology_class",
+    scevan_ref_epithelial_values=None,
     scevan_sample_name="SCEVAN_run",
     scevan_organism="human",
     scevan_par_cores=1,
@@ -816,9 +994,28 @@ def run_preprocessing_pipeline(
       "epithelial cell" is captured — e.g. "ovarian surface epithelial cell",
       "glandular epithelial cell", "lung epithelial cell", etc.
 
-    SCEVAN reference normal cells (FIX 2 + FIX 11):
-      Selected from the reference h5ad by substring-matching "epithelial cell"
-      in 'cell_ontology_class'.  No explicit list of cell type values needed.
+    SCEVAN reference normal cells (FIX 2 — notebook-aligned):
+      The reference h5ad is loaded and filtered to epithelial cells using:
+
+        scevan_ref_cell_col (str or None):
+          Column in reference obs used to identify cell types.
+          Default: "cell_ontology_class"  (Tabula Sapiens standard)
+          Set to None to skip filtering and use the entire reference.
+
+        scevan_ref_epithelial_values (list of str or None):
+          Exact label values to keep from scevan_ref_cell_col.
+          Default: None → substring match on "epithelial cell" (case-insensitive).
+          Example for custom reference:
+            scevan_ref_epithelial_values=["Normal Epithelial cells", "epithelial"]
+
+        scevan_ref_max_cells (int or None):
+          Maximum reference cells after filtering.
+          Default: 500  (use all if you have fewer; notebook uses all 476).
+          Set to None to use all available reference epithelial cells.
+
+      Gene alignment:
+        Common genes between query and reference are found FIRST, then both
+        are subset — matching the notebook approach exactly.
 
     malignant_strategy: 'intersection' | 'scMalignant' | 'scevan'
     """
@@ -856,13 +1053,7 @@ def run_preprocessing_pipeline(
     print(f"Full dataset loaded: {adata_full.n_obs} cells × {adata_full.n_vars} genes")
 
     # ── Manual annotation detection (Module 1 skip_popv path) ────────────
-    # When SampleAnnotator was run with manual_annotation_col=, it sets:
-    #   adata.uns['skip_popv'] = True
-    #   adata.obs['popv_majority_vote_prediction'] = copy of the user column
-    # Detect this and inform the user; no code change needed downstream
-    # because popv_majority_vote_prediction is already present and named
-    # correctly for Step 3 to consume.
-    _skip_popv = adata_full.uns.get("skip_popv", False)
+    _skip_popv  = adata_full.uns.get("skip_popv", False)
     _manual_col = adata_full.uns.get("manual_annotation_col", None)
 
     if _skip_popv:
@@ -873,7 +1064,6 @@ def run_preprocessing_pipeline(
             f"  PopV was skipped — using 'popv_majority_vote_prediction' "
             f"copied from column '{_manual_col}' by SampleAnnotator.\n"
         )
-        # Validate the required column is present
         if "popv_majority_vote_prediction" not in adata_full.obs.columns:
             raise ValueError(
                 "adata.uns['skip_popv'] is True but "
@@ -882,7 +1072,6 @@ def run_preprocessing_pipeline(
                 "Re-run SampleAnnotator with manual_annotation_col= to regenerate "
                 "the h5ad, or add 'popv_majority_vote_prediction' manually."
             )
-        # Show label summary so user can verify
         _label_counts = adata_full.obs["popv_majority_vote_prediction"].value_counts()
         _epi_labels   = [
             l for l in _label_counts.index
@@ -910,7 +1099,6 @@ def run_preprocessing_pipeline(
                 "re-run SampleAnnotator."
             )
     else:
-        # Normal PopV path — column must exist from Module 2
         if "popv_majority_vote_prediction" not in adata_full.obs.columns:
             raise ValueError(
                 "'popv_majority_vote_prediction' not found in adata.obs.\n"
@@ -919,7 +1107,7 @@ def run_preprocessing_pipeline(
                 "(SampleAnnotator) with manual_annotation_col= set."
             )
 
-    # Report what raw count source is available
+    # Report raw count source
     _raw_layers_present = [
         l for l in ("counts", "raw_counts", "scvi_counts")
         if l in adata_full.layers
@@ -940,9 +1128,6 @@ def run_preprocessing_pipeline(
     min_genes, max_mt, qc_active, qc_source = _read_qc_params(adata_full)
 
     # STEP 3 — Extract epithelial cells → QC
-    # FIX 11: use str.contains("epithelial cell") to capture ALL variants:
-    #   "epithelial cell", "ovarian surface epithelial cell",
-    #   "glandular epithelial cell", "lung epithelial cell", etc.
     print("\n--- Step 3: Epithelial selection" +
           (" + QC ---" if qc_active else " ---"))
 
@@ -953,11 +1138,8 @@ def run_preprocessing_pipeline(
           f"{ep_mask.sum()} / {adata_full.n_obs} total")
     print(f"Non-epithelial cells (will be 'rest' group for DEG): {(~ep_mask).sum()}")
 
-    # Log which unique epithelial labels were matched
     matched_labels = labels[ep_mask].unique()
-    logger.info(
-        f"Epithelial labels matched: {sorted(matched_labels)}"
-    )
+    logger.info(f"Epithelial labels matched: {sorted(matched_labels)}")
 
     adata_epi = adata_full[ep_mask].copy()
     before_qc = adata_epi.n_obs
@@ -989,7 +1171,7 @@ def run_preprocessing_pipeline(
     else:
         print(f"QC filtering SKIPPED — all {adata_epi.n_obs} epithelial cells proceed.\n")
 
-    # Set .X to raw counts; store in layers['raw_for_cna'] before normalisation
+    # Store raw counts before normalisation
     print("Setting up raw counts for epithelial cells...")
     _raw_epi = _get_raw_counts_from_adata(adata_epi, "epithelial-raw-setup")
     adata_epi.X                     = sp.csr_matrix(_raw_epi)
@@ -1107,16 +1289,18 @@ def run_preprocessing_pipeline(
             _rh = _get_r_home(_rs) if _rs else "NOT FOUND"
             print(
                 f"\n--- Step 4b: SCEVAN (subprocess) ---\n"
-                f"  Reference h5ad:  {reference_h5ad}\n"
-                f"  ref_max_cells:   {scevan_ref_max_cells}\n"
-                f"  sample_name:     {scevan_sample_name}\n"
-                f"  organism:        {scevan_organism}\n"
-                f"  par_cores:       {scevan_par_cores}\n"
-                f"  subclones:       {scevan_subclones}\n"
-                f"  batch_size:      {scevan_batch_size}\n"
-                f"  Rscript:         {_rs}\n"
-                f"  R home:          {_rh}\n"
-                f"  Ref selection:   contains 'epithelial cell' in cell_ontology_class"
+                f"  Reference h5ad:           {reference_h5ad}\n"
+                f"  ref_cell_col:             {scevan_ref_cell_col}\n"
+                f"  ref_epithelial_values:    {scevan_ref_epithelial_values}\n"
+                f"  ref_max_cells:            {scevan_ref_max_cells} "
+                f"({'all available' if scevan_ref_max_cells is None else 'max'})\n"
+                f"  sample_name:              {scevan_sample_name}\n"
+                f"  organism:                 {scevan_organism}\n"
+                f"  par_cores:                {scevan_par_cores}\n"
+                f"  subclones:                {scevan_subclones}\n"
+                f"  batch_size:               {scevan_batch_size}\n"
+                f"  Rscript:                  {_rs}\n"
+                f"  R home:                   {_rh}"
             )
 
             if not _raw_layers_present:
@@ -1128,23 +1312,27 @@ def run_preprocessing_pipeline(
                 )
 
             try:
+                # Restore raw counts for SCEVAN query
                 adata_raw_cna   = adata_epi.copy()
                 adata_raw_cna.X = adata_epi.layers["raw_for_cna"]
+
                 adata_ref_full  = sc.read_h5ad(reference_h5ad)
 
                 scevan_work_dir = os.path.join(save_dir, "scevan")
                 os.makedirs(scevan_work_dir, exist_ok=True)
 
                 scevan_result_df = _run_scevan(
-                    adata_query   = adata_raw_cna,
-                    adata_ref     = adata_ref_full,
-                    ref_max_cells = scevan_ref_max_cells,
-                    sample_name   = scevan_sample_name,
-                    organism      = scevan_organism,
-                    par_cores     = scevan_par_cores,
-                    subclones     = scevan_subclones,
-                    batch_size    = scevan_batch_size,
-                    save_dir      = scevan_work_dir,
+                    adata_query             = adata_raw_cna,
+                    adata_ref               = adata_ref_full,
+                    ref_cell_col            = scevan_ref_cell_col,
+                    ref_epithelial_values   = scevan_ref_epithelial_values,
+                    ref_max_cells           = scevan_ref_max_cells,
+                    sample_name             = scevan_sample_name,
+                    organism                = scevan_organism,
+                    par_cores               = scevan_par_cores,
+                    subclones               = scevan_subclones,
+                    batch_size              = scevan_batch_size,
+                    save_dir                = scevan_work_dir,
                 )
 
                 bc_to_pred = dict(zip(
