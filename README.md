@@ -138,19 +138,29 @@ annotator = SampleAnnotator("GSE158937", min_genes=300)
 # ── Option 4: Single GEO ID with MT filter only ───────────────────────────
 annotator = SampleAnnotator("GSE158937", max_mt=25)
 
-# ── Option 5: Multiple GEO IDs → saves combined_tumor.h5ad ───────────────
+# ── Option 5: Single GEO ID with manually specified cancer type ───────────
+# Auto-detection is skipped; the provided value is used directly
+annotator = SampleAnnotator("GSE158937", cancer_type="ovary_cancer",
+                             min_genes=200, max_mt=40)
+
+# ── Option 6: Multiple GEO IDs → saves combined_tumor.h5ad ───────────────
 annotator = SampleAnnotator("GSE158937", "GSE184880", "GSE217517",
                              min_genes=200, max_mt=40)
 
-# ── Option 6: User-supplied h5ad instead of GEO download ─────────────────
+# ── Option 7: Multiple GEO IDs with manual cancer type ───────────────────
+annotator = SampleAnnotator("GSE158937", "GSE184880",
+                             cancer_type="ovary_cancer",
+                             min_genes=200, max_mt=40)
+
+# ── Option 8: User-supplied h5ad instead of GEO download ─────────────────
 annotator = SampleAnnotator("/path/to/my_data.h5ad",
                              min_genes=200, max_mt=40)
 
-# ── Option 7: Mixed — GEO ID + user h5ad combined ────────────────────────
+# ── Option 9: Mixed — GEO ID + user h5ad combined ────────────────────────
 annotator = SampleAnnotator("GSE158937", "/path/to/extra_data.h5ad",
                              min_genes=200, max_mt=40)
 
-# ── Option 8: User h5ad WITH manual cell-type annotations ────────────────
+# ── Option 10: User h5ad WITH manual cell-type annotations ───────────────
 # Skips Module 2 (PopV) entirely — go straight to Module 3 after this
 annotator = SampleAnnotator(
     "my_data.h5ad",
@@ -168,7 +178,7 @@ normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = 
 # unspecified     → list of unclassified sample IDs
 # annotation_info → dict mapping sample ID → "tumor" / "normal" / "unspecified"
 # query_h5ad      → path to the saved tumour h5ad (input for Module 2)
-# cancer_type     → detected cancer type string (e.g. "ovary_cancer")
+# cancer_type     → cancer type string (user-supplied or auto-detected)
 # results         → full per-GSE result dictionary
 ```
 
@@ -176,6 +186,12 @@ normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = 
 > - Single GEO run → `GSE*_tumor.h5ad`
 > - Multiple inputs → `combined_tumor.h5ad`
 > - User h5ad input → `input_tumor.h5ad`
+
+> **Cancer type note**
+> When `cancer_type` is provided, auto-detection from GEO metadata is skipped
+> entirely and the supplied value is stored in `adata.uns['cancer_type']`.
+> The value must match one of the keys in `TABULA_FILES` (e.g. `"ovary_cancer"`).
+> To see all valid keys: `from SCART.geo_fetcher import VALID_CANCER_TYPES; print(VALID_CANCER_TYPES)`
 
 > **Manual annotation note**
 > When `manual_annotation_col` is provided, Module 1 stores `adata.uns['skip_popv'] = True`
@@ -286,7 +302,7 @@ adata_preprocessed = preprocessing.run_preprocessing_pipeline(
 adata_preprocessed = preprocessing.run_preprocessing_pipeline(
     reference_h5ad       = "/path/to/tissue_reference.h5ad",
     malignant_strategy   = "intersection",
-    scevan_ref_max_cells = 200,   # default 100; increase for more stable CNV calls
+    scevan_ref_max_cells = 200,   # default 500; increase for more stable CNV calls
 )
 
 # ── Option 6: Explicit file paths (if auto-detection fails) ───────────────
@@ -499,7 +515,7 @@ Downloads GEO datasets or accepts existing h5ad files, classifies samples as tum
 from SCART.geo_fetcher import SampleAnnotator
 
 annotator = SampleAnnotator(*inputs, min_genes=None, max_mt=None,
-                             manual_annotation_col=None)
+                             cancer_type=None, manual_annotation_col=None)
 normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = annotator.run()
 ```
 
@@ -510,6 +526,7 @@ normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = 
 | `*inputs` | str | — | One or more GEO accession IDs (e.g. `"GSE158937"`) or paths to `.h5ad` files |
 | `min_genes` | int or None | `None` | Minimum genes per cell for QC in Module 3. `None` = QC skipped |
 | `max_mt` | float or None | `None` | Maximum mitochondrial % per cell. `None` = QC skipped |
+| `cancer_type` | str or None | `None` | Manually specify the cancer type (e.g. `"ovary_cancer"`). When provided, auto-detection from GEO metadata is skipped. Must be a valid key from `TABULA_FILES`. Multiple types accepted as a comma-separated string: `"ovary_cancer, lung_cancer"` |
 | `manual_annotation_col` | str or None | `None` | Name of the obs column in your h5ad that contains cell-type labels. When set, Module 2 (PopV) is skipped. Only applies to h5ad inputs — ignored for GEO IDs |
 
 **Usage examples**
@@ -521,8 +538,16 @@ annotator = SampleAnnotator("GSE158937")
 # Single GEO ID with QC
 annotator = SampleAnnotator("GSE158937", min_genes=200, max_mt=40)
 
+# Single GEO ID with manually specified cancer type
+annotator = SampleAnnotator("GSE158937", cancer_type="ovary_cancer",
+                             min_genes=200, max_mt=40)
+
 # Multiple GEO IDs → saves combined_tumor.h5ad
 annotator = SampleAnnotator("GSE158937", "GSE184880", min_genes=200, max_mt=40)
+
+# Multiple GEO IDs with manual cancer type
+annotator = SampleAnnotator("GSE158937", "GSE184880",
+                             cancer_type="ovary_cancer", min_genes=200, max_mt=40)
 
 # User-supplied h5ad
 annotator = SampleAnnotator("/path/to/my_data.h5ad", min_genes=200, max_mt=40)
@@ -536,6 +561,26 @@ annotator = SampleAnnotator("/path/to/my_data.h5ad",
 annotator = SampleAnnotator("GSE158937", "/path/to/extra.h5ad")
 ```
 
+**Valid cancer type values**
+
+Pass any of the following strings to `cancer_type=`:
+
+```
+bladder_cancer, blood_cancer, bone_marrow_cancer, breast_cancer,
+ear_cancer, eye_cancer, fat_cancer, heart_cancer, kidney_cancer,
+large_intestine_cancer, liver_cancer, lung_cancer, lymph_node_cancer,
+muscle_cancer, ovary_cancer, pancreas_cancer, prostate_cancer,
+salivary_gland_cancer, skin_cancer, small_intestine_cancer, spleen_cancer,
+stomach_cancer, testis_cancer, thymus_cancer, tongue_cancer, trachea_cancer,
+uterus_cancer, vasculature_cancer
+```
+
+To print all valid values at runtime:
+```python
+from SCART.geo_fetcher import VALID_CANCER_TYPES
+print(VALID_CANCER_TYPES)
+```
+
 **Output files**
 
 | File | Description |
@@ -547,6 +592,10 @@ annotator = SampleAnnotator("GSE158937", "/path/to/extra.h5ad")
 **QC parameter flow**
 
 QC thresholds set here are stored in `adata.uns['qc_params']` and automatically read by Module 3. If neither `min_genes` nor `max_mt` is provided, the QC step in Module 3 is skipped entirely — no defaults are silently applied.
+
+**Cancer type flow**
+
+When `cancer_type` is provided, it is stored in `adata.uns['cancer_type']` and used directly for reference guidance printed at the end of `run()`. When `cancer_type` is `None` (default), the type is inferred by keyword-matching the GEO title and summary fields. The user-supplied value always takes priority over any auto-detected value. A `ValueError` is raised immediately at construction time if an unrecognised cancer type key is passed.
 
 **Manual annotation flow**
 
@@ -615,12 +664,14 @@ adata_preprocessed = preprocessing.run_preprocessing_pipeline(
     log2fc_threshold   = 2.0,
     pval_adj_threshold = 0.05,
     malignant_strategy = "intersection",
-    scevan_ref_max_cells = 100,
-    scevan_sample_name   = "SCEVAN_run",
-    scevan_organism      = "human",
-    scevan_par_cores     = 1,
-    scevan_subclones     = False,
-    scevan_batch_size    = 3000,
+    scevan_ref_cell_col          = "cell_ontology_class",
+    scevan_ref_epithelial_values = None,
+    scevan_ref_max_cells         = 500,
+    scevan_sample_name           = "SCEVAN_run",
+    scevan_organism              = "human",
+    scevan_par_cores             = 1,
+    scevan_subclones             = False,
+    scevan_batch_size            = 3000,
 )
 ```
 
@@ -632,11 +683,13 @@ adata_preprocessed = preprocessing.run_preprocessing_pipeline(
 | `popv_path` | str or None | `None` | Explicit path to PopV h5ad |
 | `log2fc_threshold` | float | `1.0` | DEG log2 fold-change cutoff |
 | `pval_adj_threshold` | float | `0.05` | DEG BH-adjusted p-value cutoff |
-| `reference_h5ad` | str or None | `None` | Tabula Sapiens h5ad for SCEVAN normal reference. SCEVAN skipped if None |
+| `reference_h5ad` | str or None | `None` | h5ad for SCEVAN normal reference. SCEVAN skipped if None |
 | `tumor_h5ad` | str or None | `None` | Module 1 h5ad for scMalignantFinder full-gene recovery. Auto-detected if None |
 | `save_dir` | str or None | `None` | Output directory. Default: `<cwd>/preprocessing_results/` |
 | `malignant_strategy` | str | `"intersection"` | `"intersection"` (both tools must agree), `"scMalignant"`, or `"scevan"` |
-| `scevan_ref_max_cells` | int | `100` | Maximum normal reference cells subsampled for SCEVAN |
+| `scevan_ref_cell_col` | str or None | `"cell_ontology_class"` | Column in reference h5ad used to identify cell types. Set to `None` to skip filtering and use all cells in the reference as-is |
+| `scevan_ref_epithelial_values` | list or None | `None` | Exact label list to select epithelial cells from `scevan_ref_cell_col`. When `None`, epithelial cells are auto-detected by substring match on `"epithelial cell"` (default Tabula Sapiens behaviour) |
+| `scevan_ref_max_cells` | int or None | `500` | Maximum normal reference cells subsampled for SCEVAN. Set to `None` to use all available cells |
 | `scevan_sample_name` | str | `"SCEVAN_run"` | Prefix for SCEVAN output files |
 | `scevan_organism` | str | `"human"` | `"human"` or `"mouse"` |
 | `scevan_par_cores` | int | `1` | CPU cores per SCEVAN batch |
@@ -645,6 +698,56 @@ adata_preprocessed = preprocessing.run_preprocessing_pipeline(
 
 **QC thresholds** are not parameters here — they are read automatically from `adata.uns['qc_params']` set in Module 1.
 
+#### Module 3 — SCEVAN Reference Configuration
+
+SCEVAN requires a reference h5ad of known normal epithelial cells as a CNV baseline. Pass it via `reference_h5ad=`. Three usage modes are supported:
+
+**Mode A — Tabula Sapiens (default)**
+
+The default works out-of-the-box with any Tabula Sapiens organ h5ad. Epithelial cells are auto-detected by substring match on `cell_ontology_class`.
+
+```python
+preprocessing.run_preprocessing_pipeline(
+    reference_h5ad               = "Ovary_ref_Tabula_sapiens.h5ad",
+    scevan_ref_cell_col          = "cell_ontology_class",   # default
+    scevan_ref_epithelial_values = None,                    # default: substring match
+    scevan_ref_max_cells         = 500,                     # default
+)
+```
+
+**Mode B — Custom reference with your own labels**
+
+Supply the column name and exact label values to select epithelial cells.
+
+```python
+preprocessing.run_preprocessing_pipeline(
+    reference_h5ad               = "my_reference.h5ad",
+    scevan_ref_cell_col          = "cell_type",
+    scevan_ref_epithelial_values = ["Normal Epithelial cells", "epithelial"],
+    scevan_ref_max_cells         = None,   # use all available cells
+)
+```
+
+**Mode C — Pre-filtered reference (already epithelial only)**
+
+If your reference is already subsetted to epithelial cells, skip filtering entirely.
+
+```python
+preprocessing.run_preprocessing_pipeline(
+    reference_h5ad       = "epithelial_ref_only.h5ad",
+    scevan_ref_cell_col  = None,    # no filtering applied
+    scevan_ref_max_cells = None,
+)
+```
+
+> **Tip:** To find the correct column name and labels in your reference, run:
+> ```python
+> import scanpy as sc
+> ref = sc.read_h5ad("your_reference.h5ad")
+> print(ref.obs.columns.tolist())
+> print(ref.obs["your_col"].value_counts())
+> ```
+
 **Pipeline steps**
 
 1. Load full PopV-annotated dataset (or manual-annotation h5ad)
@@ -652,7 +755,7 @@ adata_preprocessed = preprocessing.run_preprocessing_pipeline(
 3. Read QC thresholds from `adata.uns['qc_params']` (skipped if absent)
 4. Extract epithelial cells via substring match on `"epithelial cell"` → apply QC filters if set
 5. Run **scMalignantFinder** (machine learning classifier) on full gene space
-6. Run **SCEVAN** (copy number alteration profiling) against normal reference cells selected by substring match on `"epithelial cell"` in `cell_ontology_class`
+6. Run **SCEVAN** (copy number alteration profiling) against normal reference cells selected according to `scevan_ref_cell_col` and `scevan_ref_epithelial_values`
 7. Combine predictions with chosen strategy → `final_malignant` column
 8. Keep only malignant epithelial cells; extract non-epithelial cells as DEG reference
 9. Filter both groups to surfaceome genes (GESP database)
@@ -871,7 +974,9 @@ annotator = SampleAnnotator(
 
 | Parameter | Default | Range / Options | Effect of increasing | Effect of decreasing |
 |---|---|---|---|---|
-| `scevan_ref_max_cells` | `100` | `50–500` | More stable CNV baseline, slower | Faster, marginally less stable |
+| `scevan_ref_cell_col` | `"cell_ontology_class"` | any obs column name, or `None` | — | Set to `None` to skip reference filtering entirely |
+| `scevan_ref_epithelial_values` | `None` | list of strings, or `None` | More specific cell selection | `None` uses substring match on `"epithelial cell"` |
+| `scevan_ref_max_cells` | `500` | `50–500`, or `None` | More stable CNV baseline, slower | `None` uses all available cells |
 | `scevan_batch_size` | `3000` | `500–5000` | Fewer batches, more RAM per batch | More batches, less RAM per batch |
 | `scevan_par_cores` | `1` | `1–N` | Faster per-batch classification | — |
 | `scevan_subclones` | `False` | `True / False` | Infers tumour subclone structure | Runs faster, no subclone output |
