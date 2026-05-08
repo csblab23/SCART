@@ -46,6 +46,12 @@ CAR-T therapy requires surface targets that are highly expressed on tumour cells
 
 ---
 
+## Pipeline Architecture
+
+To be added
+
+---
+
 ## Installation
 
 ### 1. Create and activate the conda environment
@@ -121,28 +127,28 @@ from SCART.geo_fetcher import SampleAnnotator
 
 # ── Option 1: Single GEO ID, QC disabled (default) ───────────────────────
 # QC step in Module 3 will be skipped entirely
-annotator = SampleAnnotator("GSE158937")
+annotator = SampleAnnotator("your_GEO_accession_ID")
 
 # ── Option 2: Single GEO ID with both QC thresholds ──────────────────────
-annotator = SampleAnnotator("GSE158937", min_genes=200, max_mt=40)
+annotator = SampleAnnotator("your_GEO_accession_ID", min_genes=200, max_mt=40)
 
 # ── Option 3: Single GEO ID with gene-count filter only ──────────────────
-annotator = SampleAnnotator("GSE158937", min_genes=300)
+annotator = SampleAnnotator("your_GEO_accession_ID", min_genes=300)
 
 # ── Option 4: Single GEO ID with MT filter only ───────────────────────────
-annotator = SampleAnnotator("GSE158937", max_mt=25)
+annotator = SampleAnnotator("your_GEO_accession_ID", max_mt=25)
 
 # ── Option 5: Single GEO ID with manually specified cancer type ───────────
 # Auto-detection is skipped; the provided value is used directly
-annotator = SampleAnnotator("GSE158937", cancer_type="ovary_cancer",
+annotator = SampleAnnotator("your_GEO_accession_ID", cancer_type="ovary_cancer",
                              min_genes=200, max_mt=40)
 
 # ── Option 6: Multiple GEO IDs → saves combined_tumor.h5ad ───────────────
-annotator = SampleAnnotator("GSE158937", "GSE184880", "GSE217517",
-                             min_genes=200, max_mt=40)
+annotator = SampleAnnotator("your_GEO_accession_ID_1", "your_GEO_accession_ID_2",
+                             "your_GEO_accession_ID_3", min_genes=200, max_mt=40)
 
 # ── Option 7: Multiple GEO IDs with manual cancer type ───────────────────
-annotator = SampleAnnotator("GSE158937", "GSE184880",
+annotator = SampleAnnotator("your_GEO_accession_ID_1", "your_GEO_accession_ID_2",
                              cancer_type="ovary_cancer",
                              min_genes=200, max_mt=40)
 
@@ -151,7 +157,7 @@ annotator = SampleAnnotator("/path/to/my_data.h5ad",
                              min_genes=200, max_mt=40)
 
 # ── Option 9: Mixed — GEO ID + user h5ad combined ────────────────────────
-annotator = SampleAnnotator("GSE158937", "/path/to/extra_data.h5ad",
+annotator = SampleAnnotator("your_GEO_accession_ID", "/path/to/extra_data.h5ad",
                              min_genes=200, max_mt=40)
 
 # ── Option 10: User h5ad WITH manual cell-type annotations ───────────────
@@ -302,7 +308,7 @@ adata_preprocessed = preprocessing.run_preprocessing_pipeline(
 # ── Option 6: Explicit file paths (if auto-detection fails) ───────────────
 adata_preprocessed = preprocessing.run_preprocessing_pipeline(
     popv_path      = "/path/to/final_popv_annotated.h5ad",
-    tumor_h5ad     = "/path/to/GSE158937_tumor.h5ad",
+    tumor_h5ad     = "/path/to/tumor.h5ad",
     reference_h5ad = "/path/to/tissue_reference.h5ad",
     save_dir       = "/path/to/my_output_dir/",
 )
@@ -517,7 +523,7 @@ normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = 
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `*inputs` | str | — | One or more GEO accession IDs (e.g. `"GSE158937"`) or paths to `.h5ad` files |
+| `*inputs` | str | — | One or more GEO accession IDs (e.g. `"GSExxxxxx"`) or paths to `.h5ad` files |
 | `min_genes` | int or None | `None` | Minimum genes per cell for QC in Module 3. `None` = QC skipped |
 | `max_mt` | float or None | `None` | Maximum mitochondrial % per cell. `None` = QC skipped |
 | `cancer_type` | str or None | `None` | Manually specify the cancer type (e.g. `"ovary_cancer"`). When provided, auto-detection from GEO metadata is skipped. Must be a valid key from `TABULA_FILES`. Multiple types accepted as a comma-separated string: `"ovary_cancer, lung_cancer"` |
@@ -527,20 +533,21 @@ normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = 
 
 ```python
 # Single GEO ID, no QC
-annotator = SampleAnnotator("GSE158937")
+annotator = SampleAnnotator("your_GEO_accession_ID")
 
 # Single GEO ID with QC
-annotator = SampleAnnotator("GSE158937", min_genes=200, max_mt=40)
+annotator = SampleAnnotator("your_GEO_accession_ID", min_genes=200, max_mt=40)
 
 # Single GEO ID with manually specified cancer type
-annotator = SampleAnnotator("GSE158937", cancer_type="ovary_cancer",
+annotator = SampleAnnotator("your_GEO_accession_ID", cancer_type="ovary_cancer",
                              min_genes=200, max_mt=40)
 
 # Multiple GEO IDs → saves combined_tumor.h5ad
-annotator = SampleAnnotator("GSE158937", "GSE184880", min_genes=200, max_mt=40)
+annotator = SampleAnnotator("your_GEO_accession_ID_1", "your_GEO_accession_ID_2",
+                             min_genes=200, max_mt=40)
 
 # Multiple GEO IDs with manual cancer type
-annotator = SampleAnnotator("GSE158937", "GSE184880",
+annotator = SampleAnnotator("your_GEO_accession_ID_1", "your_GEO_accession_ID_2",
                              cancer_type="ovary_cancer", min_genes=200, max_mt=40)
 
 # User-supplied h5ad
@@ -552,7 +559,7 @@ annotator = SampleAnnotator("/path/to/my_data.h5ad",
                              min_genes=200, max_mt=40)
 
 # Mixed GEO + h5ad
-annotator = SampleAnnotator("GSE158937", "/path/to/extra.h5ad")
+annotator = SampleAnnotator("your_GEO_accession_ID", "/path/to/extra.h5ad")
 ```
 
 **Valid cancer type values**
