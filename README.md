@@ -7,7 +7,7 @@
 
 ---
 
-![Module 4 Workflow](SCART/external/Screenshot2.png)
+![Module 4 Workflow](SCART/external/Screenshot.png) To be added
 
 ---
 
