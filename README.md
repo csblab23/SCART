@@ -434,34 +434,34 @@ Tabula Sapiens filename to download from
 
 | `cancer_type=` key | Tissue / Cancer | Tabula Sapiens filename to download |
 |---|---|---|
-| `"bladder_cancer"` | Bladder / urothelial carcinoma | `Bladder_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
-| `"blood_cancer"` | Blood / leukaemia, lymphoma, myeloma | `Blood_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
-| `"bone_marrow_cancer"` | Bone marrow / myeloma, MDS, AML | `Bone_Marrow_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
-| `"breast_cancer"` | Breast / mammary carcinoma | `Mammary_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
-| `"ear_cancer"` | Ear / acoustic neuroma, middle ear tumour | `Ear_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
-| `"eye_cancer"` | Eye / retinoblastoma, uveal melanoma | `Eye_TSP1_30_version2d_10X_smartseq_scvi_Nov122024_updated.h5ad` |
-| `"fat_cancer"` | Adipose / liposarcoma | `Fat_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
-| `"heart_cancer"` | Heart / cardiac tumour, myxoma | `Heart_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
-| `"kidney_cancer"` | Kidney / renal cell carcinoma | `Kidney_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
-| `"large_intestine_cancer"` | Colon & rectum / colorectal cancer | `Large_Intestine_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
-| `"liver_cancer"` | Liver / HCC, cholangiocarcinoma | `Liver_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
-| `"lung_cancer"` | Lung / NSCLC, SCLC, mesothelioma | `Lung_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
-| `"lymph_node_cancer"` | Lymph node / DLBCL, Hodgkin, follicular lymphoma | `Lymph_Node_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
-| `"muscle_cancer"` | Muscle / rhabdomyosarcoma, leiomyosarcoma | `Muscle_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
-| `"ovary_cancer"` | Ovary / HGSOC, LGSOC, clear cell, endometrioid | `Ovary_TSP1_30_version2d_10X_smartseq_scvi_Nov262024.h5ad` |
-| `"pancreas_cancer"` | Pancreas / PDAC, pancreatic neuroendocrine | `Pancreas_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
-| `"prostate_cancer"` | Prostate / prostate adenocarcinoma, CRPC | `Prostate_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
-| `"salivary_gland_cancer"` | Salivary gland / mucoepidermoid, adenoid cystic | `Salivary_Gland_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
-| `"skin_cancer"` | Skin / melanoma, squamous cell, basal cell | `Skin_TSP1_30_version2d_10X_smartseq_scvi_Nov122024_updated.h5ad` |
-| `"small_intestine_cancer"` | Small intestine / duodenal, GIST | `Small_Intestine_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
-| `"spleen_cancer"` | Spleen / splenic lymphoma, marginal zone | `Spleen_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
-| `"stomach_cancer"` | Stomach / gastric carcinoma, signet ring | `Stomach_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
-| `"testis_cancer"` | Testis / seminoma, germ cell tumour | `Testis_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
-| `"thymus_cancer"` | Thymus / thymoma, thymic carcinoma | `Thymus_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
-| `"tongue_cancer"` | Tongue / oral tongue squamous cell carcinoma | `Tongue_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"bladder_cancer"` | Bladder / urothelial carcinoma, transitional cell carcinoma | `Bladder_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"blood_cancer"` | Blood / leukaemia (AML, CML, ALL, CLL), lymphoma, myeloma, PBMC | `Blood_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"bone_marrow_cancer"` | Bone marrow / multiple myeloma, MDS, myelofibrosis, aplastic anaemia | `Bone_Marrow_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"ear_cancer"` | Ear / vestibular schwannoma, acoustic neuroma, glomus jugulare | `Ear_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"eye_cancer"` | Eye / retinoblastoma, uveal melanoma, conjunctival, orbital tumour | `Eye_TSP1_30_version2d_10X_smartseq_scvi_Nov122024_updated.h5ad` |
+| `"fat_cancer"` | Adipose / liposarcoma (well-differentiated, dedifferentiated, myxoid) | `Fat_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"heart_cancer"` | Heart / cardiac myxoma, cardiac sarcoma, rhabdomyoma, fibroma | `Heart_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"kidney_cancer"` | Kidney / renal cell carcinoma (clear cell, papillary, chromophobe), Wilms tumour | `Kidney_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"large_intestine_cancer"` | Colon & rectum / colorectal cancer, CRC, microsatellite instability | `Large_Intestine_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"liver_cancer"` | Liver / hepatocellular carcinoma (HCC), intrahepatic cholangiocarcinoma, gallbladder | `Liver_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"lung_cancer"` | Lung / NSCLC (LUAD, LUSC), SCLC, mesothelioma, pleural, bronchial | `Lung_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"lymph_node_cancer"` | Lymph node / DLBCL, follicular lymphoma, Hodgkin, mantle cell, Burkitt | `Lymph_Node_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"breast_cancer"` | Breast / TNBC, HER2+, luminal A/B, IDC, ILC, DCIS, inflammatory breast | `Mammary_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"muscle_cancer"` | Muscle / rhabdomyosarcoma, leiomyosarcoma, synovial sarcoma, soft tissue sarcoma | `Muscle_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"ovary_cancer"` | Ovary / HGSOC, LGSOC, clear cell, endometrioid, mucinous, fallopian tube | `Ovary_TSP1_30_version2d_10X_smartseq_scvi_Nov262024.h5ad` |
+| `"pancreas_cancer"` | Pancreas / PDAC, pancreatic neuroendocrine tumour (PNET), acinar cell | `Pancreas_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"prostate_cancer"` | Prostate / prostate adenocarcinoma, castration-resistant (CRPC), neuroendocrine prostate | `Prostate_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"salivary_gland_cancer"` | Salivary gland / mucoepidermoid carcinoma, adenoid cystic, acinic cell, parotid | `Salivary_Gland_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"skin_cancer"` | Skin / cutaneous melanoma, squamous cell, basal cell, Merkel cell, acral melanoma | `Skin_TSP1_30_version2d_10X_smartseq_scvi_Nov122024_updated.h5ad` |
+| `"small_intestine_cancer"` | Small intestine / duodenal, jejunal, ileal carcinoma, GIST | `Small_Intestine_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"spleen_cancer"` | Spleen / splenic marginal zone lymphoma, splenic haemangioma | `Spleen_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"stomach_cancer"` | Stomach / gastric carcinoma, signet ring, diffuse gastric, gastroesophageal junction | `Stomach_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"testis_cancer"` | Testis / seminoma, non-seminoma, germ cell tumour, yolk sac tumour, teratoma | `Testis_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"thymus_cancer"` | Thymus / thymoma, thymic carcinoma, thymic epithelial tumour | `Thymus_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"tongue_cancer"` | Tongue / oral tongue squamous cell carcinoma, lingual carcinoma | `Tongue_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
 | `"trachea_cancer"` | Trachea / tracheal carcinoma, airway tumour | `Trachea_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
-| `"uterus_cancer"` | Uterus / endometrial, cervical carcinoma | `Uterus_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
-| `"vasculature_cancer"` | Vasculature / angiosarcoma, Kaposi sarcoma | `Vasculature_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"uterus_cancer"` | Uterus / endometrial carcinoma, cervical carcinoma, uterine sarcoma, leiomyosarcoma | `Uterus_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"vasculature_cancer"` | Vasculature / angiosarcoma, Kaposi sarcoma, haemangioendothelioma | `Vasculature_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
 
 > **Not in the table?** For any cancer type not listed above (e.g. `"brain_cancer"`,
 > `"thyroid_cancer"`, `"esophageal_cancer"`), pass the label as a free-text string.
