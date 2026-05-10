@@ -1,5 +1,6 @@
 import GEOparse
 import os
+import tarfile
 import scanpy as sc
 import anndata as ad
 import pandas as pd
@@ -655,6 +656,117 @@ class SampleAnnotator:
 
     # ──────────────────────────────────────────────────────────────────────
 
+    def _extract_tarballs(self, gsm_dir: str):
+        """
+        Extract any .tar.gz / .tar archives present in *gsm_dir* into that
+        same directory.
+
+        GEO sometimes ships the 10x MTX triplet packaged inside a tarball
+        (e.g. ``GSM4257051_G2_filtered_feature_bc_matrix.tar.gz``).  This
+        method unpacks every such archive it finds so that the subsequent
+        MTX-scanning logic can locate the individual files.
+
+        Already-extracted files are detected by checking whether the archive
+        member paths already exist on disk; if they do the archive is skipped
+        to avoid redundant work on re-runs.
+
+        Parameters
+        ----------
+        gsm_dir : str
+            Directory that was just located for this GSM sample.
+        """
+        for fname in os.listdir(gsm_dir):
+            # Accept both .tar.gz and plain .tar
+            if not (fname.endswith(".tar.gz") or fname.endswith(".tar")):
+                continue
+
+            tar_path = os.path.join(gsm_dir, fname)
+
+            try:
+                with tarfile.open(tar_path, "r:*") as tf:
+                    members = tf.getmembers()
+
+                    # Skip if every member already exists on disk
+                    all_present = all(
+                        os.path.exists(os.path.join(gsm_dir, m.name))
+                        for m in members if m.isfile()
+                    )
+                    if all_present:
+                        continue
+
+                    print(f"  Extracting {fname} → {gsm_dir}")
+                    tf.extractall(path=gsm_dir)
+
+            except Exception as exc:
+                print(f"  Warning: could not extract {fname}: {exc}")
+
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _find_mtx_dir(self, root: str):
+        """
+        Walk *root* recursively and return the first directory that contains
+        all three 10x MTX files (matrix.mtx / matrix.mtx.gz, features /
+        genes TSV, barcodes TSV).
+
+        This handles the common GEO pattern where the tarball extracts into
+        a subdirectory named after the sample, e.g.:
+
+            Supp_GSM4257051_G2/
+              filtered_feature_bc_matrix/
+                matrix.mtx.gz
+                features.tsv.gz
+                barcodes.tsv.gz
+
+        Returns
+        -------
+        str or None
+            Absolute path to the directory containing the MTX triplet, or
+            ``None`` if no such directory is found under *root*.
+        """
+        for dirpath, dirnames, filenames in os.walk(root):
+            lower = [f.lower() for f in filenames]
+
+            has_matrix   = any("matrix"   in f and (f.endswith(".mtx.gz") or f.endswith(".mtx"))   for f in lower)
+            has_features = any(("features" in f or "genes" in f) and (f.endswith(".tsv.gz") or f.endswith(".tsv")) for f in lower)
+            has_barcodes = any("barcodes" in f and (f.endswith(".tsv.gz") or f.endswith(".tsv"))   for f in lower)
+
+            if has_matrix and has_features and has_barcodes:
+                return dirpath
+
+        return None
+
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _rename_mtx_files(self, mtx_dir: str):
+        """
+        Rename the MTX triplet inside *mtx_dir* to the canonical names that
+        ``sc.read_10x_mtx`` expects:
+            matrix.mtx.gz  /  features.tsv.gz  /  barcodes.tsv.gz
+
+        Skips any rename where the target name already exists.
+        """
+        for fname in os.listdir(mtx_dir):
+            src = os.path.join(mtx_dir, fname)
+            fl  = fname.lower()
+
+            if "matrix" in fl and (fl.endswith(".mtx.gz") or fl.endswith(".mtx")):
+                dst_name = "matrix.mtx.gz" if fl.endswith(".gz") else "matrix.mtx"
+            elif ("features" in fl or "genes" in fl) and (fl.endswith(".tsv.gz") or fl.endswith(".tsv")):
+                dst_name = "features.tsv.gz" if fl.endswith(".gz") else "features.tsv"
+            elif "barcodes" in fl and (fl.endswith(".tsv.gz") or fl.endswith(".tsv")):
+                dst_name = "barcodes.tsv.gz" if fl.endswith(".gz") else "barcodes.tsv"
+            else:
+                continue
+
+            dst = os.path.join(mtx_dir, dst_name)
+            if src != dst and not os.path.exists(dst):
+                try:
+                    os.rename(src, dst)
+                except Exception:
+                    pass
+
+    # ──────────────────────────────────────────────────────────────────────
+
     def _build_h5ad(self, gse_id, tumor_samples, save_single=False):
 
         if len(tumor_samples) == 0:
@@ -680,55 +792,40 @@ class SampleAnnotator:
                 else:
                     continue
 
+            # ── Step 1: extract any tarballs present in gsm_dir ───────────
+            self._extract_tarballs(gsm_dir)
+
             files = os.listdir(gsm_dir)
-
-            matrix_file   = None
-            features_file = None
-            barcodes_file = None
-
-            for f in files:
-                if "matrix"   in f and f.endswith(".mtx.gz"):
-                    matrix_file   = f
-                elif "features" in f and f.endswith(".tsv.gz"):
-                    features_file = f
-                elif "barcodes" in f and f.endswith(".tsv.gz"):
-                    barcodes_file = f
 
             adata = None
 
-            if matrix_file and features_file and barcodes_file:
+            # ── Step 2: locate the MTX triplet (may be in a sub-directory) ─
+            mtx_dir = self._find_mtx_dir(gsm_dir)
+
+            if mtx_dir is not None:
+                # Rename to canonical names expected by sc.read_10x_mtx
+                self._rename_mtx_files(mtx_dir)
 
                 try:
-                    os.rename(os.path.join(gsm_dir, matrix_file),
-                              os.path.join(gsm_dir, "matrix.mtx.gz"))
-                except Exception:
-                    pass
-                try:
-                    os.rename(os.path.join(gsm_dir, features_file),
-                              os.path.join(gsm_dir, "features.tsv.gz"))
-                except Exception:
-                    pass
-                try:
-                    os.rename(os.path.join(gsm_dir, barcodes_file),
-                              os.path.join(gsm_dir, "barcodes.tsv.gz"))
-                except Exception:
-                    pass
-
-                try:
-                    print(f"Reading MTX matrix for {gsm_id}")
+                    print(f"Reading MTX matrix for {gsm_id} (from {os.path.relpath(mtx_dir, gse_dir)})")
                     adata = sc.read_10x_mtx(
-                        gsm_dir,
+                        mtx_dir,
                         var_names="gene_symbols",
                         cache=False
                     )
-                except Exception:
-                    print(f"Skipping {gsm_id} (MTX read failed)")
+                except Exception as exc:
+                    print(f"  MTX read failed for {gsm_id}: {exc}")
 
+            # ── Step 3: fallback — generic CSV/TSV matrix ──────────────────
             if adata is None:
                 for f in files:
+                    fl = f.lower()
+                    # Skip tarballs — they are not flat matrices
+                    if fl.endswith(".tar.gz") or fl.endswith(".tar"):
+                        continue
                     if (
-                        any(f.endswith(ext) for ext in [".tsv", ".csv", ".txt", ".gz"])
-                        and "matrix" in f.lower()
+                        any(fl.endswith(ext) for ext in [".tsv", ".csv", ".txt", ".gz"])
+                        and "matrix" in fl
                     ):
                         file_path = os.path.join(gsm_dir, f)
                         print(f"Reading generic matrix for {gsm_id}: {f}")
@@ -737,7 +834,7 @@ class SampleAnnotator:
                             break
 
             if adata is None:
-                print(f"Skipping {gsm_id} (no valid expression matrix)")
+                print(f"Skipping {gsm_id} (no valid expression matrix found)")
                 continue
 
             adata.obs["gsm_id"] = gsm_id
