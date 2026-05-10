@@ -46,75 +46,95 @@ TABULA_FILES = {
 # Valid cancer type keys for user reference
 VALID_CANCER_TYPES = sorted(TABULA_FILES.keys())
 
-# ── High-priority sample-level metadata fields (used FIRST for classification)
-# These are GSM-specific fields that directly describe what the sample IS.
-# Series-level or platform-level text (which often mentions "normal" in comparisons)
-# is intentionally excluded from this priority set.
+# ── High-priority sample-level metadata fields ────────────────────────────────
+# Used in Pass 1: fields that directly describe what the sample IS.
 _PRIORITY_FIELDS = [
-    "characteristics_ch1",   # e.g. "tissue: ovarian tumor", "disease: HGSOC"
-    "source_name_ch1",        # e.g. "primary tumor", "peripheral blood mononuclear cells"
-    "title",                  # e.g. "HGSOC_patient1_tumor"
-    "description",            # sample-level free-text description
+    "characteristics_ch1",
+    "source_name_ch1",
+    "title",
+    "description",
 ]
 
-# ── Disease-specific keywords used for tumor classification ──────────────────
-# Covers haematological and solid-tumour malignancies that may not use "tumor".
+# ── GSE series-level fields used to detect study disease context ──────────────
+_SERIES_FIELDS = [
+    "title",
+    "summary",
+    "overall_design",
+]
+
+# ── Therapeutic / engineered cell product keywords ────────────────────────────
+# Samples matching these in priority fields are EXCLUDED from classification.
+# They are not patient-derived disease samples and must not enter the tumor set.
+_THERAPEUTIC_CELL_KEYWORDS = [
+    "car t",
+    "car-t",
+    "car+ t",
+    "cart cell",
+    "infusion product",
+    "car product",
+    "engineered t cell",
+    "transduced t cell",
+    "modified t cell",
+    "t cell product",
+    "tcr-t",
+]
+
+# ── Disease / tumor keywords ──────────────────────────────────────────────────
 DISEASE_TUMOR_KEYWORDS = [
-    # ── General malignancy ───────────────────────────────────────────────────
+    # General malignancy
     "tumor", "tumour", "cancer", "carcinoma", "adenocarcinoma",
     "malignant", "malignancy", "metastatic", "metastasis",
     "neoplasm", "neoplastic",
 
-    # ── Epithelial / gynaecological ─────────────────────────────────────────
+    # Gynaecological / epithelial
     "hgsoc", "lgsoc", "serous ovarian", "ovarian carcinoma",
     "endometrioid carcinoma", "clear cell carcinoma",
     "mucinous carcinoma", "fallopian tube carcinoma",
-    "stic",                      # serous tubal intraepithelial carcinoma
-    "peritoneal carcinoma",
-    "ascites",                   # ovarian cancer commonly presents with ascites
-    "debulking",                 # surgery term exclusive to advanced ovarian/peritoneal cancer
+    "stic", "peritoneal carcinoma", "ascites", "debulking",
 
-    # ── Haematological ───────────────────────────────────────────────────────
+    # Haematological
     "leukemia", "leukaemia", "lymphoma", "myeloma",
     "aml", "cml", "all", "cll", "mds",
     "acute myeloid", "chronic myeloid",
-    "acute lymphoblastic", "chronic lymphocytic",
-    "acute lymphocytic",
+    "acute lymphoblastic", "chronic lymphocytic", "acute lymphocytic",
     "t-cell leukemia", "b-cell leukemia",
     "hairy cell leukemia", "large granular lymphocyte",
     "myelodysplastic", "myeloproliferative",
-    "polycythemia vera", "essential thrombocythemia",
-    "myelofibrosis",
+    "polycythemia vera", "essential thrombocythemia", "myelofibrosis",
 
-    # ── Lymphoid ────────────────────────────────────────────────────────────
+    # Lymphoid
     "dlbcl", "follicular lymphoma", "mantle cell lymphoma",
     "burkitt lymphoma", "hodgkin", "non-hodgkin",
     "marginal zone lymphoma", "anaplastic large cell",
     "primary mediastinal b-cell",
+    "b-cell lymphoma", "t-cell lymphoma",
+    "large b-cell", "diffuse large",
 
-    # ── Plasma cell ─────────────────────────────────────────────────────────
+    # Plasma cell
     "multiple myeloma", "plasma cell dyscrasia",
     "plasmacytoma", "waldenström",
     "smoldering myeloma", "amyloidosis",
+    "myeloma patient", "mm patient",
 
-    # ── Solid-tumour aliases / acronyms ─────────────────────────────────────
+    # Solid-tumour aliases
     "pdac", "nsclc", "sclc",
     "gbm", "glioblastoma", "glioma", "astrocytoma",
     "melanoma", "sarcoma", "blastoma",
     "hepatocellular", "cholangiocarcinoma",
     "seminoma", "teratoma",
-    "patient",                   # "patient" in sample-level context strongly implies disease
 ]
 
-# ── Keywords that ONLY mean "normal / healthy control" when they appear in
-# the HIGH-PRIORITY sample fields (not in the full metadata blob).
-# We deliberately keep "normal" here so that "adjacent normal" in
-# characteristics_ch1 is still classified as normal.
-# But we AVOID classifying based on series-level mentions of "normal tissue"
-# (e.g. "we compared tumor vs normal tissue") which appear in the GSE summary.
+# ── Normal keywords for Pass 1 (priority fields only) ────────────────────────
+# NOTE: "pbmc", "donor", "patient" are intentionally ABSENT.
+#   - "pbmc" = cell isolation method, used in cancer patients AND healthy donors
+#   - "donor" = ambiguous (could be cancer patient donating cells for therapy)
+#   - "patient" = demographic, not a disease-state indicator
 _NORMAL_KEYWORDS = [
     "normal",
     "healthy",
+    "healthy control",
+    "healthy donor",
+    "healthy volunteer",
     "control",
     "adjacent normal",
     "non-tumor",
@@ -122,12 +142,11 @@ _NORMAL_KEYWORDS = [
     "non-cancer",
     "benign",
     "non-malignant",
-    "pbmc",               # peripheral blood mononuclear cells from healthy donors
-    "donor",              # healthy donor
 ]
 
-# Fallback normal keywords used when scanning the FULL metadata blob.
-# Much stricter — avoids phrases like "compared to normal" in abstract text.
+# ── Strict normal keywords for Pass 3 (full metadata blob) ───────────────────
+# Much narrower — avoids matching "normal tissue" in cancer study abstracts
+# (e.g. "we compared tumor vs normal ovary in HGSOC patients").
 _NORMAL_KEYWORDS_STRICT = [
     "adjacent normal",
     "non-tumor",
@@ -135,8 +154,27 @@ _NORMAL_KEYWORDS_STRICT = [
     "non-cancer",
     "non-malignant",
     "healthy donor",
+    "healthy volunteer",
+    "healthy control",
     "normal donor",
     "normal volunteer",
+]
+
+# ── Patient-origin indicators for Pass 2 (disease-context rescue) ─────────────
+# When a study IS a cancer study and a sample contains one of these terms,
+# the sample is classified as tumor — because it is a patient-derived sample
+# even if the word "tumor" does not appear in its individual GSM metadata.
+_PATIENT_ORIGIN_TERMS = [
+    "patient",
+    "pbmc",
+    "peripheral blood",
+    "bone marrow",
+    "blood sample",
+    "preinfusion",
+    "pre-infusion",
+    "post-infusion",
+    "biopsy",
+    "aspirate",
 ]
 
 
@@ -170,7 +208,7 @@ class SampleAnnotator:
 
             cancer_type="blood_cancer"
             cancer_type="blood_cancer, bone_marrow_cancer"
-            cancer_type="my_custom_cancer"            # free-text, no Tabula ref
+            cancer_type="my_custom_cancer"
 
         To see all Tabula Sapiens keys::
 
@@ -178,97 +216,74 @@ class SampleAnnotator:
             print(VALID_CANCER_TYPES)
 
     min_genes : int or None, optional
-        Minimum number of genes detected per cell used for QC filtering in
-        Module 3 (preprocessing).  The value is stored in
-        ``adata.uns['qc_params']`` of every h5ad written by this module so
-        that Module 3 can read it automatically.
-        If not provided (default: None), the QC step is skipped in Module 3.
+        Minimum number of genes detected per cell for QC filtering in
+        Module 3. Stored in ``adata.uns['qc_params']``.
 
     max_mt : float or None, optional
-        Maximum mitochondrial gene percentage per cell used for QC filtering
-        in Module 3.  Stored alongside ``min_genes`` in
-        ``adata.uns['qc_params']``.
-        If not provided (default: None), the QC step is skipped in Module 3.
+        Maximum mitochondrial gene percentage per cell for QC filtering.
+        Stored in ``adata.uns['qc_params']``.
 
     manual_annotation_col : str or None, optional
         ONLY relevant when providing your own .h5ad file (not a GEO ID).
-
-        Name of the column in adata.obs that contains your cell-type
-        annotations.  When provided, Module 2 (PopV) is skipped entirely
-        and your annotations are used directly in Module 3 (preprocessing).
-
-        Requirements for the annotation column
-        ---------------------------------------
-        - Must exist in adata.obs of every h5ad file you pass.
-        - Must contain string cell-type labels for every cell.
-        - The column that identifies epithelial cells used by Module 3
-          must contain labels ending with the phrase "epithelial cell"
-          (case-insensitive).  Examples of valid epithelial labels:
-              "epithelial cell"
-              "glandular epithelial cell"
-              "ovarian surface epithelial cell"
-          Non-epithelial cells (all other labels) are used as the
-          comparison "rest" group in the DEG step.
-        - The column value is copied into a new column called
-          "popv_majority_vote_prediction" so that Module 3 can find it
-          without any changes to the downstream pipeline.
-
-        What is stored in the h5ad
-        --------------------------
-        adata.uns['manual_annotation_col'] = <your column name>
-            Tells downstream modules that PopV was skipped and which
-            obs column holds the cell-type labels.
-        adata.uns['skip_popv'] = True
-            Explicit flag so Module 2 auto_run_popv() can detect and
-            skip the PopV pipeline automatically.
-
-        Usage example
-        -------------
-        annotator = SampleAnnotator(
-            "my_data.h5ad",
-            cancer_type="blood_cancer",
-            manual_annotation_col="cell_type",
-            min_genes=200,
-            max_mt=40,
-        )
-
-        If not provided (default: None), PopV runs normally on the h5ad.
+        Name of the obs column holding cell-type annotations. When provided,
+        Module 2 (PopV) is skipped and annotations are used directly in
+        Module 3.
 
     Notes
     -----
-    GEO ID inputs always run the full PopV pipeline regardless of
-    manual_annotation_col — the parameter is silently ignored for GEO IDs.
+    Sample classification logic (four-pass, context-aware)
+    -------------------------------------------------------
+    Pass 0 — THERAPEUTIC CELL FILTER
+        Checks priority fields (characteristics_ch1, source_name_ch1,
+        title, description) for engineered/therapeutic cell product terms
+        (CAR-T cells, infusion products, etc.).
+        If matched → **excluded_therapeutic** (dropped, not used).
 
-    Sample classification logic (three-pass, priority-aware)
-    ---------------------------------------------------------
-    Classification is done in three passes so that series-level background
-    text (e.g. "we compared tumor vs normal tissue" in a GSE abstract)
-    cannot override the actual sample-level evidence:
+    Pass 1 — HIGH-PRIORITY FIELDS
+        Same priority fields, checked for:
+        a. Normal keyword  → **normal**
+        b. Tumor keyword   → **tumor**
 
-    Pass 1 — HIGH-PRIORITY FIELDS ONLY
-        Check ``characteristics_ch1``, ``source_name_ch1``, ``title``, and
-        ``description`` — the fields that directly describe the sample.
+    Pass 2 — GSE DISEASE CONTEXT RESCUE
+        Applied only when Pass 1 is inconclusive.
+        The GSE series title/summary/overall_design is checked ONCE for
+        disease keywords to flag whether the overall study is a cancer study.
+        If the series IS a cancer study AND the sample's priority text
+        contains a patient-origin term (e.g. "patient", "pbmc",
+        "peripheral blood", "bone marrow", "preinfusion") → **tumor**.
 
-        a. If a **strict normal** keyword is found → **normal**.
-        b. Else if a **tumor** keyword is found    → **tumor**.
+        This pass is the key fix for haematological cancer datasets
+        (lymphoma, myeloma, leukaemia, CAR-T therapy trials) where:
+          - PBMC or bone marrow samples come from cancer patients
+          - The GSM title/characteristics say "cell type: pbmc",
+            "patient: P1", "time: preinfusion"
+          - The word "tumor" never appears in the GSM metadata
+          - But the GSE summary clearly states the disease (e.g.
+            "anti-BCMA CAR-T therapy in patients with multiple myeloma")
 
-    Pass 2 — FULL METADATA BLOB (fallback when Pass 1 is inconclusive)
-        Concatenate ALL metadata fields into one lowercase string.
+    Pass 3 — FULL METADATA BLOB
+        a. Strict normal keyword → **normal**
+        b. Tumor keyword         → **tumor**
 
-        a. If a **strict normal** keyword (``_NORMAL_KEYWORDS_STRICT``) is
-           found → **normal**.  (Strict list avoids false positives from
-           comparison phrases like "compared to normal".)
-        b. Else if a **tumor** keyword is found → **tumor**.
+    Pass 4 — **unspecified**
 
-    Pass 3 — UNSPECIFIED
-        Neither pass produced a definitive label → **unspecified**.
+    Why "pbmc" is NOT a normal keyword
+    ------------------------------------
+    PBMC (peripheral blood mononuclear cells) is a cell ISOLATION METHOD,
+    not a disease-state descriptor. PBMCs are collected from:
+      - Healthy donors (truly normal)
+      - Cancer patients before/after treatment (disease samples)
+    Putting "pbmc" in the normal keyword list caused all cancer patient
+    blood samples in CAR-T and immunotherapy studies to be misclassified
+    as normal. The GSE disease context (Pass 2) handles this correctly.
 
-    The two-tier normal keyword lists mean that:
-    - "adjacent normal tissue" (characteristics_ch1) → normal ✓
-    - "HGSOC patient" (title) with "compared to normal ovary" in abstract
-      → tumor ✓  (abstract text only reaches Pass 2 strict-normal check,
-        which does not match "compared to normal")
-    - "AML patient" (source_name_ch1) → tumor ✓
+    CAR-T therapeutic products
+    ---------------------------
+    In CAR-T therapy studies, the dataset contains two kinds of samples:
+      1. Patient blood/bone marrow samples (PBMC, CAR-) → tumor ✓
+      2. Engineered CAR-T cell products (CAR+, infusion product) → excluded ✓
+    The therapeutic filter (Pass 0) removes CAR-T products before any
+    classification. Patient PBMCs are then correctly caught by Pass 2.
     """
 
     def __init__(
@@ -279,15 +294,11 @@ class SampleAnnotator:
         max_mt: float = None,
         manual_annotation_col: str = None,
     ):
-
-        self.inputs   = list(inputs)
-        self.base_dir = "GSE_data"
-
-        # ── QC parameters ──────────────────────────────────────────────────
+        self.inputs    = list(inputs)
+        self.base_dir  = "GSE_data"
         self.min_genes = min_genes
         self.max_mt    = max_mt
 
-        # ── Cancer type (required) ─────────────────────────────────────────
         if not cancer_type or not isinstance(cancer_type, str):
             raise ValueError(
                 "\ncancer_type is required.\n\n"
@@ -300,14 +311,11 @@ class SampleAnnotator:
                 "  print(VALID_CANCER_TYPES)"
             )
 
-        # Parse and categorise each token as tabula or unknown
         self._user_cancer_type, self._tabula_types, self._unknown_types = (
             self._parse_cancer_type(cancer_type)
         )
 
-        # ── Manual annotation ──────────────────────────────────────────────
         self.manual_annotation_col = manual_annotation_col
-
         os.makedirs(self.base_dir, exist_ok=True)
 
         self.gse_ids     = []
@@ -324,84 +332,38 @@ class SampleAnnotator:
     # ──────────────────────────────────────────────────────────────────────
 
     def _parse_cancer_type(self, cancer_type: str):
-        """
-        Parse a (possibly comma-separated) cancer_type string.
-
-        Each token is checked against TABULA_FILES:
-          - Known tokens  → will get a Tabula Sapiens reference recommendation.
-          - Unknown tokens → user will be told to supply their own reference.
-
-        Returns
-        -------
-        normalised_str  : str   — joined, stripped version of all tokens
-        tabula_types    : list  — tokens that exist in TABULA_FILES
-        unknown_types   : list  — tokens not in TABULA_FILES
-        """
-        tokens = [t.strip() for t in cancer_type.split(",") if t.strip()]
-
+        tokens        = [t.strip() for t in cancer_type.split(",") if t.strip()]
         tabula_types  = [t for t in tokens if t in TABULA_FILES]
         unknown_types = [t for t in tokens if t not in TABULA_FILES]
-
-        normalised = ", ".join(tokens)
-        return normalised, tabula_types, unknown_types
-
-    # ──────────────────────────────────────────────────────────────────────
+        return ", ".join(tokens), tabula_types, unknown_types
 
     def _store_qc_params(self, adata):
-        """
-        Write QC thresholds into adata.uns['qc_params'] only when the user
-        has explicitly provided at least one threshold.
-        """
         if self.min_genes is None and self.max_mt is None:
             adata.uns.pop("qc_params", None)
             return
-
-        adata.uns["qc_params"] = {
-            "min_genes": self.min_genes,
-            "max_mt":    self.max_mt,
-        }
-
-    # ──────────────────────────────────────────────────────────────────────
+        adata.uns["qc_params"] = {"min_genes": self.min_genes, "max_mt": self.max_mt}
 
     def _store_manual_annotation(self, adata, source_file: str):
-        """
-        Validate and store manual annotation metadata when the user has
-        supplied manual_annotation_col.
-        """
         col = self.manual_annotation_col
 
-        # 1. Validate column exists
         if col not in adata.obs.columns:
-            available = list(adata.obs.columns)
             raise ValueError(
                 f"\nmanual_annotation_col='{col}' not found in adata.obs "
                 f"of '{source_file}'.\n"
-                f"Available obs columns: {available}\n\n"
-                "Please check the column name and try again.\n"
-                "See the README section 'Manual annotation requirements' "
-                "for full details."
+                f"Available obs columns: {list(adata.obs.columns)}\n\n"
+                "Please check the column name and try again."
             )
 
-        # 2. Copy into popv_majority_vote_prediction
         if "popv_majority_vote_prediction" in adata.obs.columns:
-            print(
-                f"  WARNING: 'popv_majority_vote_prediction' already exists "
-                f"in adata.obs — overwriting with values from '{col}'."
-            )
-        adata.obs["popv_majority_vote_prediction"] = (
-            adata.obs[col].astype(str)
-        )
+            print(f"  WARNING: 'popv_majority_vote_prediction' already exists — overwriting with '{col}'.")
 
-        # 3 & 4. Store metadata flags
-        adata.uns["manual_annotation_col"] = col
-        adata.uns["skip_popv"]             = True
+        adata.obs["popv_majority_vote_prediction"] = adata.obs[col].astype(str)
+        adata.uns["manual_annotation_col"]         = col
+        adata.uns["skip_popv"]                     = True
 
-        # 5. Print label summary
         unique_labels  = sorted(adata.obs["popv_majority_vote_prediction"].unique())
-        epithelial     = [l for l in unique_labels
-                          if "epithelial cell" in l.lower()]
-        non_epithelial = [l for l in unique_labels
-                          if "epithelial cell" not in l.lower()]
+        epithelial     = [l for l in unique_labels if "epithelial cell" in l.lower()]
+        non_epithelial = [l for l in unique_labels if "epithelial cell" not in l.lower()]
 
         print(f"\n  Manual annotation column : '{col}'")
         print(f"  Copied to               : 'popv_majority_vote_prediction'")
@@ -413,25 +375,12 @@ class SampleAnnotator:
         if not epithelial:
             print(
                 "\n  ⚠ WARNING: No epithelial labels detected.\n"
-                "  Module 3 identifies epithelial cells by matching labels that\n"
-                "  END WITH 'epithelial cell' (case-insensitive), for example:\n"
-                "    'epithelial cell'\n"
-                "    'glandular epithelial cell'\n"
-                "    'ovarian surface epithelial cell'\n"
+                "  Module 3 looks for labels ending with 'epithelial cell' (case-insensitive).\n"
                 f"  Your labels in '{col}' do not match this pattern.\n"
-                "  Module 3 will find 0 epithelial cells and may fail.\n"
-                "  Please rename your epithelial label(s) to end with "
-                "'epithelial cell'."
+                "  Please rename your epithelial label(s) to end with 'epithelial cell'."
             )
 
-    # ──────────────────────────────────────────────────────────────────────
-
     def _print_reference_guidance(self):
-        """
-        Print Tabula Sapiens reference guidance based on the user-supplied
-        cancer type(s).  Unknown types are flagged with instructions to
-        provide a custom reference.
-        """
         print("\n========== REFERENCE GUIDANCE ==========")
         print(f"Cancer type(s) provided: {self._user_cancer_type}\n")
 
@@ -456,59 +405,134 @@ class SampleAnnotator:
             print( "   👉 Please provide your own reference file for PopV / SCEVAN.")
 
     # ──────────────────────────────────────────────────────────────────────
+    # Text extraction
+    # ──────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _extract_priority_text(gsm) -> str:
+        """Lowercase text from sample-specific priority fields only."""
+        parts = []
+        for field in _PRIORITY_FIELDS:
+            vals = gsm.metadata.get(field, [])
+            if vals:
+                parts.append(" ".join(str(v) for v in vals))
+        return " ".join(parts).lower()
+
+    @staticmethod
+    def _extract_full_text(gsm) -> str:
+        """Lowercase text from ALL metadata fields of a GSM."""
+        return " ".join(str(v) for v in gsm.metadata.values()).lower()
+
+    @staticmethod
+    def _extract_series_disease_context(gse) -> str:
+        """Lowercase text from GSE series-level fields (title, summary, design)."""
+        parts = []
+        for field in _SERIES_FIELDS:
+            vals = gse.metadata.get(field, [])
+            if vals:
+                parts.append(" ".join(str(v) for v in vals))
+        return " ".join(parts).lower()
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Classification
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _classify_gsm(self, gsm, series_is_cancer: bool) -> str:
+        """
+        Classify a single GSM as 'normal', 'tumor',
+        'excluded_therapeutic', or 'unspecified'.
+
+        See class docstring for full algorithm description.
+        """
+        priority_text = self._extract_priority_text(gsm)
+
+        # Pass 0: therapeutic/engineered cell filter
+        if any(k in priority_text for k in _THERAPEUTIC_CELL_KEYWORDS):
+            return "excluded_therapeutic"
+
+        # Pass 1: high-priority sample fields
+        if any(k in priority_text for k in _NORMAL_KEYWORDS):
+            return "normal"
+
+        if any(k in priority_text for k in DISEASE_TUMOR_KEYWORDS):
+            return "tumor"
+
+        # Pass 2: GSE disease context rescue
+        if series_is_cancer and any(k in priority_text for k in _PATIENT_ORIGIN_TERMS):
+            return "tumor"
+
+        # Pass 3: full metadata blob with strict keywords
+        full_text = self._extract_full_text(gsm)
+
+        if any(k in full_text for k in _NORMAL_KEYWORDS_STRICT):
+            return "normal"
+
+        if any(k in full_text for k in DISEASE_TUMOR_KEYWORDS):
+            return "tumor"
+
+        # Pass 4: inconclusive
+        return "unspecified"
+
+    def _determine_pass(self, gsm, label: str, series_is_cancer: bool) -> str:
+        """Return a human-readable string identifying which pass fired."""
+        priority_text = self._extract_priority_text(gsm)
+        if label == "excluded_therapeutic":
+            return "Pass0-therapeutic"
+        if any(k in priority_text for k in _NORMAL_KEYWORDS):
+            return "Pass1-normal-keyword"
+        if any(k in priority_text for k in DISEASE_TUMOR_KEYWORDS):
+            return "Pass1-tumor-keyword"
+        if series_is_cancer and any(k in priority_text for k in _PATIENT_ORIGIN_TERMS):
+            return "Pass2-context-rescue"
+        full_text = self._extract_full_text(gsm)
+        if any(k in full_text for k in _NORMAL_KEYWORDS_STRICT):
+            return "Pass3-strict-normal"
+        if any(k in full_text for k in DISEASE_TUMOR_KEYWORDS):
+            return "Pass3-tumor-fullblob"
+        return "Pass4-unspecified"
+
+    # ──────────────────────────────────────────────────────────────────────
     # Public entry-point
     # ──────────────────────────────────────────────────────────────────────
 
     def run(self):
-
-        normal      = []
-        tumor       = []
-        unspecified = []
+        normal          = []
+        tumor           = []
+        unspecified     = []
         annotation_info = {}
-
-        tumor_adatas = []
-        results      = {}
+        tumor_adatas    = []
+        results         = {}
 
         for gse_id in self.gse_ids:
-
             n, t, u, ann = self._process_gse(gse_id)
-
             normal.extend(n)
             tumor.extend(t)
             unspecified.extend(u)
             annotation_info.update(ann)
 
             adata = self._build_h5ad(
-                gse_id,
-                t,
+                gse_id, t,
                 save_single=(len(self.gse_ids) == 1 and len(self.h5ad_inputs) == 0),
             )
-
             if adata is not None:
                 tumor_adatas.append(adata)
 
             results[gse_id] = (n, t, u, ann, None, self._user_cancer_type)
 
         for file in self.h5ad_inputs:
-
             print("\n========== Reading h5ad file ==========")
-
             adata = sc.read_h5ad(file)
             adata.obs_names_make_unique()
             adata.layers["counts"] = adata.X.copy()
             adata.raw = adata
-
-            # Store cancer type
             adata.uns["cancer_type"] = self._user_cancer_type
             print(f"  cancer_type stored: {self._user_cancer_type}")
 
-            # Handle manual annotation
             if self.manual_annotation_col is not None:
                 print("\n  Manual annotation mode activated.")
                 self._store_manual_annotation(adata, file)
 
             self._store_qc_params(adata)
-
             tumor_adatas.append(adata)
             results[file] = ([], [], [], {}, None, self._user_cancer_type)
 
@@ -516,9 +540,7 @@ class SampleAnnotator:
         total_inputs = len(self.gse_ids) + len(self.h5ad_inputs)
 
         if total_inputs == 1:
-
             if len(self.gse_ids) == 1:
-
                 query_h5ad = f"{self.gse_ids[0]}_tumor.h5ad"
                 results[self.gse_ids[0]] = (
                     normal, tumor, unspecified,
@@ -526,20 +548,14 @@ class SampleAnnotator:
                 )
 
             elif len(self.h5ad_inputs) == 1:
-
                 adata    = tumor_adatas[0]
                 filename = "input_tumor.h5ad"
-
                 adata.write(filename)
-
                 print("\n========== h5ad created ==========")
                 print(f"{filename} is created successfully")
 
                 if self.manual_annotation_col is not None:
-                    print(
-                        f"Manual annotation stored  → "
-                        f"col='{self.manual_annotation_col}', skip_popv=True"
-                    )
+                    print(f"Manual annotation stored → col='{self.manual_annotation_col}', skip_popv=True")
                     print("Next step: run Module 3 (preprocessing) directly.")
 
                 if self.min_genes is not None or self.max_mt is not None:
@@ -547,47 +563,33 @@ class SampleAnnotator:
                 else:
                     print("QC step disabled (no min_genes / max_mt provided — will be skipped in Module 3)")
 
-                query_h5ad = filename
-                key        = self.h5ad_inputs[0]
+                query_h5ad   = filename
+                key          = self.h5ad_inputs[0]
                 results[key] = ([], [], [], {}, query_h5ad, self._user_cancer_type)
 
         elif total_inputs > 1 and len(tumor_adatas) > 0:
-
             combined = ad.concat(tumor_adatas, join="outer")
             combined.obs_names_make_unique()
             combined.layers["counts"] = combined.X.copy()
             combined.raw = combined
-
             combined.uns["cancer_type"] = self._user_cancer_type
             print(f"\n  cancer_type stored in combined h5ad: {self._user_cancer_type}")
 
-            # Re-apply manual annotation after concat (uns is lost by concat)
             if self.manual_annotation_col is not None:
                 if "popv_majority_vote_prediction" in combined.obs.columns:
                     combined.uns["manual_annotation_col"] = self.manual_annotation_col
                     combined.uns["skip_popv"]             = True
-                    print(
-                        f"\n  Combined h5ad: manual annotation carried through "
-                        f"from column '{self.manual_annotation_col}'."
-                    )
+                    print(f"\n  Combined h5ad: manual annotation carried from '{self.manual_annotation_col}'.")
                 else:
-                    print(
-                        "\n  WARNING: 'popv_majority_vote_prediction' lost during "
-                        "concat — manual annotation NOT stored in combined h5ad."
-                    )
+                    print("\n  WARNING: 'popv_majority_vote_prediction' lost during concat.")
 
             self._store_qc_params(combined)
-
             combined.write("combined_tumor.h5ad")
-
             print("\n========== h5ad created ==========")
             print("combined_tumor.h5ad is created successfully")
 
             if self.manual_annotation_col is not None:
-                print(
-                    f"Manual annotation stored  → "
-                    f"col='{self.manual_annotation_col}', skip_popv=True"
-                )
+                print(f"Manual annotation stored → col='{self.manual_annotation_col}', skip_popv=True")
                 print("Next step: run Module 3 (preprocessing) directly.")
 
             if self.min_genes is not None or self.max_mt is not None:
@@ -611,155 +613,57 @@ class SampleAnnotator:
     # GEO processing
     # ──────────────────────────────────────────────────────────────────────
 
-    @staticmethod
-    def _extract_priority_text(gsm) -> str:
-        """
-        Build a lowercase text string from ONLY the high-priority,
-        sample-specific metadata fields of a GSM object.
-
-        These fields directly describe what the sample *is* (tissue type,
-        disease state, tissue source) rather than what the study *compared*
-        or what the platform *measures*.  Using only these fields for the
-        first classification pass prevents series-level background text
-        (e.g. "we compared tumor vs normal tissue") from causing
-        false-positive normal classifications.
-
-        Returns
-        -------
-        str
-            Lowercase concatenation of priority field values.
-        """
-        parts = []
-        for field in _PRIORITY_FIELDS:
-            vals = gsm.metadata.get(field, [])
-            if vals:
-                parts.append(" ".join(str(v) for v in vals))
-        return " ".join(parts).lower()
-
-    @staticmethod
-    def _extract_full_text(gsm) -> str:
-        """
-        Build a lowercase text string from ALL metadata fields of a GSM.
-        Used only as a fallback when the priority-field pass is inconclusive.
-        """
-        return " ".join(str(v) for v in gsm.metadata.values()).lower()
-
-    # ──────────────────────────────────────────────────────────────────────
-
-    def _classify_gsm(self, gsm) -> str:
-        """
-        Classify a single GSM as 'normal', 'tumor', or 'unspecified'.
-
-        Three-pass, priority-aware algorithm
-        -------------------------------------
-        Pass 1 — HIGH-PRIORITY FIELDS (``characteristics_ch1``,
-                 ``source_name_ch1``, ``title``, ``description``)
-
-            These fields are the most direct description of the sample.
-
-            a. Any ``_NORMAL_KEYWORDS`` hit  → **normal**
-               (includes bare "normal", "healthy", "control", etc.)
-            b. Any ``DISEASE_TUMOR_KEYWORDS`` hit → **tumor**
-
-        Pass 2 — FULL METADATA BLOB (all fields concatenated)
-
-            Used only when Pass 1 was inconclusive (no keyword matched).
-
-            a. Any ``_NORMAL_KEYWORDS_STRICT`` hit → **normal**
-               (strict subset — avoids "compared to normal", "normal ovary"
-               appearing in background text of a cancer study)
-            b. Any ``DISEASE_TUMOR_KEYWORDS`` hit  → **tumor**
-
-        Pass 3 — **unspecified**
-            Neither pass produced a definitive result.
-
-        Why two normal keyword lists?
-        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-        The bare word "normal" is meaningful inside ``characteristics_ch1``
-        (e.g. "tissue: normal ovary" describes a truly healthy sample) but
-        dangerous inside a GSE abstract (e.g. "we compared HGSOC to normal
-        ovarian tissue" — these are HGSOC patient samples, not controls).
-        The strict list (_NORMAL_KEYWORDS_STRICT) requires more specific
-        phrasing ("adjacent normal", "healthy donor", etc.) that cannot
-        plausibly appear accidentally in background text.
-
-        Parameters
-        ----------
-        gsm : GEOparse GSM object
-
-        Returns
-        -------
-        "normal" | "tumor" | "unspecified"
-        """
-        # ── Pass 1: high-priority sample-specific fields ───────────────────
-        priority_text = self._extract_priority_text(gsm)
-
-        if any(k in priority_text for k in _NORMAL_KEYWORDS):
-            return "normal"
-
-        if any(k in priority_text for k in DISEASE_TUMOR_KEYWORDS):
-            return "tumor"
-
-        # ── Pass 2: full metadata blob with strict normal keywords ─────────
-        full_text = self._extract_full_text(gsm)
-
-        if any(k in full_text for k in _NORMAL_KEYWORDS_STRICT):
-            return "normal"
-
-        if any(k in full_text for k in DISEASE_TUMOR_KEYWORDS):
-            return "tumor"
-
-        # ── Pass 3: inconclusive ───────────────────────────────────────────
-        return "unspecified"
-
-    # ──────────────────────────────────────────────────────────────────────
-
     def _process_gse(self, gse_id):
-        """
-        Download a GEO series, classify each GSM, and return lists of
-        normal / tumor / unspecified sample IDs.
-
-        Prints a per-GSM debug line showing which priority-field text was
-        used for classification so users can verify decisions.
-        """
         gse_dir = os.path.join(self.base_dir, gse_id)
         os.makedirs(gse_dir, exist_ok=True)
 
         gse = GEOparse.get_GEO(geo=gse_id, destdir=gse_dir)
         gse.download_supplementary_files(gse_dir)
 
-        normal      = []
-        tumor       = []
-        unspecified = []
-        annotation_info = {}
+        # Build series disease context ONCE for the whole GSE
+        series_text      = self._extract_series_disease_context(gse)
+        series_is_cancer = any(k in series_text for k in DISEASE_TUMOR_KEYWORDS)
 
-        excluded_non_scrna = []
-        excluded_non_human = []
+        print(f"\n  Series disease context detected: {series_is_cancer}")
+        if series_is_cancer:
+            matched = [k for k in DISEASE_TUMOR_KEYWORDS if k in series_text]
+            print(f"  Matched series keywords        : {matched[:8]}")
+
+        normal               = []
+        tumor                = []
+        unspecified          = []
+        excluded_therapeutic = []
+        annotation_info      = {}
+        excluded_non_scrna   = []
+        excluded_non_human   = []
 
         for gsm_id, gsm in gse.gsms.items():
 
-            # ── Filter: human only ─────────────────────────────────────────
             organism = " ".join(gsm.metadata.get("organism_ch1", [])).lower()
             if "homo sapiens" not in organism:
                 excluded_non_human.append(gsm_id)
                 continue
 
-            # ── Filter: scRNA-seq only ─────────────────────────────────────
             library = " ".join(gsm.metadata.get("library_strategy", [])).lower()
             if not any(k in library for k in ["rna-seq", "scrna", "single cell"]):
                 excluded_non_scrna.append(gsm_id)
                 continue
 
-            label = self._classify_gsm(gsm)
-
-            # ── Debug: show which text drove the decision ──────────────────
+            label     = self._classify_gsm(gsm, series_is_cancer)
+            pass_used = self._determine_pass(gsm, label, series_is_cancer)
             priority_text = self._extract_priority_text(gsm)
-            print(f"  [{gsm_id}] label={label!r} | priority_text={priority_text[:120]!r}")
+
+            print(
+                f"  [{gsm_id}] label={label!r} | {pass_used} | "
+                f"priority={priority_text[:100]!r}"
+            )
 
             if label == "normal":
                 normal.append(gsm_id)
             elif label == "tumor":
                 tumor.append(gsm_id)
+            elif label == "excluded_therapeutic":
+                excluded_therapeutic.append(gsm_id)
             else:
                 unspecified.append(gsm_id)
 
@@ -767,18 +671,20 @@ class SampleAnnotator:
 
         print(f"\n========== SAMPLE SUMMARY: {gse_id} ==========")
         print(f"Cancer type (user-supplied): {self._user_cancer_type}")
-        print("Normal samples:",       ", ".join(normal)              if normal              else "None")
-        print("Tumor samples:",        ", ".join(tumor)               if tumor               else "None")
-        print("Unspecified samples:",  ", ".join(unspecified)         if unspecified         else "None")
-        print("Excluded (non-human):", ", ".join(excluded_non_human)  if excluded_non_human  else "None")
-        print("Excluded (non-scRNA):", ", ".join(excluded_non_scrna)  if excluded_non_scrna  else "None")
+        print("Normal samples:",                 ", ".join(normal)               if normal               else "None")
+        print("Tumor samples:",                  ", ".join(tumor)                if tumor                else "None")
+        print("Unspecified samples:",            ", ".join(unspecified)          if unspecified          else "None")
+        print("Excluded (therapeutic/CAR-T):",   ", ".join(excluded_therapeutic) if excluded_therapeutic else "None")
+        print("Excluded (non-human):",           ", ".join(excluded_non_human)   if excluded_non_human   else "None")
+        print("Excluded (non-scRNA):",           ", ".join(excluded_non_scrna)   if excluded_non_scrna   else "None")
 
         return normal, tumor, unspecified, annotation_info
 
     # ──────────────────────────────────────────────────────────────────────
+    # File I/O helpers
+    # ──────────────────────────────────────────────────────────────────────
 
     def _read_generic_matrix(self, file_path):
-
         try:
             if file_path.endswith(".gz"):
                 with gzip.open(file_path, 'rt') as f:
@@ -790,72 +696,43 @@ class SampleAnnotator:
                 df = df.T
 
             df = df.apply(pd.to_numeric, errors='coerce').fillna(0)
-
             return ad.AnnData(df)
-
         except Exception:
             return None
 
-    # ──────────────────────────────────────────────────────────────────────
-
     def _extract_tarballs(self, gsm_dir: str):
-        """
-        Extract any .tar.gz / .tar archives present in *gsm_dir* into that
-        same directory.
-        """
         for fname in os.listdir(gsm_dir):
             if not (fname.endswith(".tar.gz") or fname.endswith(".tar")):
                 continue
-
             tar_path = os.path.join(gsm_dir, fname)
-
             try:
                 with tarfile.open(tar_path, "r:*") as tf:
-                    members = tf.getmembers()
-
+                    members     = tf.getmembers()
                     all_present = all(
                         os.path.exists(os.path.join(gsm_dir, m.name))
                         for m in members if m.isfile()
                     )
                     if all_present:
                         continue
-
                     print(f"  Extracting {fname} → {gsm_dir}")
                     tf.extractall(path=gsm_dir)
-
             except Exception as exc:
                 print(f"  Warning: could not extract {fname}: {exc}")
 
-    # ──────────────────────────────────────────────────────────────────────
-
     def _find_mtx_dir(self, root: str):
-        """
-        Walk *root* recursively and return the first directory that contains
-        all three 10x MTX files.
-        """
         for dirpath, dirnames, filenames in os.walk(root):
-            lower = [f.lower() for f in filenames]
-
+            lower        = [f.lower() for f in filenames]
             has_matrix   = any("matrix"   in f and (f.endswith(".mtx.gz") or f.endswith(".mtx"))   for f in lower)
             has_features = any(("features" in f or "genes" in f) and (f.endswith(".tsv.gz") or f.endswith(".tsv")) for f in lower)
             has_barcodes = any("barcodes" in f and (f.endswith(".tsv.gz") or f.endswith(".tsv"))   for f in lower)
-
             if has_matrix and has_features and has_barcodes:
                 return dirpath
-
         return None
 
-    # ──────────────────────────────────────────────────────────────────────
-
     def _rename_mtx_files(self, mtx_dir: str):
-        """
-        Rename the MTX triplet inside *mtx_dir* to the canonical names that
-        ``sc.read_10x_mtx`` expects.
-        """
         for fname in os.listdir(mtx_dir):
             src = os.path.join(mtx_dir, fname)
             fl  = fname.lower()
-
             if "matrix" in fl and (fl.endswith(".mtx.gz") or fl.endswith(".mtx")):
                 dst_name = "matrix.mtx.gz" if fl.endswith(".gz") else "matrix.mtx"
             elif ("features" in fl or "genes" in fl) and (fl.endswith(".tsv.gz") or fl.endswith(".tsv")):
@@ -864,7 +741,6 @@ class SampleAnnotator:
                 dst_name = "barcodes.tsv.gz" if fl.endswith(".gz") else "barcodes.tsv"
             else:
                 continue
-
             dst = os.path.join(mtx_dir, dst_name)
             if src != dst and not os.path.exists(dst):
                 try:
@@ -872,21 +748,15 @@ class SampleAnnotator:
                 except Exception:
                     pass
 
-    # ──────────────────────────────────────────────────────────────────────
-
     def _build_h5ad(self, gse_id, tumor_samples, save_single=False):
-
         if len(tumor_samples) == 0:
             return None
 
         gse_dir = os.path.join(self.base_dir, gse_id)
-
         print("\n========== Reading Tumor Samples ==========")
-
         adatas = []
 
         for gsm_id in tumor_samples:
-
             gsm_dir = os.path.join(gse_dir, gsm_id)
 
             if not os.path.isdir(gsm_dir):
@@ -894,29 +764,21 @@ class SampleAnnotator:
                     d for d in os.listdir(gse_dir)
                     if d.startswith(f"Supp_{gsm_id}")
                 ]
-                if len(supp_dirs) > 0:
+                if supp_dirs:
                     gsm_dir = os.path.join(gse_dir, supp_dirs[0])
                 else:
                     continue
 
             self._extract_tarballs(gsm_dir)
-
             files = os.listdir(gsm_dir)
-
             adata = None
 
             mtx_dir = self._find_mtx_dir(gsm_dir)
-
             if mtx_dir is not None:
                 self._rename_mtx_files(mtx_dir)
-
                 try:
                     print(f"Reading MTX matrix for {gsm_id} (from {os.path.relpath(mtx_dir, gse_dir)})")
-                    adata = sc.read_10x_mtx(
-                        mtx_dir,
-                        var_names="gene_symbols",
-                        cache=False
-                    )
+                    adata = sc.read_10x_mtx(mtx_dir, var_names="gene_symbols", cache=False)
                 except Exception as exc:
                     print(f"  MTX read failed for {gsm_id}: {exc}")
 
@@ -925,10 +787,7 @@ class SampleAnnotator:
                     fl = f.lower()
                     if fl.endswith(".tar.gz") or fl.endswith(".tar"):
                         continue
-                    if (
-                        any(fl.endswith(ext) for ext in [".tsv", ".csv", ".txt", ".gz"])
-                        and "matrix" in fl
-                    ):
+                    if any(fl.endswith(ext) for ext in [".tsv", ".csv", ".txt", ".gz"]) and "matrix" in fl:
                         file_path = os.path.join(gsm_dir, f)
                         print(f"Reading generic matrix for {gsm_id}: {f}")
                         adata = self._read_generic_matrix(file_path)
@@ -939,12 +798,11 @@ class SampleAnnotator:
                 print(f"Skipping {gsm_id} (no valid expression matrix found)")
                 continue
 
-            adata.obs["gsm_id"] = gsm_id
-            adata.obs["gse_id"] = gse_id
-            adata.layers["counts"] = adata.X.copy()
-            adata.raw = adata
+            adata.obs["gsm_id"]        = gsm_id
+            adata.obs["gse_id"]        = gse_id
+            adata.layers["counts"]     = adata.X.copy()
+            adata.raw                  = adata
             adata.obs_names_make_unique()
-
             adatas.append(adata)
 
         if len(adatas) == 0:
@@ -956,9 +814,8 @@ class SampleAnnotator:
         print("... storing 'gsm_id' as categorical")
         print("... storing 'gse_id' as categorical")
 
-        combined.obs["gsm_id"] = combined.obs["gsm_id"].astype("category")
-        combined.obs["gse_id"] = combined.obs["gse_id"].astype("category")
-
+        combined.obs["gsm_id"]      = combined.obs["gsm_id"].astype("category")
+        combined.obs["gse_id"]      = combined.obs["gse_id"].astype("category")
         combined.uns["cancer_type"] = self._user_cancer_type
         print(f"... stored cancer_type in h5ad: {self._user_cancer_type}")
 
@@ -972,7 +829,6 @@ class SampleAnnotator:
         if save_single:
             filename = f"{gse_id}_tumor.h5ad"
             combined.write(filename)
-
             print("\n========== h5ad created ==========")
             print(f"{filename} is created successfully")
 
