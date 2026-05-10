@@ -45,7 +45,11 @@ CAR-T therapy requires surface targets that are highly expressed on tumour cells
 4. Computing differentially expressed surfaceome genes (tumour vs stromal/immune)
 5. Scoring every candidate gene — or gene pair with a logic gate — for efficacy (tumour coverage) and safety (healthy tissue sparing)
 
+---
 
+## Pipeline Architecture
+
+To be added
 
 ---
 
@@ -116,6 +120,28 @@ jupyter notebook
 ---
 
 ## Quick Start
+
+### Installation check & imports
+
+Before running any module, verify SCART is installed and import the components you need:
+
+```python
+import SCART
+print(SCART.__version__)   # confirm installation
+
+# ── Per-module imports (copy only what you need) ──────────────────────────
+from SCART.geo_fetcher import SampleAnnotator          # Module 1
+from SCART import popv_annotation                      # Module 2
+from SCART import preprocessing                        # Module 3
+from SCART.gene_combination_predictor import one_gene_combination   # Module 4a
+from SCART.gene_combination_predictor import two_gene_combination   # Module 4b
+
+# ── Helper: print all valid Tabula Sapiens cancer_type keys ──────────────
+from SCART.geo_fetcher import VALID_CANCER_TYPES
+print(VALID_CANCER_TYPES)
+```
+
+---
 
 ### Module 1 — Data Acquisition
 
@@ -401,20 +427,46 @@ normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = 
 
 **`cancer_type` — Tabula Sapiens keys**
 
-Pass any of the following strings for an automatic reference recommendation:
+Pass any of the following exact strings for an automatic reference recommendation.
+The table shows the `cancer_type` key you pass, the tissue it covers, and the exact
+Tabula Sapiens filename to download from
+[https://doi.org/10.6084/m9.figshare.27921984](https://doi.org/10.6084/m9.figshare.27921984).
 
-```
-bladder_cancer, blood_cancer, bone_marrow_cancer, breast_cancer,
-ear_cancer, eye_cancer, fat_cancer, heart_cancer, kidney_cancer,
-large_intestine_cancer, liver_cancer, lung_cancer, lymph_node_cancer,
-muscle_cancer, ovary_cancer, pancreas_cancer, prostate_cancer,
-salivary_gland_cancer, skin_cancer, small_intestine_cancer, spleen_cancer,
-stomach_cancer, testis_cancer, thymus_cancer, tongue_cancer, trachea_cancer,
-uterus_cancer, vasculature_cancer
-```
+| `cancer_type=` key | Tissue / Cancer | Tabula Sapiens filename to download |
+|---|---|---|
+| `"bladder_cancer"` | Bladder / urothelial carcinoma | `Bladder_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"blood_cancer"` | Blood / leukaemia, lymphoma, myeloma | `Blood_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"bone_marrow_cancer"` | Bone marrow / myeloma, MDS, AML | `Bone_Marrow_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"breast_cancer"` | Breast / mammary carcinoma | `Mammary_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"ear_cancer"` | Ear / acoustic neuroma, middle ear tumour | `Ear_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"eye_cancer"` | Eye / retinoblastoma, uveal melanoma | `Eye_TSP1_30_version2d_10X_smartseq_scvi_Nov122024_updated.h5ad` |
+| `"fat_cancer"` | Adipose / liposarcoma | `Fat_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"heart_cancer"` | Heart / cardiac tumour, myxoma | `Heart_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"kidney_cancer"` | Kidney / renal cell carcinoma | `Kidney_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"large_intestine_cancer"` | Colon & rectum / colorectal cancer | `Large_Intestine_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"liver_cancer"` | Liver / HCC, cholangiocarcinoma | `Liver_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"lung_cancer"` | Lung / NSCLC, SCLC, mesothelioma | `Lung_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"lymph_node_cancer"` | Lymph node / DLBCL, Hodgkin, follicular lymphoma | `Lymph_Node_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"muscle_cancer"` | Muscle / rhabdomyosarcoma, leiomyosarcoma | `Muscle_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"ovary_cancer"` | Ovary / HGSOC, LGSOC, clear cell, endometrioid | `Ovary_TSP1_30_version2d_10X_smartseq_scvi_Nov262024.h5ad` |
+| `"pancreas_cancer"` | Pancreas / PDAC, pancreatic neuroendocrine | `Pancreas_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"prostate_cancer"` | Prostate / prostate adenocarcinoma, CRPC | `Prostate_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"salivary_gland_cancer"` | Salivary gland / mucoepidermoid, adenoid cystic | `Salivary_Gland_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"skin_cancer"` | Skin / melanoma, squamous cell, basal cell | `Skin_TSP1_30_version2d_10X_smartseq_scvi_Nov122024_updated.h5ad` |
+| `"small_intestine_cancer"` | Small intestine / duodenal, GIST | `Small_Intestine_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"spleen_cancer"` | Spleen / splenic lymphoma, marginal zone | `Spleen_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"stomach_cancer"` | Stomach / gastric carcinoma, signet ring | `Stomach_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"testis_cancer"` | Testis / seminoma, germ cell tumour | `Testis_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"thymus_cancer"` | Thymus / thymoma, thymic carcinoma | `Thymus_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"tongue_cancer"` | Tongue / oral tongue squamous cell carcinoma | `Tongue_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"trachea_cancer"` | Trachea / tracheal carcinoma, airway tumour | `Trachea_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"uterus_cancer"` | Uterus / endometrial, cervical carcinoma | `Uterus_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
+| `"vasculature_cancer"` | Vasculature / angiosarcoma, Kaposi sarcoma | `Vasculature_TSP1_30_version2d_10X_smartseq_scvi_Nov122024.h5ad` |
 
-For any other string (e.g. `"brain_cancer"`, `"thyroid_cancer"`), the pipeline stores
-the label and tells you to supply your own reference file for PopV / SCEVAN.
+> **Not in the table?** For any cancer type not listed above (e.g. `"brain_cancer"`,
+> `"thyroid_cancer"`, `"esophageal_cancer"`), pass the label as a free-text string.
+> The pipeline stores the label in `adata.uns['cancer_type']` and instructs you to
+> supply your own reference file for PopV / SCEVAN. No error is raised.
 
 To print all valid Tabula Sapiens keys at runtime:
 ```python
