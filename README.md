@@ -1,4 +1,5 @@
-## SCART — Single-Cell CAR-T Target Discovery
+# SCART — Single-Cell CAR-T Target Discovery
+
 **SCART** is an end-to-end computational pipeline for identifying tumour-specific surface protein targets for CAR-T cell therapy from single-cell RNA-seq data. Starting from raw GEO accession IDs or user-provided h5ad files, SCART automates cell-type annotation, malignant cell identification, surfaceome differential expression, and logic-gate gene combination scoring to rank candidate CAR-T targets by efficacy and safety.
 
 ---
@@ -126,44 +127,49 @@ jupyter notebook
 from SCART.geo_fetcher import SampleAnnotator
 
 # ── Option 1: Single GEO ID, QC disabled (default) ───────────────────────
-# QC step in Module 3 will be skipped entirely
-annotator = SampleAnnotator("GEO_accession_ID")
+annotator = SampleAnnotator("GEO_accession_ID", cancer_type="blood_cancer")
 
 # ── Option 2: Single GEO ID with both QC thresholds ──────────────────────
-annotator = SampleAnnotator("GEO_accession_ID", min_genes=200, max_mt=40)
+annotator = SampleAnnotator("GEO_accession_ID", cancer_type="blood_cancer",
+                             min_genes=200, max_mt=40)
 
 # ── Option 3: Single GEO ID with gene-count filter only ──────────────────
-annotator = SampleAnnotator("GEO_accession_ID", min_genes=300)
+annotator = SampleAnnotator("GEO_accession_ID", cancer_type="lung_cancer",
+                             min_genes=300)
 
 # ── Option 4: Single GEO ID with MT filter only ───────────────────────────
-annotator = SampleAnnotator("GEO_accession_ID", max_mt=25)
-
-# ── Option 5: Single GEO ID with manually specified cancer type ───────────
-# Auto-detection is skipped; the provided value is used directly
 annotator = SampleAnnotator("GEO_accession_ID", cancer_type="ovary_cancer",
+                             max_mt=25)
+
+# ── Option 5: Multiple GEO IDs → saves combined_tumor.h5ad ───────────────
+annotator = SampleAnnotator("GEO_accession_ID_1", "GEO_accession_ID_2",
+                             "GEO_accession_ID_3",
+                             cancer_type="blood_cancer",
                              min_genes=200, max_mt=40)
 
-# ── Option 6: Multiple GEO IDs → saves combined_tumor.h5ad ───────────────
-annotator = SampleAnnotator("GEO_accession_ID_1", "GEO_accession_ID_2",
-                             "GEO_accession_ID_3", min_genes=200, max_mt=40)
+# ── Option 6: Cancer type not in Tabula Sapiens (free-text) ──────────────
+# Pipeline stores the label and tells you to supply your own reference file
+annotator = SampleAnnotator("GEO_accession_ID", cancer_type="brain_cancer")
 
-# ── Option 7: Multiple GEO IDs with manual cancer type ───────────────────
-annotator = SampleAnnotator("GEO_accession_ID_1", "GEO_accession_ID_2",
-                             cancer_type="ovary_cancer",
-                             min_genes=200, max_mt=40)
+# ── Option 7: Multiple cancer types (comma-separated) ────────────────────
+annotator = SampleAnnotator("GEO_accession_ID",
+                             cancer_type="blood_cancer, bone_marrow_cancer")
 
 # ── Option 8: User-supplied h5ad instead of GEO download ─────────────────
 annotator = SampleAnnotator("/path/to/my_data.h5ad",
+                             cancer_type="ovary_cancer",
                              min_genes=200, max_mt=40)
 
 # ── Option 9: Mixed — GEO ID + user h5ad combined ────────────────────────
 annotator = SampleAnnotator("GEO_accession_ID", "/path/to/extra_data.h5ad",
+                             cancer_type="lung_cancer",
                              min_genes=200, max_mt=40)
 
 # ── Option 10: User h5ad WITH manual cell-type annotations ───────────────
 # Skips Module 2 (PopV) entirely — go straight to Module 3 after this
 annotator = SampleAnnotator(
     "my_data.h5ad",
+    cancer_type="ovary_cancer",
     manual_annotation_col="cell_type",   # name of your obs column
     min_genes=200,
     max_mt=40,
@@ -178,7 +184,7 @@ normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = 
 # unspecified     → list of unclassified sample IDs
 # annotation_info → dict mapping sample ID → "tumor" / "normal" / "unspecified"
 # query_h5ad      → path to the saved tumour h5ad (input for Module 2)
-# cancer_type     → cancer type string (user-supplied or auto-detected)
+# cancer_type     → cancer type string supplied by the user
 # results         → full per-GSE result dictionary
 ```
 
@@ -187,11 +193,16 @@ normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = 
 > - Multiple inputs → `combined_tumor.h5ad`
 > - User h5ad input → `input_tumor.h5ad`
 
-> **Cancer type note**
-> When `cancer_type` is provided, auto-detection from GEO metadata is skipped
-> entirely and the supplied value is stored in `adata.uns['cancer_type']`.
-> The value must match one of the keys in `TABULA_FILES` (e.g. `"ovary_cancer"`).
-> To see all valid keys: `from SCART.geo_fetcher import VALID_CANCER_TYPES; print(VALID_CANCER_TYPES)`
+> **`cancer_type` is required.**
+> Pass one of the Tabula Sapiens keys (e.g. `"blood_cancer"`) for an automatic
+> reference recommendation, or any free-text string (e.g. `"brain_cancer"`) if
+> your cancer type is not in Tabula Sapiens — you will be instructed to supply
+> your own reference.
+> To see all Tabula Sapiens keys:
+> ```python
+> from SCART.geo_fetcher import VALID_CANCER_TYPES
+> print(VALID_CANCER_TYPES)
+> ```
 
 > **Manual annotation note**
 > When `manual_annotation_col` is provided, Module 1 stores `adata.uns['skip_popv'] = True`
@@ -217,15 +228,12 @@ adata = popv_annotation.auto_run_popv(
 )
 
 # ── Option 2: Auto-download reference from Figshare ──────────────────────
-# Downloads the matching Tabula Sapiens tissue file automatically
-# (requires internet; large file ~2–5 GB)
 adata = popv_annotation.auto_run_popv(
     input_type = "raw",
     nsamples   = 300,
 )
 
 # ── Option 3: Pre-log-normalised input (runs CELLTYPIST only) ────────────
-# Use when your h5ad contains log-normalised counts, not raw integers
 adata = popv_annotation.auto_run_popv(
     input_type     = "log1p",
     nsamples       = 300,
@@ -241,7 +249,6 @@ adata = popv_annotation.auto_run_popv(
 )
 
 # ── Option 5: Keep Tabula Sapiens metadata columns in output ─────────────
-# By default these are removed; set False to retain them
 adata = popv_annotation.auto_run_popv(
     input_type             = "raw",
     nsamples               = 300,
@@ -265,7 +272,6 @@ adata = popv_annotation.auto_run_popv(
 from SCART import preprocessing
 
 # ── Option 1: Standard run with SCEVAN + scMalignantFinder ───────────────
-# Both tools used; a cell must be called malignant by BOTH (intersection)
 adata_preprocessed = preprocessing.run_preprocessing_pipeline(
     reference_h5ad     = "/path/to/tissue_reference.h5ad",
     log2fc_threshold   = 2.0,
@@ -274,7 +280,6 @@ adata_preprocessed = preprocessing.run_preprocessing_pipeline(
 )
 
 # ── Option 2: scMalignantFinder only (no SCEVAN) ─────────────────────────
-# Use when no tissue reference is available, or to skip the R/SCEVAN step
 adata_preprocessed = preprocessing.run_preprocessing_pipeline(
     malignant_strategy = "scMalignant",
     log2fc_threshold   = 2.0,
@@ -282,7 +287,6 @@ adata_preprocessed = preprocessing.run_preprocessing_pipeline(
 )
 
 # ── Option 3: SCEVAN only ─────────────────────────────────────────────────
-# Use when you trust CNA profiling more than the ML classifier
 adata_preprocessed = preprocessing.run_preprocessing_pipeline(
     reference_h5ad     = "/path/to/tissue_reference.h5ad",
     malignant_strategy = "scevan",
@@ -290,22 +294,22 @@ adata_preprocessed = preprocessing.run_preprocessing_pipeline(
     pval_adj_threshold = 0.05,
 )
 
-# ── Option 4: Relaxed DEG filters (if 0 DEGs with default settings) ───────
+# ── Option 4: Relaxed DEG filters ─────────────────────────────────────────
 adata_preprocessed = preprocessing.run_preprocessing_pipeline(
     reference_h5ad     = "/path/to/tissue_reference.h5ad",
     malignant_strategy = "intersection",
-    log2fc_threshold   = 0.5,    # lower fold-change cutoff
-    pval_adj_threshold = 0.10,   # less strict p-value
+    log2fc_threshold   = 0.5,
+    pval_adj_threshold = 0.10,
 )
 
 # ── Option 5: Tune SCEVAN reference cell count ────────────────────────────
 adata_preprocessed = preprocessing.run_preprocessing_pipeline(
     reference_h5ad       = "/path/to/tissue_reference.h5ad",
     malignant_strategy   = "intersection",
-    scevan_ref_max_cells = 200,   # default 500; increase for more stable CNV calls
+    scevan_ref_max_cells = 200,
 )
 
-# ── Option 6: Explicit file paths (if auto-detection fails) ───────────────
+# ── Option 6: Explicit file paths ─────────────────────────────────────────
 adata_preprocessed = preprocessing.run_preprocessing_pipeline(
     popv_path      = "/path/to/final_popv_annotated.h5ad",
     tumor_h5ad     = "/path/to/tumor.h5ad",
@@ -314,7 +318,6 @@ adata_preprocessed = preprocessing.run_preprocessing_pipeline(
 )
 
 # ── Option 7: Manual annotation path (after skipping PopV) ───────────────
-# input_tumor.h5ad already has popv_majority_vote_prediction set by Module 1
 adata_preprocessed = preprocessing.run_preprocessing_pipeline(
     adata              = sc.read_h5ad("input_tumor.h5ad"),
     reference_h5ad     = "/path/to/tissue_reference.h5ad",
@@ -324,11 +327,6 @@ adata_preprocessed = preprocessing.run_preprocessing_pipeline(
 )
 
 # ── What you get ──────────────────────────────────────────────────────────
-# adata_preprocessed → malignant epithelial cells only, binarised expression
-# adata_preprocessed.obs columns:
-#   scMalignantFinder_prediction, scevan_prediction, final_malignant
-# adata_preprocessed.uns keys:
-#   filtered_deg, all_deg, deg_params, scevan_results, qc_params
 print(adata_preprocessed.uns["filtered_deg"].head(10))
 ```
 
@@ -342,48 +340,11 @@ print(adata_preprocessed.uns["filtered_deg"].head(10))
 ```python
 from SCART.gene_combination_predictor import one_gene_combination
 
-# ── Option 1: User-supplied HPA h5ad, default safety ─────────────────────
 df = one_gene_combination.run(
     hpa_path         = "/path/to/HPA_updated.h5ad",
     safety_threshold = 0.9,
 )
 
-# ── Option 2: Stricter safety (fewer but safer candidates) ───────────────
-df = one_gene_combination.run(
-    hpa_path         = "/path/to/HPA_updated.h5ad",
-    safety_threshold = 0.95,
-)
-
-# ── Option 3: Relaxed safety (more candidates) ───────────────────────────
-df = one_gene_combination.run(
-    hpa_path         = "/path/to/HPA_updated.h5ad",
-    safety_threshold = 0.8,
-)
-
-# ── Option 4: User-supplied HPA as TSV ───────────────────────────────────
-df = one_gene_combination.run(
-    hpa_path         = "/path/to/rna_single_cell_read_count.tsv",
-    safety_threshold = 0.9,
-)
-
-# ── Option 5: Auto-download HPA from proteinatlas.org ────────────────────
-# Downloads once and caches in <cwd>/hpa_cache/
-df = one_gene_combination.run(
-    safety_threshold = 0.9,
-)
-
-# ── Option 6: Explicit tumour path (if auto-detection fails) ─────────────
-df = one_gene_combination.run(
-    hpa_path         = "/path/to/HPA_updated.h5ad",
-    tumor_path       = "/path/to/preprocessing_results/final_tumor.h5ad",
-    safety_threshold = 0.9,
-)
-
-# ── Inspect results ───────────────────────────────────────────────────────
-# df columns: Gene, Efficacy, Safety, ObjectiveScore
-print(df.head(20))
-
-# Top candidates passing safety threshold
 df_filtered = df[df["Safety"] >= 0.9].sort_values("Efficacy", ascending=False)
 print(df_filtered.head(10))
 ```
@@ -398,105 +359,18 @@ print(df_filtered.head(10))
 ```python
 from SCART.gene_combination_predictor import two_gene_combination
 
-# ── Option 1: Minimal — user HPA + default GA settings ───────────────────
-df_hof, df_all = two_gene_combination.run(
-    hpa_path         = "/path/to/HPA_updated.h5ad",
-    safety_threshold = 0.9,
-)
-
-# ── Option 2: Quick test run (small pop, few generations) ────────────────
-# Use to verify the pipeline runs before committing to a full search
-df_hof, df_all = two_gene_combination.run(
-    hpa_path         = "/path/to/HPA_updated.h5ad",
-    safety_threshold = 0.9,
-    pop_size         = 200,   # small population
-    Gmax             = 20,    # few generations
-    patience         = 10,
-    n_cpus           = 4,
-    n_runs           = 2,
-)
-
-# ── Option 3: Standard workstation run ───────────────────────────────────
 df_hof, df_all = two_gene_combination.run(
     hpa_path         = "/path/to/HPA_updated.h5ad",
     safety_threshold = 0.9,
     pop_size         = 1000,
     Gmax             = 100,
     patience         = 50,
-    n_cpus           = 8,     # set to your available CPU cores
-    n_runs           = 10,
-)
-
-# ── Option 4: HPC / server run ───────────────────────────────────────────
-df_hof, df_all = two_gene_combination.run(
-    hpa_path         = "/path/to/HPA_updated.h5ad",
-    safety_threshold = 0.9,
-    pop_size         = 2000,
-    Gmax             = 200,
-    patience         = 100,
-    n_cpus           = 40,
-    n_runs           = 10,
-)
-
-# ── Option 5: Stricter safety threshold ──────────────────────────────────
-df_hof, df_all = two_gene_combination.run(
-    hpa_path         = "/path/to/HPA_updated.h5ad",
-    safety_threshold = 0.95,  # 95% of healthy cell types must be negative
-    pop_size         = 1000,
-    Gmax             = 100,
-    patience         = 50,
     n_cpus           = 8,
     n_runs           = 10,
 )
 
-# ── Option 6: Explicit tumour path (if auto-detection fails) ─────────────
-df_hof, df_all = two_gene_combination.run(
-    hpa_path         = "/path/to/HPA_updated.h5ad",
-    tumor_path       = "/path/to/preprocessing_results/final_tumor.h5ad",
-    safety_threshold = 0.9,
-    n_cpus           = 8,
-)
-
-# ── Option 7: User-supplied HPA as TSV ───────────────────────────────────
-df_hof, df_all = two_gene_combination.run(
-    hpa_path         = "/path/to/rna_single_cell_read_count.tsv",
-    safety_threshold = 0.9,
-    n_cpus           = 8,
-)
-
-# ── Option 8: Auto-download HPA from proteinatlas.org ────────────────────
-df_hof, df_all = two_gene_combination.run(
-    safety_threshold = 0.9,
-    n_cpus           = 8,
-)
-
-# ── Option 9: Use all available CPU cores automatically ──────────────────
-import multiprocessing
-df_hof, df_all = two_gene_combination.run(
-    hpa_path         = "/path/to/HPA_updated.h5ad",
-    safety_threshold = 0.9,
-    n_cpus           = multiprocessing.cpu_count(),
-)
-
-# ── Inspect results ───────────────────────────────────────────────────────
-# df_hof — Hall of Fame: best unique gene pairs across all runs
-# Columns: seed_value, generation, LogicGates, Genes, Efficacy, Safety
-print(df_hof.head(10))
-
-# df_all — complete record of every evaluated pair across all runs
-print(df_all.shape)
-
-# Filter Hall of Fame by logic gate type
-and_pairs = df_hof[df_hof["LogicGates"] == "A & B"]    # both genes expressed
-or_pairs  = df_hof[df_hof["LogicGates"] == "A | B"]    # either gene expressed
-not_pairs = df_hof[df_hof["LogicGates"] == "A & !B"]   # A on, B off
-
-# Top AND-gate candidates
+and_pairs = df_hof[df_hof["LogicGates"] == "A & B"]
 print(and_pairs.head(10))
-
-# All pairs above a safety threshold
-safe_pairs = df_hof[df_hof["Safety"] >= 0.95].sort_values("Efficacy", ascending=False)
-print(safe_pairs.head(10))
 ```
 
 > **Output files**
@@ -514,8 +388,8 @@ Downloads GEO datasets or accepts existing h5ad files, classifies samples as tum
 ```python
 from SCART.geo_fetcher import SampleAnnotator
 
-annotator = SampleAnnotator(*inputs, min_genes=None, max_mt=None,
-                             cancer_type=None, manual_annotation_col=None)
+annotator = SampleAnnotator(*inputs, cancer_type, min_genes=None, max_mt=None,
+                             manual_annotation_col=None)
 normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = annotator.run()
 ```
 
@@ -524,47 +398,14 @@ normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `*inputs` | str | — | One or more GEO accession IDs (e.g. `"GSExxxxxx"`) or paths to `.h5ad` files |
+| `cancer_type` | str | **required** | Cancer type label. Pass a Tabula Sapiens key for an automatic reference recommendation, or any free-text string for unknown types. Multiple types accepted as comma-separated: `"blood_cancer, bone_marrow_cancer"` |
 | `min_genes` | int or None | `None` | Minimum genes per cell for QC in Module 3. `None` = QC skipped |
 | `max_mt` | float or None | `None` | Maximum mitochondrial % per cell. `None` = QC skipped |
-| `cancer_type` | str or None | `None` | Manually specify the cancer type (e.g. `"ovary_cancer"`). When provided, auto-detection from GEO metadata is skipped. Must be a valid key from `TABULA_FILES`. Multiple types accepted as a comma-separated string: `"ovary_cancer, lung_cancer"` |
 | `manual_annotation_col` | str or None | `None` | Name of the obs column in your h5ad that contains cell-type labels. When set, Module 2 (PopV) is skipped. Only applies to h5ad inputs — ignored for GEO IDs |
 
-**Usage examples**
+**`cancer_type` — Tabula Sapiens keys**
 
-```python
-# Single GEO ID, no QC
-annotator = SampleAnnotator("your_GEO_accession_ID")
-
-# Single GEO ID with QC
-annotator = SampleAnnotator("your_GEO_accession_ID", min_genes=200, max_mt=40)
-
-# Single GEO ID with manually specified cancer type
-annotator = SampleAnnotator("your_GEO_accession_ID", cancer_type="ovary_cancer",
-                             min_genes=200, max_mt=40)
-
-# Multiple GEO IDs → saves combined_tumor.h5ad
-annotator = SampleAnnotator("your_GEO_accession_ID_1", "your_GEO_accession_ID_2",
-                             min_genes=200, max_mt=40)
-
-# Multiple GEO IDs with manual cancer type
-annotator = SampleAnnotator("your_GEO_accession_ID_1", "your_GEO_accession_ID_2",
-                             cancer_type="ovary_cancer", min_genes=200, max_mt=40)
-
-# User-supplied h5ad
-annotator = SampleAnnotator("/path/to/my_data.h5ad", min_genes=200, max_mt=40)
-
-# User h5ad with manual annotations — skips PopV
-annotator = SampleAnnotator("/path/to/my_data.h5ad",
-                             manual_annotation_col="cell_type",
-                             min_genes=200, max_mt=40)
-
-# Mixed GEO + h5ad
-annotator = SampleAnnotator("your_GEO_accession_ID", "/path/to/extra.h5ad")
-```
-
-**Valid cancer type values**
-
-Pass any of the following strings to `cancer_type=`:
+Pass any of the following strings for an automatic reference recommendation:
 
 ```
 bladder_cancer, blood_cancer, bone_marrow_cancer, breast_cancer,
@@ -576,11 +417,40 @@ stomach_cancer, testis_cancer, thymus_cancer, tongue_cancer, trachea_cancer,
 uterus_cancer, vasculature_cancer
 ```
 
-To print all valid values at runtime:
+For any other string (e.g. `"brain_cancer"`, `"thyroid_cancer"`), the pipeline stores
+the label and tells you to supply your own reference file for PopV / SCEVAN.
+
+To print all valid Tabula Sapiens keys at runtime:
 ```python
 from SCART.geo_fetcher import VALID_CANCER_TYPES
 print(VALID_CANCER_TYPES)
 ```
+
+**Sample classification logic**
+
+Each GSM is classified in strict priority order (first match wins):
+
+| Priority | Label | Matched by |
+|---|---|---|
+| 1 | **normal** | `normal`, `healthy`, `control`, `adjacent normal`, `non-tumor`, `non-cancer`, `benign`, `non-malignant` |
+| 2 | **tumor** | Any keyword in the disease keyword list (see below) |
+| 3 | **unspecified** | Neither group matched |
+
+The tumour keyword list covers both generic terms (`tumor`, `carcinoma`, `malignant`) and
+haematological / disease-specific aliases so that blood cancer datasets whose GSM
+descriptions use disease names instead of "tumor" are correctly classified.
+Example terms: `aml`, `cml`, `all`, `cll`, `leukemia`, `leukaemia`, `lymphoma`,
+`myeloma`, `myelodysplastic`, `dlbcl`, `hodgkin`, `multiple myeloma`, `pdac`,
+`glioblastoma`, `melanoma`, `sarcoma`, and many more.
+
+**Tarball extraction**
+
+GEO sometimes ships the 10x MTX triplet inside a `.tar.gz` archive
+(e.g. `GSM4257051_G2_filtered_feature_bc_matrix.tar.gz`).
+Module 1 automatically extracts any such archives before reading, then
+recursively locates the `matrix.mtx.gz` / `features.tsv.gz` / `barcodes.tsv.gz`
+triplet even if it lands in a sub-directory after extraction.
+Already-extracted files are detected and skipped on re-runs.
 
 **Output files**
 
@@ -596,11 +466,16 @@ QC thresholds set here are stored in `adata.uns['qc_params']` and automatically 
 
 **Cancer type flow**
 
-When `cancer_type` is provided, it is stored in `adata.uns['cancer_type']` and used directly for reference guidance printed at the end of `run()`. When `cancer_type` is `None` (default), the type is inferred by keyword-matching the GEO title and summary fields. The user-supplied value always takes priority over any auto-detected value. A `ValueError` is raised immediately at construction time if an unrecognised cancer type key is passed.
+The user-supplied `cancer_type` is stored in `adata.uns['cancer_type']` and used for
+reference guidance printed at the end of `run()`. Tabula Sapiens keys receive a specific
+file recommendation; unknown labels receive a message to supply a custom reference.
 
 **Manual annotation flow**
 
-When `manual_annotation_col` is set on an h5ad input, Module 1 copies that column into `adata.obs['popv_majority_vote_prediction']` and sets `adata.uns['skip_popv'] = True`. Module 3 reads `popv_majority_vote_prediction` identically regardless of whether it came from PopV or manual annotation. See [Manual Annotation](#manual-annotation--skip-popv-with-your-own-labels) for label requirements.
+When `manual_annotation_col` is set on an h5ad input, Module 1 copies that column into
+`adata.obs['popv_majority_vote_prediction']` and sets `adata.uns['skip_popv'] = True`.
+Module 3 reads `popv_majority_vote_prediction` identically regardless of whether it came
+from PopV or manual annotation. See [Manual Annotation](#manual-annotation--skip-popv-with-your-own-labels) for label requirements.
 
 ---
 
@@ -615,7 +490,6 @@ Annotates cell types using PopV, a consensus framework that runs multiple method
 ```python
 from SCART import popv_annotation
 
-# Automatic mode — finds tumour h5ad from Module 1 automatically
 adata = popv_annotation.auto_run_popv(
     input_type            = "raw",
     nsamples              = 300,
@@ -639,7 +513,7 @@ adata = popv_annotation.auto_run_popv(
 
 Tabula Sapiens tissue references are available at: https://doi.org/10.6084/m9.figshare.27921984
 
-Module 1 prints the recommended reference file for the detected cancer type at the end of its run.
+Module 1 prints the recommended reference file for your cancer type at the end of its run.
 
 **Output files**
 
@@ -688,9 +562,9 @@ adata_preprocessed = preprocessing.run_preprocessing_pipeline(
 | `tumor_h5ad` | str or None | `None` | Module 1 h5ad for scMalignantFinder full-gene recovery. Auto-detected if None |
 | `save_dir` | str or None | `None` | Output directory. Default: `<cwd>/preprocessing_results/` |
 | `malignant_strategy` | str | `"intersection"` | `"intersection"` (both tools must agree), `"scMalignant"`, or `"scevan"` |
-| `scevan_ref_cell_col` | str or None | `"cell_ontology_class"` | Column in reference h5ad used to identify cell types. Set to `None` to skip filtering and use all cells in the reference as-is |
-| `scevan_ref_epithelial_values` | list or None | `None` | Exact label list to select epithelial cells from `scevan_ref_cell_col`. When `None`, epithelial cells are auto-detected by substring match on `"epithelial cell"` (default Tabula Sapiens behaviour) |
-| `scevan_ref_max_cells` | int or None | `500` | Maximum normal reference cells subsampled for SCEVAN. Set to `None` to use all available cells |
+| `scevan_ref_cell_col` | str or None | `"cell_ontology_class"` | Column in reference h5ad used to identify cell types. Set to `None` to skip filtering |
+| `scevan_ref_epithelial_values` | list or None | `None` | Exact label list to select epithelial cells. `None` = auto-detect by substring match |
+| `scevan_ref_max_cells` | int or None | `500` | Maximum normal reference cells subsampled for SCEVAN |
 | `scevan_sample_name` | str | `"SCEVAN_run"` | Prefix for SCEVAN output files |
 | `scevan_organism` | str | `"human"` | `"human"` or `"mouse"` |
 | `scevan_par_cores` | int | `1` | CPU cores per SCEVAN batch |
@@ -701,85 +575,53 @@ adata_preprocessed = preprocessing.run_preprocessing_pipeline(
 
 #### Module 3 — SCEVAN Reference Configuration
 
-SCEVAN requires a reference h5ad of known normal epithelial cells as a CNV baseline. Pass it via `reference_h5ad=`. Three usage modes are supported:
-
 **Mode A — Tabula Sapiens (default)**
-
-The default works out-of-the-box with any Tabula Sapiens organ h5ad. Epithelial cells are auto-detected by substring match on `cell_ontology_class`.
 
 ```python
 preprocessing.run_preprocessing_pipeline(
     reference_h5ad               = "Ovary_ref_Tabula_sapiens.h5ad",
-    scevan_ref_cell_col          = "cell_ontology_class",   # default
-    scevan_ref_epithelial_values = None,                    # default: substring match
-    scevan_ref_max_cells         = 500,                     # default
+    scevan_ref_cell_col          = "cell_ontology_class",
+    scevan_ref_epithelial_values = None,
+    scevan_ref_max_cells         = 500,
 )
 ```
 
 **Mode B — Custom reference with your own labels**
-
-Supply the column name and exact label values to select epithelial cells.
 
 ```python
 preprocessing.run_preprocessing_pipeline(
     reference_h5ad               = "my_reference.h5ad",
     scevan_ref_cell_col          = "cell_type",
     scevan_ref_epithelial_values = ["Normal Epithelial cells", "epithelial"],
-    scevan_ref_max_cells         = None,   # use all available cells
+    scevan_ref_max_cells         = None,
 )
 ```
 
 **Mode C — Pre-filtered reference (already epithelial only)**
 
-If your reference is already subsetted to epithelial cells, skip filtering entirely.
-
 ```python
 preprocessing.run_preprocessing_pipeline(
     reference_h5ad       = "epithelial_ref_only.h5ad",
-    scevan_ref_cell_col  = None,    # no filtering applied
+    scevan_ref_cell_col  = None,
     scevan_ref_max_cells = None,
 )
 ```
-
-> **Tip:** To find the correct column name and labels in your reference, run:
-> ```python
-> import scanpy as sc
-> ref = sc.read_h5ad("your_reference.h5ad")
-> print(ref.obs.columns.tolist())
-> print(ref.obs["your_col"].value_counts())
-> ```
-
-**Pipeline steps**
-
-1. Load full PopV-annotated dataset (or manual-annotation h5ad)
-2. Detect manual annotation mode (`skip_popv`) — validate labels if present
-3. Read QC thresholds from `adata.uns['qc_params']` (skipped if absent)
-4. Extract epithelial cells via substring match on `"epithelial cell"` → apply QC filters if set
-5. Run **scMalignantFinder** (machine learning classifier) on full gene space
-6. Run **SCEVAN** (copy number alteration profiling) against normal reference cells selected according to `scevan_ref_cell_col` and `scevan_ref_epithelial_values`
-7. Combine predictions with chosen strategy → `final_malignant` column
-8. Keep only malignant epithelial cells; extract non-epithelial cells as DEG reference
-9. Filter both groups to surfaceome genes (GESP database)
-10. Wilcoxon DEG: malignant epithelial vs non-epithelial rest
-11. Binarise expression matrix (0/1), store DEG results, save
 
 **Output files**
 
 | File | Description |
 |---|---|
-| `preprocessing_results/final_tumor.h5ad` | Malignant epithelial cells, surfaceome-filtered, binarised. Contains `obs['final_malignant']`, DEG in `uns['filtered_deg']`, SCEVAN scores in `uns['scevan_results']` |
+| `preprocessing_results/final_tumor.h5ad` | Malignant epithelial cells, surfaceome-filtered, binarised |
 
 ---
 
 ### Module 4a — Single-Gene Scoring (`one_gene_combination.py`)
 
-Evaluates every surfaceome gene individually for CAR-T suitability by computing efficacy (fraction of tumour cells expressing the gene) and safety (fraction of healthy cells NOT expressing the gene).
-
 ```python
 from SCART.gene_combination_predictor import one_gene_combination
 
 df = one_gene_combination.run(
-    hpa_path         = "/path/to/HPA_healthy_reference.h5ad",
+    hpa_path         = "/path/to/HPA_updated.h5ad",
     safety_threshold = 0.9,
 )
 ```
@@ -788,24 +630,9 @@ df = one_gene_combination.run(
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `safety_threshold` | float | `0.9` | Minimum fraction of healthy cells that must NOT express the gene. Range 0–1 |
-| `hpa_path` | str or None | `None` | Path to healthy reference (`.h5ad` or `.tsv`/`.tsv.gz`). If `None`, auto-downloaded from proteinatlas.org |
-| `tumor_path` | str or None | `None` | Path to Module 3 output. Auto-detected from `preprocessing_results/` if None |
-
-**HPA healthy reference options**
-
-```python
-# Option 1: User-supplied HPA h5ad (recommended — fastest)
-df = one_gene_combination.run(hpa_path="/path/to/HPA.h5ad")
-
-# Option 2: User-supplied HPA TSV
-df = one_gene_combination.run(hpa_path="/path/to/rna_single_cell_read_count.tsv")
-
-# Option 3: Auto-download from proteinatlas.org (cached after first run)
-df = one_gene_combination.run()
-```
-
-Large HPA h5ad files (e.g. 664k × 19k genes) are loaded memory-safely — only the genes overlapping with the tumour matrix are read into RAM.
+| `safety_threshold` | float | `0.9` | Minimum fraction of healthy cells that must NOT express the gene |
+| `hpa_path` | str or None | `None` | Healthy reference (`.h5ad` or `.tsv`). Auto-downloaded if `None` |
+| `tumor_path` | str or None | `None` | Module 3 output. Auto-detected if None |
 
 **Output files**
 
@@ -813,27 +640,23 @@ Large HPA h5ad files (e.g. 664k × 19k genes) are loaded memory-safely — only 
 |---|---|
 | `single_gene_results.csv` | All genes scored. Columns: `gene`, `efficacy`, `safety` |
 
-**Return value:** `pd.DataFrame` with columns `Gene`, `Efficacy`, `Safety`, `ObjectiveScore`
-
 ---
 
 ### Module 4b — Two-Gene Logic-Gate Scoring (`two_gene_combination.py`)
 
-Uses a Genetic Algorithm (DEAP) to search over all `(geneA, geneB, logic_gate)` combinations and find pairs that maximise tumour killing while sparing healthy tissue.
-
 **Logic gates evaluated:**
 
-| Gate | Meaning | Use case |
-|---|---|---|
-| `A & B` | Both genes expressed | High specificity, moderate coverage |
-| `A \| B` | Either gene expressed | High coverage, moderate specificity |
-| `A & !B` | A expressed, B NOT expressed | Tumour-specific NOT gates |
+| Gate | Meaning |
+|---|---|
+| `A & B` | Both genes expressed |
+| `A \| B` | Either gene expressed |
+| `A & !B` | A expressed, B NOT expressed |
 
 ```python
 from SCART.gene_combination_predictor import two_gene_combination
 
 df_hof, df_all = two_gene_combination.run(
-    hpa_path         = "/path/to/HPA_healthy_reference.h5ad",
+    hpa_path         = "/path/to/HPA_updated.h5ad",
     safety_threshold = 0.9,
     pop_size         = 1000,
     Gmax             = 100,
@@ -847,15 +670,15 @@ df_hof, df_all = two_gene_combination.run(
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `hpa_path` | str or None | `None` | Healthy reference path (same options as Module 4a) |
+| `hpa_path` | str or None | `None` | Healthy reference path |
 | `tumor_path` | str or None | `None` | Module 3 output. Auto-detected if None |
-| `safety_threshold` | float | `0.9` | Minimum healthy-cell safety. Range 0–1 |
-| `pop_size` | int | `1000` | GA population size per generation. Larger = better search, slower runtime |
-| `Gmax` | int | `100` | Maximum generations. More = more thorough search |
-| `Ggap` | int | `10` | Random immigrant injection interval (prevents premature convergence) |
-| `Rrep` | float | `0.1` | Fraction of population replaced at each Ggap. Range 0.0–0.5 |
+| `safety_threshold` | float | `0.9` | Minimum healthy-cell safety |
+| `pop_size` | int | `1000` | GA population size per generation |
+| `Gmax` | int | `100` | Maximum generations |
+| `Ggap` | int | `10` | Random immigrant injection interval |
+| `Rrep` | float | `0.1` | Fraction of population replaced at each Ggap |
 | `patience` | int | `50` | Early stop if fitness does not improve for N generations |
-| `n_cpus` | int | `1` | CPU cores for parallel fitness evaluation. Increase for faster runs |
+| `n_cpus` | int | `1` | CPU cores for parallel fitness evaluation |
 | `n_runs` | int | `10` | Independent GA runs with different random seeds |
 
 **Recommended settings by hardware**
@@ -875,10 +698,8 @@ two_gene_combination.run(pop_size=2000, Gmax=200, patience=100, n_cpus=40, n_run
 
 | File | Description |
 |---|---|
-| `two_gene_hof.csv` | Hall of Fame — best unique gene pairs across all runs. Columns: `seed_value`, `generation`, `LogicGates`, `Genes`, `Efficacy`, `Safety` |
+| `two_gene_hof.csv` | Hall of Fame — best unique gene pairs. Columns: `seed_value`, `generation`, `LogicGates`, `Genes`, `Efficacy`, `Safety` |
 | `two_gene_complete.csv` | All evaluated pairs across every generation and run |
-
-**Return value:** `(df_hof, df_all)` — both as `pd.DataFrame`
 
 ---
 
@@ -897,7 +718,8 @@ from SCART.geo_fetcher import SampleAnnotator
 
 annotator = SampleAnnotator(
     "my_data.h5ad",
-    manual_annotation_col="cell_type",   # name of your obs column
+    cancer_type="ovary_cancer",
+    manual_annotation_col="cell_type",
     min_genes=200,
     max_mt=40,
 )
@@ -918,7 +740,7 @@ adata_mal = preprocessing.run_preprocessing_pipeline(
 
 **Column must exist in adata.obs.** A clear error listing all available columns is raised if it is missing.
 
-**Epithelial labels must contain "epithelial cell".** Module 3 identifies epithelial cells by substring-matching `"epithelial cell"` (case-insensitive) anywhere in the label. Examples:
+**Epithelial labels must contain "epithelial cell".** Module 3 identifies epithelial cells by substring-matching `"epithelial cell"` (case-insensitive). Examples:
 
 | Label | Valid? |
 |---|---|
@@ -930,9 +752,9 @@ adata_mal = preprocessing.run_preprocessing_pipeline(
 | `Epithelial_cells` | ❌ — does not contain "epithelial cell" |
 | `cancer cell` | ❌ — not recognised as epithelial |
 
-Module 1 prints a warning immediately if no epithelial labels are detected, before any files are written. Module 3 raises a descriptive error with fix instructions if the column is missing or empty.
+Module 1 prints a warning immediately if no epithelial labels are detected.
 
-**All other labels are treated as non-epithelial** (the "rest" comparison group for DEG). Any string label is accepted for non-epithelial cells.
+**All other labels are treated as non-epithelial** (the "rest" comparison group for DEG).
 
 ### What is stored in the output h5ad
 
@@ -944,12 +766,11 @@ Module 1 prints a warning immediately if no epithelial labels are detected, befo
 
 ### Multiple h5ad files
 
-`manual_annotation_col` applies to all h5ad files passed. All files must share the same column name. The `popv_majority_vote_prediction` column is preserved through concatenation automatically.
-
 ```python
 annotator = SampleAnnotator(
     "dataset1.h5ad",
     "dataset2.h5ad",
+    cancer_type="ovary_cancer",
     manual_annotation_col="cell_type",
 )
 ```
