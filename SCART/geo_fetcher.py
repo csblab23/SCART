@@ -46,14 +46,33 @@ TABULA_FILES = {
 # Valid cancer type keys for user reference
 VALID_CANCER_TYPES = sorted(TABULA_FILES.keys())
 
-# ── Disease-specific keywords used for the "unspecified → tumor" rescue pass ──
-# These cover haematological and other malignancies that rarely use the
-# word "tumor" in their sample descriptions.
+# ── High-priority sample-level metadata fields (used FIRST for classification)
+# These are GSM-specific fields that directly describe what the sample IS.
+# Series-level or platform-level text (which often mentions "normal" in comparisons)
+# is intentionally excluded from this priority set.
+_PRIORITY_FIELDS = [
+    "characteristics_ch1",   # e.g. "tissue: ovarian tumor", "disease: HGSOC"
+    "source_name_ch1",        # e.g. "primary tumor", "peripheral blood mononuclear cells"
+    "title",                  # e.g. "HGSOC_patient1_tumor"
+    "description",            # sample-level free-text description
+]
+
+# ── Disease-specific keywords used for tumor classification ──────────────────
+# Covers haematological and solid-tumour malignancies that may not use "tumor".
 DISEASE_TUMOR_KEYWORDS = [
     # ── General malignancy ───────────────────────────────────────────────────
     "tumor", "tumour", "cancer", "carcinoma", "adenocarcinoma",
     "malignant", "malignancy", "metastatic", "metastasis",
     "neoplasm", "neoplastic",
+
+    # ── Epithelial / gynaecological ─────────────────────────────────────────
+    "hgsoc", "lgsoc", "serous ovarian", "ovarian carcinoma",
+    "endometrioid carcinoma", "clear cell carcinoma",
+    "mucinous carcinoma", "fallopian tube carcinoma",
+    "stic",                      # serous tubal intraepithelial carcinoma
+    "peritoneal carcinoma",
+    "ascites",                   # ovarian cancer commonly presents with ascites
+    "debulking",                 # surgery term exclusive to advanced ovarian/peritoneal cancer
 
     # ── Haematological ───────────────────────────────────────────────────────
     "leukemia", "leukaemia", "lymphoma", "myeloma",
@@ -78,12 +97,46 @@ DISEASE_TUMOR_KEYWORDS = [
     "plasmacytoma", "waldenström",
     "smoldering myeloma", "amyloidosis",
 
-    # ── Solid-tumour aliases missed by primary keywords ──────────────────────
-    "hgsoc", "lgsoc", "pdac", "nsclc", "sclc",
+    # ── Solid-tumour aliases / acronyms ─────────────────────────────────────
+    "pdac", "nsclc", "sclc",
     "gbm", "glioblastoma", "glioma", "astrocytoma",
     "melanoma", "sarcoma", "blastoma",
     "hepatocellular", "cholangiocarcinoma",
     "seminoma", "teratoma",
+    "patient",                   # "patient" in sample-level context strongly implies disease
+]
+
+# ── Keywords that ONLY mean "normal / healthy control" when they appear in
+# the HIGH-PRIORITY sample fields (not in the full metadata blob).
+# We deliberately keep "normal" here so that "adjacent normal" in
+# characteristics_ch1 is still classified as normal.
+# But we AVOID classifying based on series-level mentions of "normal tissue"
+# (e.g. "we compared tumor vs normal tissue") which appear in the GSE summary.
+_NORMAL_KEYWORDS = [
+    "normal",
+    "healthy",
+    "control",
+    "adjacent normal",
+    "non-tumor",
+    "non-tumour",
+    "non-cancer",
+    "benign",
+    "non-malignant",
+    "pbmc",               # peripheral blood mononuclear cells from healthy donors
+    "donor",              # healthy donor
+]
+
+# Fallback normal keywords used when scanning the FULL metadata blob.
+# Much stricter — avoids phrases like "compared to normal" in abstract text.
+_NORMAL_KEYWORDS_STRICT = [
+    "adjacent normal",
+    "non-tumor",
+    "non-tumour",
+    "non-cancer",
+    "non-malignant",
+    "healthy donor",
+    "normal donor",
+    "normal volunteer",
 ]
 
 
@@ -186,19 +239,36 @@ class SampleAnnotator:
     GEO ID inputs always run the full PopV pipeline regardless of
     manual_annotation_col — the parameter is silently ignored for GEO IDs.
 
-    Sample classification logic
-    ---------------------------
-    Each GSM is first checked against normal/control keywords; if found it
-    is labelled **normal**.  Next it is checked against a broad set of
-    tumour/malignancy keywords (including haematological disease terms such
-    as "aml", "leukemia", "myeloma", etc.); if found it is labelled
-    **tumor**.  A sample reaches **unspecified** only when *neither* group
-    of keywords is detected.
+    Sample classification logic (three-pass, priority-aware)
+    ---------------------------------------------------------
+    Classification is done in three passes so that series-level background
+    text (e.g. "we compared tumor vs normal tissue" in a GSE abstract)
+    cannot override the actual sample-level evidence:
 
-    This two-step approach means that blood-cancer datasets whose GSM
-    descriptions use disease names instead of the word "tumor" (e.g.
-    "AML patient", "CLL cells") are correctly classified as tumor rather
-    than being silently dropped into the unspecified bucket.
+    Pass 1 — HIGH-PRIORITY FIELDS ONLY
+        Check ``characteristics_ch1``, ``source_name_ch1``, ``title``, and
+        ``description`` — the fields that directly describe the sample.
+
+        a. If a **strict normal** keyword is found → **normal**.
+        b. Else if a **tumor** keyword is found    → **tumor**.
+
+    Pass 2 — FULL METADATA BLOB (fallback when Pass 1 is inconclusive)
+        Concatenate ALL metadata fields into one lowercase string.
+
+        a. If a **strict normal** keyword (``_NORMAL_KEYWORDS_STRICT``) is
+           found → **normal**.  (Strict list avoids false positives from
+           comparison phrases like "compared to normal".)
+        b. Else if a **tumor** keyword is found → **tumor**.
+
+    Pass 3 — UNSPECIFIED
+        Neither pass produced a definitive label → **unspecified**.
+
+    The two-tier normal keyword lists mean that:
+    - "adjacent normal tissue" (characteristics_ch1) → normal ✓
+    - "HGSOC patient" (title) with "compared to normal ovary" in abstract
+      → tumor ✓  (abstract text only reaches Pass 2 strict-normal check,
+        which does not match "compared to normal")
+    - "AML patient" (source_name_ch1) → tumor ✓
     """
 
     def __init__(
@@ -541,35 +611,105 @@ class SampleAnnotator:
     # GEO processing
     # ──────────────────────────────────────────────────────────────────────
 
-    def _classify_gsm(self, text: str):
+    @staticmethod
+    def _extract_priority_text(gsm) -> str:
         """
-        Classify a single GSM based on its full metadata text.
+        Build a lowercase text string from ONLY the high-priority,
+        sample-specific metadata fields of a GSM object.
 
-        Classification order (first match wins)
-        ----------------------------------------
-        1. **normal**  – contains a normal/control/healthy keyword.
-        2. **tumor**   – contains any tumour or disease-specific keyword
-                         from DISEASE_TUMOR_KEYWORDS (covers both generic
-                         terms like "tumor" and haematological terms like
-                         "aml", "leukemia", "myeloma", etc.).
-        3. **unspecified** – neither group matched.
+        These fields directly describe what the sample *is* (tissue type,
+        disease state, tissue source) rather than what the study *compared*
+        or what the platform *measures*.  Using only these fields for the
+        first classification pass prevents series-level background text
+        (e.g. "we compared tumor vs normal tissue") from causing
+        false-positive normal classifications.
+
+        Returns
+        -------
+        str
+            Lowercase concatenation of priority field values.
+        """
+        parts = []
+        for field in _PRIORITY_FIELDS:
+            vals = gsm.metadata.get(field, [])
+            if vals:
+                parts.append(" ".join(str(v) for v in vals))
+        return " ".join(parts).lower()
+
+    @staticmethod
+    def _extract_full_text(gsm) -> str:
+        """
+        Build a lowercase text string from ALL metadata fields of a GSM.
+        Used only as a fallback when the priority-field pass is inconclusive.
+        """
+        return " ".join(str(v) for v in gsm.metadata.values()).lower()
+
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _classify_gsm(self, gsm) -> str:
+        """
+        Classify a single GSM as 'normal', 'tumor', or 'unspecified'.
+
+        Three-pass, priority-aware algorithm
+        -------------------------------------
+        Pass 1 — HIGH-PRIORITY FIELDS (``characteristics_ch1``,
+                 ``source_name_ch1``, ``title``, ``description``)
+
+            These fields are the most direct description of the sample.
+
+            a. Any ``_NORMAL_KEYWORDS`` hit  → **normal**
+               (includes bare "normal", "healthy", "control", etc.)
+            b. Any ``DISEASE_TUMOR_KEYWORDS`` hit → **tumor**
+
+        Pass 2 — FULL METADATA BLOB (all fields concatenated)
+
+            Used only when Pass 1 was inconclusive (no keyword matched).
+
+            a. Any ``_NORMAL_KEYWORDS_STRICT`` hit → **normal**
+               (strict subset — avoids "compared to normal", "normal ovary"
+               appearing in background text of a cancer study)
+            b. Any ``DISEASE_TUMOR_KEYWORDS`` hit  → **tumor**
+
+        Pass 3 — **unspecified**
+            Neither pass produced a definitive result.
+
+        Why two normal keyword lists?
+        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        The bare word "normal" is meaningful inside ``characteristics_ch1``
+        (e.g. "tissue: normal ovary" describes a truly healthy sample) but
+        dangerous inside a GSE abstract (e.g. "we compared HGSOC to normal
+        ovarian tissue" — these are HGSOC patient samples, not controls).
+        The strict list (_NORMAL_KEYWORDS_STRICT) requires more specific
+        phrasing ("adjacent normal", "healthy donor", etc.) that cannot
+        plausibly appear accidentally in background text.
+
+        Parameters
+        ----------
+        gsm : GEOparse GSM object
 
         Returns
         -------
         "normal" | "tumor" | "unspecified"
         """
-        normal_keywords = [
-            "normal", "healthy", "control", "adjacent normal",
-            "non-tumor", "non-tumour", "non-cancer",
-            "benign", "non-malignant",
-        ]
+        # ── Pass 1: high-priority sample-specific fields ───────────────────
+        priority_text = self._extract_priority_text(gsm)
 
-        if any(k in text for k in normal_keywords):
+        if any(k in priority_text for k in _NORMAL_KEYWORDS):
             return "normal"
 
-        if any(k in text for k in DISEASE_TUMOR_KEYWORDS):
+        if any(k in priority_text for k in DISEASE_TUMOR_KEYWORDS):
             return "tumor"
 
+        # ── Pass 2: full metadata blob with strict normal keywords ─────────
+        full_text = self._extract_full_text(gsm)
+
+        if any(k in full_text for k in _NORMAL_KEYWORDS_STRICT):
+            return "normal"
+
+        if any(k in full_text for k in DISEASE_TUMOR_KEYWORDS):
+            return "tumor"
+
+        # ── Pass 3: inconclusive ───────────────────────────────────────────
         return "unspecified"
 
     # ──────────────────────────────────────────────────────────────────────
@@ -578,6 +718,9 @@ class SampleAnnotator:
         """
         Download a GEO series, classify each GSM, and return lists of
         normal / tumor / unspecified sample IDs.
+
+        Prints a per-GSM debug line showing which priority-field text was
+        used for classification so users can verify decisions.
         """
         gse_dir = os.path.join(self.base_dir, gse_id)
         os.makedirs(gse_dir, exist_ok=True)
@@ -595,24 +738,23 @@ class SampleAnnotator:
 
         for gsm_id, gsm in gse.gsms.items():
 
-            # Build a single lowercase text blob from all metadata fields
-            text = " ".join(
-                [str(v) for v in gsm.metadata.values()]
-            ).lower()
-
-            # Filter: human only
+            # ── Filter: human only ─────────────────────────────────────────
             organism = " ".join(gsm.metadata.get("organism_ch1", [])).lower()
             if "homo sapiens" not in organism:
                 excluded_non_human.append(gsm_id)
                 continue
 
-            # Filter: scRNA-seq only
+            # ── Filter: scRNA-seq only ─────────────────────────────────────
             library = " ".join(gsm.metadata.get("library_strategy", [])).lower()
             if not any(k in library for k in ["rna-seq", "scrna", "single cell"]):
                 excluded_non_scrna.append(gsm_id)
                 continue
 
-            label = self._classify_gsm(text)
+            label = self._classify_gsm(gsm)
+
+            # ── Debug: show which text drove the decision ──────────────────
+            priority_text = self._extract_priority_text(gsm)
+            print(f"  [{gsm_id}] label={label!r} | priority_text={priority_text[:120]!r}")
 
             if label == "normal":
                 normal.append(gsm_id)
@@ -660,23 +802,8 @@ class SampleAnnotator:
         """
         Extract any .tar.gz / .tar archives present in *gsm_dir* into that
         same directory.
-
-        GEO sometimes ships the 10x MTX triplet packaged inside a tarball
-        (e.g. ``GSM4257051_G2_filtered_feature_bc_matrix.tar.gz``).  This
-        method unpacks every such archive it finds so that the subsequent
-        MTX-scanning logic can locate the individual files.
-
-        Already-extracted files are detected by checking whether the archive
-        member paths already exist on disk; if they do the archive is skipped
-        to avoid redundant work on re-runs.
-
-        Parameters
-        ----------
-        gsm_dir : str
-            Directory that was just located for this GSM sample.
         """
         for fname in os.listdir(gsm_dir):
-            # Accept both .tar.gz and plain .tar
             if not (fname.endswith(".tar.gz") or fname.endswith(".tar")):
                 continue
 
@@ -686,7 +813,6 @@ class SampleAnnotator:
                 with tarfile.open(tar_path, "r:*") as tf:
                     members = tf.getmembers()
 
-                    # Skip if every member already exists on disk
                     all_present = all(
                         os.path.exists(os.path.join(gsm_dir, m.name))
                         for m in members if m.isfile()
@@ -705,23 +831,7 @@ class SampleAnnotator:
     def _find_mtx_dir(self, root: str):
         """
         Walk *root* recursively and return the first directory that contains
-        all three 10x MTX files (matrix.mtx / matrix.mtx.gz, features /
-        genes TSV, barcodes TSV).
-
-        This handles the common GEO pattern where the tarball extracts into
-        a subdirectory named after the sample, e.g.:
-
-            Supp_GSM4257051_G2/
-              filtered_feature_bc_matrix/
-                matrix.mtx.gz
-                features.tsv.gz
-                barcodes.tsv.gz
-
-        Returns
-        -------
-        str or None
-            Absolute path to the directory containing the MTX triplet, or
-            ``None`` if no such directory is found under *root*.
+        all three 10x MTX files.
         """
         for dirpath, dirnames, filenames in os.walk(root):
             lower = [f.lower() for f in filenames]
@@ -740,10 +850,7 @@ class SampleAnnotator:
     def _rename_mtx_files(self, mtx_dir: str):
         """
         Rename the MTX triplet inside *mtx_dir* to the canonical names that
-        ``sc.read_10x_mtx`` expects:
-            matrix.mtx.gz  /  features.tsv.gz  /  barcodes.tsv.gz
-
-        Skips any rename where the target name already exists.
+        ``sc.read_10x_mtx`` expects.
         """
         for fname in os.listdir(mtx_dir):
             src = os.path.join(mtx_dir, fname)
@@ -792,18 +899,15 @@ class SampleAnnotator:
                 else:
                     continue
 
-            # ── Step 1: extract any tarballs present in gsm_dir ───────────
             self._extract_tarballs(gsm_dir)
 
             files = os.listdir(gsm_dir)
 
             adata = None
 
-            # ── Step 2: locate the MTX triplet (may be in a sub-directory) ─
             mtx_dir = self._find_mtx_dir(gsm_dir)
 
             if mtx_dir is not None:
-                # Rename to canonical names expected by sc.read_10x_mtx
                 self._rename_mtx_files(mtx_dir)
 
                 try:
@@ -816,11 +920,9 @@ class SampleAnnotator:
                 except Exception as exc:
                     print(f"  MTX read failed for {gsm_id}: {exc}")
 
-            # ── Step 3: fallback — generic CSV/TSV matrix ──────────────────
             if adata is None:
                 for f in files:
                     fl = f.lower()
-                    # Skip tarballs — they are not flat matrices
                     if fl.endswith(".tar.gz") or fl.endswith(".tar"):
                         continue
                     if (
@@ -857,11 +959,9 @@ class SampleAnnotator:
         combined.obs["gsm_id"] = combined.obs["gsm_id"].astype("category")
         combined.obs["gse_id"] = combined.obs["gse_id"].astype("category")
 
-        # Store user-supplied cancer type
         combined.uns["cancer_type"] = self._user_cancer_type
         print(f"... stored cancer_type in h5ad: {self._user_cancer_type}")
 
-        # Store QC params
         self._store_qc_params(combined)
 
         if self.min_genes is not None or self.max_mt is not None:
