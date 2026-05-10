@@ -45,11 +45,7 @@ CAR-T therapy requires surface targets that are highly expressed on tumour cells
 4. Computing differentially expressed surfaceome genes (tumour vs stromal/immune)
 5. Scoring every candidate gene — or gene pair with a logic gate — for efficacy (tumour coverage) and safety (healthy tissue sparing)
 
----
 
-## Pipeline Architecture
-
-To be added
 
 ---
 
