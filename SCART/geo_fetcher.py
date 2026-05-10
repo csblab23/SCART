@@ -8,7 +8,7 @@ import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
-# ✅ NEW: Tabula reference info
+# ✅ Tabula reference info
 TABULA_DOI_LINK = "https://doi.org/10.6084/m9.figshare.27921984"
 
 TABULA_FILES = {
@@ -45,6 +45,46 @@ TABULA_FILES = {
 # Valid cancer type keys for user reference
 VALID_CANCER_TYPES = sorted(TABULA_FILES.keys())
 
+# ── Disease-specific keywords used for the "unspecified → tumor" rescue pass ──
+# These cover haematological and other malignancies that rarely use the
+# word "tumor" in their sample descriptions.
+DISEASE_TUMOR_KEYWORDS = [
+    # ── General malignancy ───────────────────────────────────────────────────
+    "tumor", "tumour", "cancer", "carcinoma", "adenocarcinoma",
+    "malignant", "malignancy", "metastatic", "metastasis",
+    "neoplasm", "neoplastic",
+
+    # ── Haematological ───────────────────────────────────────────────────────
+    "leukemia", "leukaemia", "lymphoma", "myeloma",
+    "aml", "cml", "all", "cll", "mds",
+    "acute myeloid", "chronic myeloid",
+    "acute lymphoblastic", "chronic lymphocytic",
+    "acute lymphocytic",
+    "t-cell leukemia", "b-cell leukemia",
+    "hairy cell leukemia", "large granular lymphocyte",
+    "myelodysplastic", "myeloproliferative",
+    "polycythemia vera", "essential thrombocythemia",
+    "myelofibrosis",
+
+    # ── Lymphoid ────────────────────────────────────────────────────────────
+    "dlbcl", "follicular lymphoma", "mantle cell lymphoma",
+    "burkitt lymphoma", "hodgkin", "non-hodgkin",
+    "marginal zone lymphoma", "anaplastic large cell",
+    "primary mediastinal b-cell",
+
+    # ── Plasma cell ─────────────────────────────────────────────────────────
+    "multiple myeloma", "plasma cell dyscrasia",
+    "plasmacytoma", "waldenström",
+    "smoldering myeloma", "amyloidosis",
+
+    # ── Solid-tumour aliases missed by primary keywords ──────────────────────
+    "hgsoc", "lgsoc", "pdac", "nsclc", "sclc",
+    "gbm", "glioblastoma", "glioma", "astrocytoma",
+    "melanoma", "sarcoma", "blastoma",
+    "hepatocellular", "cholangiocarcinoma",
+    "seminoma", "teratoma",
+]
+
 
 class SampleAnnotator:
     """
@@ -57,45 +97,44 @@ class SampleAnnotator:
     *inputs : str
         One or more GEO accession IDs (e.g. "GSE158937") or paths to
         existing .h5ad files.
+
+    cancer_type : str
+        **Required.**  The cancer type(s) you are studying.
+
+        Two formats are accepted:
+
+        1. **Tabula Sapiens key** – one of the keys in ``TABULA_FILES``
+           (e.g. ``"blood_cancer"``, ``"lung_cancer"``).  A matching
+           Tabula Sapiens reference file will be recommended for PopV.
+
+        2. **Free-text label** – any string that is *not* a Tabula Sapiens
+           key (e.g. ``"brain_cancer"``, ``"thyroid_cancer"``).  The label
+           is stored as-is and you will be instructed to supply your own
+           reference file for PopV / SCEVAN.
+
+        Multiple types can be provided as a comma-separated string::
+
+            cancer_type="blood_cancer"
+            cancer_type="blood_cancer, bone_marrow_cancer"
+            cancer_type="my_custom_cancer"            # free-text, no Tabula ref
+
+        To see all Tabula Sapiens keys::
+
+            from SCART.geo_fetcher import VALID_CANCER_TYPES
+            print(VALID_CANCER_TYPES)
+
     min_genes : int or None, optional
         Minimum number of genes detected per cell used for QC filtering in
         Module 3 (preprocessing).  The value is stored in
         ``adata.uns['qc_params']`` of every h5ad written by this module so
         that Module 3 can read it automatically.
         If not provided (default: None), the QC step is skipped in Module 3.
+
     max_mt : float or None, optional
         Maximum mitochondrial gene percentage per cell used for QC filtering
         in Module 3.  Stored alongside ``min_genes`` in
         ``adata.uns['qc_params']``.
         If not provided (default: None), the QC step is skipped in Module 3.
-    cancer_type : str or None, optional
-        Manually specify the cancer type instead of auto-detecting it from
-        GEO metadata.  Must be one of the keys in ``TABULA_FILES`` (e.g.
-        ``"ovary_cancer"``, ``"lung_cancer"``).  When provided, auto-detection
-        is skipped entirely and the supplied value is used for reference
-        guidance.
-
-        Accepted values
-        ---------------
-        Any key from ``TABULA_FILES``:
-            bladder_cancer, blood_cancer, bone_marrow_cancer, breast_cancer,
-            ear_cancer, eye_cancer, fat_cancer, heart_cancer, kidney_cancer,
-            large_intestine_cancer, liver_cancer, lung_cancer,
-            lymph_node_cancer, muscle_cancer, ovary_cancer, pancreas_cancer,
-            prostate_cancer, salivary_gland_cancer, skin_cancer,
-            small_intestine_cancer, spleen_cancer, stomach_cancer,
-            testis_cancer, thymus_cancer, tongue_cancer, trachea_cancer,
-            uterus_cancer, vasculature_cancer.
-
-        Multiple types can be provided as a comma-separated string:
-            ``"ovary_cancer, lung_cancer"``
-
-        To print all valid values:
-            ``from SCART.geo_fetcher import VALID_CANCER_TYPES``
-            ``print(VALID_CANCER_TYPES)``
-
-        If not provided (default: None), cancer type is inferred
-        automatically from GEO metadata text.
 
     manual_annotation_col : str or None, optional
         ONLY relevant when providing your own .h5ad file (not a GEO ID).
@@ -133,7 +172,8 @@ class SampleAnnotator:
         -------------
         annotator = SampleAnnotator(
             "my_data.h5ad",
-            manual_annotation_col="cell_type",   # your obs column name
+            cancer_type="blood_cancer",
+            manual_annotation_col="cell_type",
             min_genes=200,
             max_mt=40,
         )
@@ -144,36 +184,63 @@ class SampleAnnotator:
     -----
     GEO ID inputs always run the full PopV pipeline regardless of
     manual_annotation_col — the parameter is silently ignored for GEO IDs.
+
+    Sample classification logic
+    ---------------------------
+    Each GSM is first checked against normal/control keywords; if found it
+    is labelled **normal**.  Next it is checked against a broad set of
+    tumour/malignancy keywords (including haematological disease terms such
+    as "aml", "leukemia", "myeloma", etc.); if found it is labelled
+    **tumor**.  A sample reaches **unspecified** only when *neither* group
+    of keywords is detected.
+
+    This two-step approach means that blood-cancer datasets whose GSM
+    descriptions use disease names instead of the word "tumor" (e.g.
+    "AML patient", "CLL cells") are correctly classified as tumor rather
+    than being silently dropped into the unspecified bucket.
     """
 
     def __init__(
         self,
         *inputs,
+        cancer_type: str,
         min_genes: int = None,
         max_mt: float = None,
-        cancer_type: str = None,
         manual_annotation_col: str = None,
     ):
 
-        self.inputs    = list(inputs)
-        self.base_dir  = "GSE_data"
+        self.inputs   = list(inputs)
+        self.base_dir = "GSE_data"
 
-        # ── QC parameters: None means "user did not set this → skip QC" ───
+        # ── QC parameters ──────────────────────────────────────────────────
         self.min_genes = min_genes
         self.max_mt    = max_mt
 
-        # ── Manual cancer type override ────────────────────────────────────
-        self._user_cancer_type = None
-        if cancer_type is not None:
-            self._user_cancer_type = self._validate_cancer_type(cancer_type)
+        # ── Cancer type (required) ─────────────────────────────────────────
+        if not cancer_type or not isinstance(cancer_type, str):
+            raise ValueError(
+                "\ncancer_type is required.\n\n"
+                "Provide a Tabula Sapiens key, e.g.:\n"
+                "  cancer_type='blood_cancer'\n\n"
+                "Or a free-text label for cancers not in Tabula Sapiens:\n"
+                "  cancer_type='brain_cancer'\n\n"
+                "To see all Tabula Sapiens keys:\n"
+                "  from SCART.geo_fetcher import VALID_CANCER_TYPES\n"
+                "  print(VALID_CANCER_TYPES)"
+            )
 
-        # ── Manual annotation: only used when h5ad files are provided ──────
+        # Parse and categorise each token as tabula or unknown
+        self._user_cancer_type, self._tabula_types, self._unknown_types = (
+            self._parse_cancer_type(cancer_type)
+        )
+
+        # ── Manual annotation ──────────────────────────────────────────────
         self.manual_annotation_col = manual_annotation_col
 
         os.makedirs(self.base_dir, exist_ok=True)
 
-        self.gse_ids      = []
-        self.h5ad_inputs  = []
+        self.gse_ids     = []
+        self.h5ad_inputs = []
 
         for item in self.inputs:
             if isinstance(item, str) and item.lower().endswith(".h5ad"):
@@ -181,83 +248,58 @@ class SampleAnnotator:
             else:
                 self.gse_ids.append(item)
 
-    # ------------------------------------------------------------------
+    # ──────────────────────────────────────────────────────────────────────
     # Internal helpers
-    # ------------------------------------------------------------------
+    # ──────────────────────────────────────────────────────────────────────
 
-    def _validate_cancer_type(self, cancer_type: str) -> str:
+    def _parse_cancer_type(self, cancer_type: str):
         """
-        Validate a user-supplied cancer type string.
+        Parse a (possibly comma-separated) cancer_type string.
 
-        Accepts a single key or a comma-separated list of keys.  Each token
-        is checked against TABULA_FILES.  A ValueError is raised if any token
-        is unrecognised so the user gets immediate, actionable feedback.
+        Each token is checked against TABULA_FILES:
+          - Known tokens  → will get a Tabula Sapiens reference recommendation.
+          - Unknown tokens → user will be told to supply their own reference.
 
-        Returns the normalised (stripped) string unchanged.
+        Returns
+        -------
+        normalised_str  : str   — joined, stripped version of all tokens
+        tabula_types    : list  — tokens that exist in TABULA_FILES
+        unknown_types   : list  — tokens not in TABULA_FILES
         """
-        tokens = [t.strip() for t in cancer_type.split(",")]
-        invalid = [t for t in tokens if t not in TABULA_FILES]
+        tokens = [t.strip() for t in cancer_type.split(",") if t.strip()]
 
-        if invalid:
-            raise ValueError(
-                f"\ncancer_type contains unrecognised value(s): {invalid}\n\n"
-                f"Valid cancer types are:\n"
-                + "\n".join(f"  {k}" for k in VALID_CANCER_TYPES)
-                + "\n\nPass them as a string, e.g.:\n"
-                "  cancer_type='ovary_cancer'\n"
-                "  cancer_type='ovary_cancer, lung_cancer'\n\n"
-                "To see all valid values:\n"
-                "  from SCART.geo_fetcher import VALID_CANCER_TYPES\n"
-                "  print(VALID_CANCER_TYPES)"
-            )
+        tabula_types  = [t for t in tokens if t in TABULA_FILES]
+        unknown_types = [t for t in tokens if t not in TABULA_FILES]
 
-        return ", ".join(tokens)
+        normalised = ", ".join(tokens)
+        return normalised, tabula_types, unknown_types
+
+    # ──────────────────────────────────────────────────────────────────────
 
     def _store_qc_params(self, adata):
         """
         Write QC thresholds into adata.uns['qc_params'] only when the user
         has explicitly provided at least one threshold.
-
-        If neither min_genes nor max_mt was set, the key is removed (or
-        never written) so that Module 3 knows to skip QC entirely.
         """
         if self.min_genes is None and self.max_mt is None:
-            # Ensure the key does not exist (e.g. from a previous run)
             adata.uns.pop("qc_params", None)
             return
 
         adata.uns["qc_params"] = {
-            "min_genes": self.min_genes,   # may still be None for one field
+            "min_genes": self.min_genes,
             "max_mt":    self.max_mt,
         }
+
+    # ──────────────────────────────────────────────────────────────────────
 
     def _store_manual_annotation(self, adata, source_file: str):
         """
         Validate and store manual annotation metadata when the user has
         supplied manual_annotation_col.
-
-        What this does
-        --------------
-        1. Checks the column exists in adata.obs — raises ValueError if not.
-        2. Copies the column into 'popv_majority_vote_prediction' so that
-           Module 3 (preprocessing.py) can find it without any code changes.
-           If 'popv_majority_vote_prediction' already exists it is overwritten
-           and a warning is printed.
-        3. Stores adata.uns['manual_annotation_col'] = column name so any
-           downstream module can know which original column was used.
-        4. Stores adata.uns['skip_popv'] = True so Module 2
-           (auto_run_popv) can detect and skip the PopV pipeline.
-        5. Prints a summary of unique labels found in the column so the
-           user can verify their annotation is being read correctly.
-
-        Parameters
-        ----------
-        adata       : AnnData object loaded from the user-supplied h5ad.
-        source_file : path string used only for error messages.
         """
         col = self.manual_annotation_col
 
-        # ── 1. Validate column exists ────────────────────────────────────
+        # 1. Validate column exists
         if col not in adata.obs.columns:
             available = list(adata.obs.columns)
             raise ValueError(
@@ -269,7 +311,7 @@ class SampleAnnotator:
                 "for full details."
             )
 
-        # ── 2. Copy into popv_majority_vote_prediction ───────────────────
+        # 2. Copy into popv_majority_vote_prediction
         if "popv_majority_vote_prediction" in adata.obs.columns:
             print(
                 f"  WARNING: 'popv_majority_vote_prediction' already exists "
@@ -279,14 +321,14 @@ class SampleAnnotator:
             adata.obs[col].astype(str)
         )
 
-        # ── 3 & 4. Store metadata flags ──────────────────────────────────
+        # 3 & 4. Store metadata flags
         adata.uns["manual_annotation_col"] = col
         adata.uns["skip_popv"]             = True
 
-        # ── 5. Print label summary for user verification ─────────────────
-        unique_labels = sorted(adata.obs["popv_majority_vote_prediction"].unique())
-        epithelial    = [l for l in unique_labels
-                         if "epithelial cell" in l.lower()]
+        # 5. Print label summary
+        unique_labels  = sorted(adata.obs["popv_majority_vote_prediction"].unique())
+        epithelial     = [l for l in unique_labels
+                          if "epithelial cell" in l.lower()]
         non_epithelial = [l for l in unique_labels
                           if "epithelial cell" not in l.lower()]
 
@@ -311,12 +353,16 @@ class SampleAnnotator:
                 "'epithelial cell'."
             )
 
-    def _print_reference_guidance(self, cancer_type):
+    # ──────────────────────────────────────────────────────────────────────
 
+    def _print_reference_guidance(self):
+        """
+        Print Tabula Sapiens reference guidance based on the user-supplied
+        cancer type(s).  Unknown types are flagged with instructions to
+        provide a custom reference.
+        """
         print("\n========== REFERENCE GUIDANCE ==========")
-
-        if self._user_cancer_type is not None:
-            print("ℹ️  Cancer type was provided manually (auto-detection skipped).")
+        print(f"Cancer type(s) provided: {self._user_cancer_type}\n")
 
         if self.h5ad_inputs:
             if self.manual_annotation_col:
@@ -326,70 +372,51 @@ class SampleAnnotator:
             else:
                 print("👉 You provided your own h5ad file.")
                 print("👉 Please provide your own reference file for PopV.")
-            return
 
-        if cancer_type is None:
-            print("❗ Cancer type not detected.")
-            print("👉 Please provide your own reference file.")
-            return
+        for ct in self._tabula_types:
+            print(f"\n✅ Tabula Sapiens reference available: {ct}")
+            print(f"   Download : {TABULA_FILES[ct]}")
+            print(f"   From     : {TABULA_DOI_LINK}")
+            print( "   Use this reference in the next module (PopV).")
 
-        cancers = [c.strip() for c in cancer_type.split(",")]
+        for ct in self._unknown_types:
+            print(f"\n⚠️  '{ct}' is not available in Tabula Sapiens.")
+            print( "   ❌ No built-in reference file for this cancer type.")
+            print( "   👉 Please provide your own reference file for PopV / SCEVAN.")
 
-        for c in cancers:
-
-            if c in TABULA_FILES:
-                print(f"\n✅ Detected cancer type: {c}")
-                print(f"👉 Download: {TABULA_FILES[c]}")
-                print(f"👉 From: {TABULA_DOI_LINK}")
-                print("👉 Use this in next module (PopV)")
-            else:
-                print(f"\n⚠️ Detected cancer type: {c}")
-                print("❌ Not available in Tabula Sapiens")
-                print("👉 Provide your own reference file")
-
-    # ------------------------------------------------------------------
+    # ──────────────────────────────────────────────────────────────────────
     # Public entry-point
-    # ------------------------------------------------------------------
+    # ──────────────────────────────────────────────────────────────────────
 
     def run(self):
 
-        normal       = []
-        tumor        = []
-        unspecified  = []
+        normal      = []
+        tumor       = []
+        unspecified = []
         annotation_info = {}
-        cancer_type  = None
 
         tumor_adatas = []
         results      = {}
 
         for gse_id in self.gse_ids:
 
-            n, t, u, ann, ct = self._process_gse(gse_id)
+            n, t, u, ann = self._process_gse(gse_id)
 
             normal.extend(n)
             tumor.extend(t)
             unspecified.extend(u)
-
             annotation_info.update(ann)
-
-            # ── Use user-supplied cancer type if provided, else auto-detected
-            if self._user_cancer_type is not None:
-                ct = self._user_cancer_type
-
-            if ct and cancer_type is None:
-                cancer_type = ct
 
             adata = self._build_h5ad(
                 gse_id,
                 t,
                 save_single=(len(self.gse_ids) == 1 and len(self.h5ad_inputs) == 0),
-                cancer_type_override=self._user_cancer_type,
             )
 
             if adata is not None:
                 tumor_adatas.append(adata)
 
-            results[gse_id] = (n, t, u, ann, None, ct)
+            results[gse_id] = (n, t, u, ann, None, self._user_cancer_type)
 
         for file in self.h5ad_inputs:
 
@@ -400,24 +427,21 @@ class SampleAnnotator:
             adata.layers["counts"] = adata.X.copy()
             adata.raw = adata
 
-            # ── Store user-supplied cancer type in h5ad if provided ───────
-            if self._user_cancer_type is not None:
-                adata.uns["cancer_type"] = self._user_cancer_type
-                print(f"  cancer_type stored (user-supplied): {self._user_cancer_type}")
+            # Store cancer type
+            adata.uns["cancer_type"] = self._user_cancer_type
+            print(f"  cancer_type stored: {self._user_cancer_type}")
 
-            # ── Handle manual annotation if provided ─────────────────────
+            # Handle manual annotation
             if self.manual_annotation_col is not None:
                 print("\n  Manual annotation mode activated.")
                 self._store_manual_annotation(adata, file)
 
-            # Store QC params in user-supplied h5ad too (only if user set them)
             self._store_qc_params(adata)
 
             tumor_adatas.append(adata)
-
             results[file] = ([], [], [], {}, None, self._user_cancer_type)
 
-        query_h5ad  = None
+        query_h5ad   = None
         total_inputs = len(self.gse_ids) + len(self.h5ad_inputs)
 
         if total_inputs == 1:
@@ -425,10 +449,9 @@ class SampleAnnotator:
             if len(self.gse_ids) == 1:
 
                 query_h5ad = f"{self.gse_ids[0]}_tumor.h5ad"
-
                 results[self.gse_ids[0]] = (
                     normal, tumor, unspecified,
-                    annotation_info, query_h5ad, cancer_type
+                    annotation_info, query_h5ad, self._user_cancer_type
                 )
 
             elif len(self.h5ad_inputs) == 1:
@@ -436,7 +459,6 @@ class SampleAnnotator:
                 adata    = tumor_adatas[0]
                 filename = "input_tumor.h5ad"
 
-                # QC params already handled by _store_qc_params above
                 adata.write(filename)
 
                 print("\n========== h5ad created ==========")
@@ -445,26 +467,17 @@ class SampleAnnotator:
                 if self.manual_annotation_col is not None:
                     print(
                         f"Manual annotation stored  → "
-                        f"col='{self.manual_annotation_col}', "
-                        f"skip_popv=True"
+                        f"col='{self.manual_annotation_col}', skip_popv=True"
                     )
                     print("Next step: run Module 3 (preprocessing) directly.")
-                    print("           Module 2 (PopV) is not needed.")
 
                 if self.min_genes is not None or self.max_mt is not None:
-                    print(
-                        f"QC params stored → "
-                        f"min_genes={self.min_genes}, max_mt={self.max_mt}"
-                    )
+                    print(f"QC params stored → min_genes={self.min_genes}, max_mt={self.max_mt}")
                 else:
-                    print(
-                        "QC step disabled "
-                        "(no min_genes / max_mt provided — will be skipped in Module 3)"
-                    )
+                    print("QC step disabled (no min_genes / max_mt provided — will be skipped in Module 3)")
 
                 query_h5ad = filename
                 key        = self.h5ad_inputs[0]
-
                 results[key] = ([], [], [], {}, query_h5ad, self._user_cancer_type)
 
         elif total_inputs > 1 and len(tumor_adatas) > 0:
@@ -474,22 +487,16 @@ class SampleAnnotator:
             combined.layers["counts"] = combined.X.copy()
             combined.raw = combined
 
-            # ── Store user-supplied cancer type in combined h5ad ──────────
-            if self._user_cancer_type is not None:
-                combined.uns["cancer_type"] = self._user_cancer_type
-                print(f"\n  cancer_type stored in combined h5ad (user-supplied): "
-                      f"{self._user_cancer_type}")
+            combined.uns["cancer_type"] = self._user_cancer_type
+            print(f"\n  cancer_type stored in combined h5ad: {self._user_cancer_type}")
 
-            # ── Re-apply manual annotation to combined object ─────────────
-            # ad.concat does not carry uns from individual objects, so we
-            # re-derive popv_majority_vote_prediction from the column that
-            # was already copied into each individual adata before concat.
+            # Re-apply manual annotation after concat (uns is lost by concat)
             if self.manual_annotation_col is not None:
                 if "popv_majority_vote_prediction" in combined.obs.columns:
                     combined.uns["manual_annotation_col"] = self.manual_annotation_col
                     combined.uns["skip_popv"]             = True
                     print(
-                        "\n  Combined h5ad: manual annotation carried through "
+                        f"\n  Combined h5ad: manual annotation carried through "
                         f"from column '{self.manual_annotation_col}'."
                     )
                 else:
@@ -498,7 +505,6 @@ class SampleAnnotator:
                         "concat — manual annotation NOT stored in combined h5ad."
                     )
 
-            # Store QC params in the combined h5ad (only if user set them)
             self._store_qc_params(combined)
 
             combined.write("combined_tumor.h5ad")
@@ -509,42 +515,69 @@ class SampleAnnotator:
             if self.manual_annotation_col is not None:
                 print(
                     f"Manual annotation stored  → "
-                    f"col='{self.manual_annotation_col}', "
-                    f"skip_popv=True"
+                    f"col='{self.manual_annotation_col}', skip_popv=True"
                 )
                 print("Next step: run Module 3 (preprocessing) directly.")
 
             if self.min_genes is not None or self.max_mt is not None:
-                print(
-                    f"QC params stored → "
-                    f"min_genes={self.min_genes}, max_mt={self.max_mt}"
-                )
+                print(f"QC params stored → min_genes={self.min_genes}, max_mt={self.max_mt}")
             else:
-                print(
-                    "QC step disabled "
-                    "(no min_genes / max_mt provided — will be skipped in Module 3)"
-                )
+                print("QC step disabled (no min_genes / max_mt provided — will be skipped in Module 3)")
 
             query_h5ad = "combined_tumor.h5ad"
-
             for key in results:
                 n, t, u, ann, _, ct = results[key]
                 results[key]        = (n, t, u, ann, query_h5ad, ct)
 
-        # ── Final cancer type: user-supplied always wins ──────────────────
-        if self._user_cancer_type is not None:
-            cancer_type = self._user_cancer_type
+        self._print_reference_guidance()
 
-        self._print_reference_guidance(cancer_type)
+        return (
+            normal, tumor, unspecified, annotation_info,
+            query_h5ad, self._user_cancer_type, results
+        )
 
-        return normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results
-
-    # ------------------------------------------------------------------
+    # ──────────────────────────────────────────────────────────────────────
     # GEO processing
-    # ------------------------------------------------------------------
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _classify_gsm(self, text: str):
+        """
+        Classify a single GSM based on its full metadata text.
+
+        Classification order (first match wins)
+        ----------------------------------------
+        1. **normal**  – contains a normal/control/healthy keyword.
+        2. **tumor**   – contains any tumour or disease-specific keyword
+                         from DISEASE_TUMOR_KEYWORDS (covers both generic
+                         terms like "tumor" and haematological terms like
+                         "aml", "leukemia", "myeloma", etc.).
+        3. **unspecified** – neither group matched.
+
+        Returns
+        -------
+        "normal" | "tumor" | "unspecified"
+        """
+        normal_keywords = [
+            "normal", "healthy", "control", "adjacent normal",
+            "non-tumor", "non-tumour", "non-cancer",
+            "benign", "non-malignant",
+        ]
+
+        if any(k in text for k in normal_keywords):
+            return "normal"
+
+        if any(k in text for k in DISEASE_TUMOR_KEYWORDS):
+            return "tumor"
+
+        return "unspecified"
+
+    # ──────────────────────────────────────────────────────────────────────
 
     def _process_gse(self, gse_id):
-
+        """
+        Download a GEO series, classify each GSM, and return lists of
+        normal / tumor / unspecified sample IDs.
+        """
         gse_dir = os.path.join(self.base_dir, gse_id)
         os.makedirs(gse_dir, exist_ok=True)
 
@@ -556,303 +589,50 @@ class SampleAnnotator:
         unspecified = []
         annotation_info = {}
 
-        excluded_non_scrna  = []
-        excluded_non_human  = []
-
-        # ── Cancer type: user-supplied overrides auto-detection ───────────
-        if self._user_cancer_type is not None:
-            cancer_type = self._user_cancer_type
-            print(f"\n  Cancer type (user-supplied): {cancer_type}")
-        else:
-            cancer_type = self._predict_cancer_type(gse)
-
-        tumor_keywords  = [
-            "tumor", "tumour", "cancer", "carcinoma",
-            "adenocarcinoma", "malignant", "metastatic"
-        ]
-        normal_keywords = [
-            "normal", "healthy", "control", "adjacent normal"
-        ]
+        excluded_non_scrna = []
+        excluded_non_human = []
 
         for gsm_id, gsm in gse.gsms.items():
 
+            # Build a single lowercase text blob from all metadata fields
             text = " ".join(
                 [str(v) for v in gsm.metadata.values()]
             ).lower()
 
+            # Filter: human only
             organism = " ".join(gsm.metadata.get("organism_ch1", [])).lower()
             if "homo sapiens" not in organism:
                 excluded_non_human.append(gsm_id)
                 continue
 
+            # Filter: scRNA-seq only
             library = " ".join(gsm.metadata.get("library_strategy", [])).lower()
             if not any(k in library for k in ["rna-seq", "scrna", "single cell"]):
                 excluded_non_scrna.append(gsm_id)
                 continue
 
-            label = "unspecified"
+            label = self._classify_gsm(text)
 
-            if any(k in text for k in tumor_keywords):
-                tumor.append(gsm_id)
-                label = "tumor"
-            elif any(k in text for k in normal_keywords):
+            if label == "normal":
                 normal.append(gsm_id)
-                label = "normal"
+            elif label == "tumor":
+                tumor.append(gsm_id)
             else:
                 unspecified.append(gsm_id)
 
             annotation_info[gsm_id] = label
 
         print(f"\n========== SAMPLE SUMMARY: {gse_id} ==========")
-        print(f"Cancer type: {cancer_type}")
-        print("Normal samples:",      ", ".join(normal)              if normal              else "None")
-        print("Tumor samples:",       ", ".join(tumor)               if tumor               else "None")
-        print("Unspecified samples:", ", ".join(unspecified)         if unspecified         else "None")
-        print("Excluded (non-human):", ", ".join(excluded_non_human) if excluded_non_human else "None")
-        print("Excluded (non-scRNA):", ", ".join(excluded_non_scrna) if excluded_non_scrna else "None")
+        print(f"Cancer type (user-supplied): {self._user_cancer_type}")
+        print("Normal samples:",       ", ".join(normal)              if normal              else "None")
+        print("Tumor samples:",        ", ".join(tumor)               if tumor               else "None")
+        print("Unspecified samples:",  ", ".join(unspecified)         if unspecified         else "None")
+        print("Excluded (non-human):", ", ".join(excluded_non_human)  if excluded_non_human  else "None")
+        print("Excluded (non-scRNA):", ", ".join(excluded_non_scrna)  if excluded_non_scrna  else "None")
 
-        return normal, tumor, unspecified, annotation_info, cancer_type
+        return normal, tumor, unspecified, annotation_info
 
-    # ------------------------------------------------------------------
-
-    def _predict_cancer_type(self, gse):
-
-        text = (
-            gse.metadata.get("title",   [""])[0] +
-            " " +
-            gse.metadata.get("summary", [""])[0]
-        ).lower()
-
-        cancer_map = {
-            "ovary": [
-                "ovarian", "ovary", "ovarian cancer", "ovarian carcinoma",
-                "high-grade serous", "hgsoc", "lgsoc", "clear cell ovarian",
-                "endometrioid ovarian", "mucinous ovarian",
-                "fallopian tube", "peritoneal carcinoma",
-            ],
-            "uterus": [
-                "uterine", "endometrial", "uterus", "endometrium",
-                "uterine carcinoma", "endometrial carcinoma",
-                "uterine sarcoma", "leiomyosarcoma uterine",
-                "uterine leiomyoma", "cervical", "cervix",
-                "cervical cancer", "cervical carcinoma",
-            ],
-            "lung": [
-                "lung", "pulmonary", "nsclc", "sclc",
-                "non-small cell lung", "small cell lung",
-                "lung adenocarcinoma", "luad",
-                "lung squamous", "lusc",
-                "mesothelioma", "pleural",
-                "bronchial", "bronchioloalveolar",
-            ],
-            "kidney": [
-                "renal", "kidney", "rcc",
-                "renal cell carcinoma", "clear cell renal",
-                "papillary renal", "chromophobe renal",
-                "wilms tumor", "nephroblastoma",
-                "oncocytoma",
-            ],
-            "liver": [
-                "liver", "hepatocellular", "hcc",
-                "hepatic", "hepatocellular carcinoma",
-                "intrahepatic cholangiocarcinoma", "icc",
-                "biliary", "bile duct", "cholangiocarcinoma",
-                "gallbladder",
-            ],
-            "pancreas": [
-                "pancreatic", "pancreas", "pdac",
-                "pancreatic ductal adenocarcinoma",
-                "pancreatic cancer", "pancreatic carcinoma",
-                "islet cell", "neuroendocrine pancreatic",
-                "pancreatic neuroendocrine", "pnet",
-                "acinar cell",
-            ],
-            "prostate": [
-                "prostate", "prostatic",
-                "prostate cancer", "prostate adenocarcinoma",
-                "castration-resistant", "crpc",
-                "neuroendocrine prostate",
-            ],
-            "bladder": [
-                "bladder", "urothelial",
-                "bladder cancer", "bladder carcinoma",
-                "transitional cell carcinoma", "tcc",
-                "urothelial carcinoma", "upper tract urothelial",
-                "urinary tract",
-            ],
-            "stomach": [
-                "gastric", "stomach",
-                "gastric cancer", "gastric carcinoma",
-                "gastroesophageal", "gej",
-                "signet ring", "diffuse gastric",
-                "intestinal gastric",
-            ],
-            "small_intestine": [
-                "small intestine", "small bowel",
-                "duodenal", "jejunal", "ileal",
-                "small intestinal carcinoma",
-                "gastrointestinal stromal", "gist",
-            ],
-            "large_intestine": [
-                "colon", "colorectal", "rectal", "rectum",
-                "crc", "colorectal cancer", "colon cancer",
-                "colonic", "cecal", "cecum",
-                "microsatellite instability", "msi",
-                "mismatch repair", "mmr",
-            ],
-            "skin": [
-                "melanoma", "skin", "cutaneous",
-                "squamous cell skin", "basal cell",
-                "merkel cell", "dermal",
-                "uveal melanoma", "acral melanoma",
-                "cutaneous melanoma", "melanocytic",
-            ],
-            "brain": [
-                "glioma", "brain", "glioblastoma", "gbm",
-                "astrocytoma", "oligodendroglioma",
-                "medulloblastoma", "ependymoma",
-                "meningioma", "craniopharyngioma",
-                "diffuse intrinsic pontine", "dipg",
-                "central nervous system", "cns tumor",
-                "neural", "neuro-oncology",
-            ],
-            "blood": [
-                "leukemia", "pbmc", "peripheral blood mononuclear",
-                "aml", "cml", "all", "cll", "myeloma",
-                "acute myeloid leukemia", "chronic myeloid leukemia",
-                "acute lymphoblastic leukemia", "chronic lymphocytic leukemia",
-                "t-cell leukemia", "hairy cell leukemia",
-                "myelodysplastic", "mds",
-                "myeloproliferative", "polycythemia vera",
-                "essential thrombocythemia",
-                "hematopoietic", "haematopoietic",
-            ],
-            "lymph_node": [
-                "lymphoma", "lymph node", "lymphatic",
-                "diffuse large b-cell", "dlbcl",
-                "follicular lymphoma", "mantle cell lymphoma",
-                "burkitt lymphoma", "hodgkin", "hodgkin lymphoma",
-                "non-hodgkin", "marginal zone lymphoma",
-                "t-cell lymphoma", "anaplastic large cell",
-                "primary mediastinal", "natural killer cell lymphoma",
-            ],
-            "bone_marrow": [
-                "myeloma", "multiple myeloma", "bone marrow",
-                "plasma cell", "plasmacytoma",
-                "myelofibrosis", "aplastic anemia",
-                "amyloidosis", "waldenström",
-                "smoldering myeloma",
-            ],
-            "breast": [
-                "breast", "mammary", "tnbc",
-                "triple negative breast", "triple-negative breast",
-                "her2", "her2-positive breast",
-                "luminal a", "luminal b",
-                "breast adenocarcinoma", "breast carcinoma",
-                "invasive ductal carcinoma", "idc",
-                "invasive lobular carcinoma", "ilc",
-                "ductal carcinoma in situ", "dcis",
-                "inflammatory breast",
-            ],
-            "heart": [
-                "cardiac", "heart",
-                "cardiac tumor", "cardiac sarcoma",
-                "cardiac rhabdomyoma", "cardiac fibroma",
-                "cardiac myxoma", "pericardial",
-                "myocardial",
-            ],
-            "thyroid": [
-                "thyroid", "thyroid cancer", "thyroid carcinoma",
-                "papillary thyroid", "ptc",
-                "follicular thyroid", "ftc",
-                "medullary thyroid", "mtc",
-                "anaplastic thyroid", "atc",
-                "hurthle cell",
-            ],
-            "esophagus": [
-                "esophageal", "esophagus", "oesophageal",
-                "esophageal adenocarcinoma", "eac",
-                "esophageal squamous", "escc",
-                "barrett", "barrett's esophagus",
-            ],
-            "trachea": [
-                "trachea", "tracheal",
-                "tracheal carcinoma", "tracheal tumor",
-                "airway tumor",
-            ],
-            "tongue": [
-                "tongue", "lingual",
-                "tongue cancer", "tongue carcinoma",
-                "oral tongue squamous",
-            ],
-            "salivary_gland": [
-                "salivary", "salivary gland",
-                "parotid", "submandibular",
-                "mucoepidermoid carcinoma", "adenoid cystic",
-                "acinic cell",
-            ],
-            "muscle": [
-                "sarcoma", "muscle", "rhabdomyosarcoma",
-                "leiomyosarcoma", "synovial sarcoma",
-                "osteosarcoma", "ewing sarcoma",
-                "soft tissue sarcoma", "undifferentiated sarcoma",
-                "alveolar soft part sarcoma",
-                "epithelioid sarcoma",
-                "skeletal muscle tumor",
-            ],
-            "eye": [
-                "ocular", "eye", "uveal",
-                "retinoblastoma", "uveal melanoma",
-                "conjunctival", "lacrimal gland",
-                "intraocular", "orbital tumor",
-            ],
-            "ear": [
-                "ear", "acoustic",
-                "vestibular schwannoma", "acoustic neuroma",
-                "middle ear tumor", "glomus jugulare",
-            ],
-            "fat": [
-                "liposarcoma", "adipose", "lipoma",
-                "well-differentiated liposarcoma", "wdlps",
-                "dedifferentiated liposarcoma", "ddlps",
-                "myxoid liposarcoma", "pleomorphic liposarcoma",
-            ],
-            "vasculature": [
-                "vascular", "angiosarcoma", "endothelial",
-                "hemangioendothelioma", "hemangioblastoma",
-                "kaposi sarcoma", "glomus tumor",
-                "arteriovenous malformation",
-            ],
-            "thymus": [
-                "thymoma", "thymus", "thymic",
-                "thymic carcinoma", "thymic epithelial",
-                "anterior mediastinal",
-            ],
-            "testis": [
-                "testicular", "testis",
-                "germ cell tumor", "seminoma",
-                "non-seminoma", "teratoma",
-                "yolk sac tumor", "choriocarcinoma testicular",
-                "leydig cell tumor", "sertoli cell tumor",
-            ],
-            "spleen": [
-                "splenic", "spleen",
-                "splenic lymphoma", "splenic marginal zone",
-                "splenic hemangioma",
-            ],
-        }
-
-        detected = []
-        for tissue, keywords in cancer_map.items():
-            if any(k in text for k in keywords):
-                detected.append(f"{tissue}_cancer")
-
-        if len(detected) == 0:
-            return None
-
-        return ", ".join(sorted(set(detected)))
-
-    # ------------------------------------------------------------------
+    # ──────────────────────────────────────────────────────────────────────
 
     def _read_generic_matrix(self, file_path):
 
@@ -873,10 +653,9 @@ class SampleAnnotator:
         except Exception:
             return None
 
-    # ------------------------------------------------------------------
+    # ──────────────────────────────────────────────────────────────────────
 
-    def _build_h5ad(self, gse_id, tumor_samples, save_single=False,
-                    cancer_type_override=None):
+    def _build_h5ad(self, gse_id, tumor_samples, save_single=False):
 
         if len(tumor_samples) == 0:
             return None
@@ -981,34 +760,19 @@ class SampleAnnotator:
         combined.obs["gsm_id"] = combined.obs["gsm_id"].astype("category")
         combined.obs["gse_id"] = combined.obs["gse_id"].astype("category")
 
-        # ── Store cancer type: user-supplied takes priority ───────────────
-        if cancer_type_override is not None:
-            combined.uns["cancer_type"] = cancer_type_override
-            print(f"... stored cancer_type in h5ad (user-supplied): {cancer_type_override}")
-        else:
-            cancer_type = self._predict_cancer_type(
-                GEOparse.get_GEO(geo=gse_id, destdir=self.base_dir)
-            )
-            if cancer_type is not None:
-                combined.uns["cancer_type"] = cancer_type
-                print(f"... stored cancer_type in h5ad: {cancer_type}")
+        # Store user-supplied cancer type
+        combined.uns["cancer_type"] = self._user_cancer_type
+        print(f"... stored cancer_type in h5ad: {self._user_cancer_type}")
 
-        # ── Store QC params only when user explicitly provided them ────────
+        # Store QC params
         self._store_qc_params(combined)
 
         if self.min_genes is not None or self.max_mt is not None:
-            print(
-                f"... stored qc_params in h5ad: "
-                f"min_genes={self.min_genes}, max_mt={self.max_mt}"
-            )
+            print(f"... stored qc_params in h5ad: min_genes={self.min_genes}, max_mt={self.max_mt}")
         else:
-            print(
-                "... qc_params not stored "
-                "(QC disabled — Module 3 will skip QC filtering)"
-            )
+            print("... qc_params not stored (QC disabled — Module 3 will skip QC filtering)")
 
         if save_single:
-
             filename = f"{gse_id}_tumor.h5ad"
             combined.write(filename)
 
