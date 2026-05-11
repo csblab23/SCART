@@ -752,29 +752,30 @@ class SampleAnnotator:
         Tier 1 — fast path.
 
         Walk *root* recursively and return the first directory that already
-        contains all three 10x MTX files with EXACT canonical names:
-            matrix.mtx.gz  (or matrix.mtx)
-            features.tsv.gz (or features.tsv or genes.tsv.gz or genes.tsv)
-            barcodes.tsv.gz (or barcodes.tsv)
+        contains all three 10x MTX files with EXACT canonical .gz names:
+            matrix.mtx.gz
+            features.tsv.gz  (or genes.tsv.gz)
+            barcodes.tsv.gz
 
-        Only canonical names are accepted here.  Prefix-named files such as
-        ``CID3586_matrix.mtx.gz`` are intentionally ignored — they are
-        handled by Tier 2 (_find_and_stage_prefix_named_mtx).
+        Only .gz files are accepted — sc.read_10x_mtx requires gzip
+        compression and will fail on plain .mtx / .tsv files.
+        Plain-named and prefix-named files are handled by Tier 2.
+        Directories named _canonical_* are skipped here — they are
+        managed exclusively by Tier 2.
 
         Returns
         -------
         str or None
         """
-        canonical_matrix   = {"matrix.mtx.gz",   "matrix.mtx"}
-        canonical_features = {"features.tsv.gz",  "features.tsv",
-                               "genes.tsv.gz",     "genes.tsv"}
-        canonical_barcodes = {"barcodes.tsv.gz",  "barcodes.tsv"}
-
         for dirpath, dirnames, filenames in os.walk(root):
+            # Skip stale/incomplete _canonical_ staging dirs — Tier 2 owns them
+            if os.path.basename(dirpath).startswith("_canonical_"):
+                continue
             lower = set(f.lower() for f in filenames)
-            if (lower & canonical_matrix and
-                    lower & canonical_features and
-                    lower & canonical_barcodes):
+            has_matrix   = "matrix.mtx.gz"   in lower
+            has_features = ("features.tsv.gz" in lower or "genes.tsv.gz" in lower)
+            has_barcodes = "barcodes.tsv.gz"  in lower
+            if has_matrix and has_features and has_barcodes:
                 return dirpath
 
         return None
@@ -873,11 +874,15 @@ class SampleAnnotator:
             tag       = hashlib.md5(key.encode()).hexdigest()[:8]
             canon_dir = os.path.join(root, f"_canonical_{tag}")
 
-            # Return immediately if all 3 canonical .gz files already exist
+            # Clean up any stale canonical dir that lacks .gz files
+            # (left by a previous broken run that copied uncompressed files)
             if os.path.isdir(canon_dir):
                 staged = set(os.listdir(canon_dir))
                 if all(v in staged for v in _CANON.values()):
-                    return canon_dir
+                    return canon_dir   # already complete and correct
+                # Stale — wipe and rebuild
+                import shutil as _rmsh
+                _rmsh.rmtree(canon_dir)
 
             os.makedirs(canon_dir, exist_ok=True)
             for role, src_path in roles.items():
