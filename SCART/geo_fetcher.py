@@ -788,39 +788,36 @@ class SampleAnnotator:
         GEO datasets frequently ship 10x files with a sample-ID or cohort
         prefix instead of the canonical bare names, e.g.:
 
-            GSM5354513_CID3586_matrix.mtx.gz       <- inside CID3586/ subdir
-            GSM5354513_CID3586_barcodes.tsv.gz
-            GSM5354513_CID3586_features.tsv.gz
+            CID3586_matrix.mtx          <- uncompressed, inside CID3586/ subdir
+            CID3586_barcodes.tsv
+            CID3586_features.tsv
 
-        or flat in the GSM supplementary directory:
+        or with GSM prefix and gz compression:
 
             GSM4909278_B1-MH0033-matrix.mtx.gz
             GSM4909278_B1-MH0033-barcodes.tsv.gz
             GSM4909278_B1-MH0033-features.tsv.gz
 
-        sc.read_10x_mtx requires EXACTLY the canonical bare names, so these
-        cannot be read directly.  This method:
+        sc.read_10x_mtx requires EXACTLY canonical names AND .gz compression.
+        This method:
 
-          1. Walks the entire GSM directory tree collecting every file whose
-             lowercase name contains the role keywords "matrix", "barcodes",
-             and "features" / "genes" with valid extensions.
+          1. Walks the entire GSM directory tree collecting files whose names
+             contain the role keywords with valid extensions (.mtx/.mtx.gz,
+             .tsv/.tsv.gz).
 
-          2. Groups the collected files by their shared prefix string
-             (everything in the filename before the role keyword), ensuring
-             that only files that truly belong to the same triplet are grouped.
+          2. Groups them by shared prefix (everything before the role keyword).
 
-          3. For each complete triplet group, copies the three files into a
-             fresh canonical subdirectory (``_canonical_<hash>/``) using the
-             exact names sc.read_10x_mtx expects, then returns that path.
+          3. For each complete triplet, copies files into a canonical
+             subdirectory (_canonical_<hash>/) as matrix.mtx.gz,
+             features.tsv.gz, barcodes.tsv.gz — gzip-compressing on the fly
+             if the source file is not already compressed.
 
-        Using shutil.copy2 (not rename) is safe on re-runs — if the canonical
-        directory already exists and is complete it is returned immediately.
+        Using gzip copy (not rename) is safe on re-runs — if the canonical
+        directory already has all 3 .gz files it is returned immediately.
 
         Returns
         -------
         str or None
-            Path to a directory containing canonical MTX triplet files,
-            or None if no complete triplet was found.
         """
         import shutil, hashlib
 
@@ -840,6 +837,21 @@ class SampleAnnotator:
             fl  = fname.lower()
             idx = fl.find(role)
             return fl[:idx]
+
+        # ── canonical name: always .gz regardless of source compression ───
+        _CANON = {
+            "matrix":   "matrix.mtx.gz",
+            "features": "features.tsv.gz",
+            "barcodes": "barcodes.tsv.gz",
+        }
+
+        def _copy_as_gz(src_path: str, dst_path: str):
+            """Copy src to dst as gzip, compressing on-the-fly if needed."""
+            if src_path.endswith(".gz"):
+                shutil.copy2(src_path, dst_path)
+            else:
+                with open(src_path, "rb") as f_in,                         gzip.open(dst_path, "wb") as f_out:
+                    shutil.copyfileobj(f_in, f_out)
 
         groups: dict = {}
         for dirpath, _, filenames in os.walk(root):
@@ -861,21 +873,17 @@ class SampleAnnotator:
             tag       = hashlib.md5(key.encode()).hexdigest()[:8]
             canon_dir = os.path.join(root, f"_canonical_{tag}")
 
-            def _canon_name(src_path: str, role: str) -> str:
-                ext = ".gz" if src_path.endswith(".gz") else ""
-                if role == "matrix":   return f"matrix.mtx{ext}"
-                if role == "features": return f"features.tsv{ext}"
-                return f"barcodes.tsv{ext}"
-
-            # Return immediately if already staged and complete
-            if os.path.isdir(canon_dir) and len(os.listdir(canon_dir)) >= 3:
-                return canon_dir
+            # Return immediately if all 3 canonical .gz files already exist
+            if os.path.isdir(canon_dir):
+                staged = set(os.listdir(canon_dir))
+                if all(v in staged for v in _CANON.values()):
+                    return canon_dir
 
             os.makedirs(canon_dir, exist_ok=True)
             for role, src_path in roles.items():
-                dst_path = os.path.join(canon_dir, _canon_name(src_path, role))
+                dst_path = os.path.join(canon_dir, _CANON[role])
                 if not os.path.exists(dst_path):
-                    shutil.copy2(src_path, dst_path)
+                    _copy_as_gz(src_path, dst_path)
 
             print(f"  Staged prefix-named MTX triplet for {gsm_id} → "
                   f"{os.path.relpath(canon_dir, root)}")
