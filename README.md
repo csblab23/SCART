@@ -45,11 +45,7 @@ CAR-T therapy requires surface targets that are highly expressed on tumour cells
 4. Computing differentially expressed surfaceome genes (tumour vs stromal/immune)
 5. Scoring every candidate gene — or gene pair with a logic gate — for efficacy (tumour coverage) and safety (healthy tissue sparing)
 
----
 
-## Pipeline Architecture
-
-To be added
 
 ---
 
@@ -197,6 +193,27 @@ annotator = SampleAnnotator(
     max_mt=40,
 )
 
+# ── Option 11: Manually exclude specific GSM IDs ─────────────────────────
+# Run without exclude_gsm_ids first to inspect the sample summary,
+# then re-run with the IDs you want to drop.
+#
+# Use cases:
+#   - CAR-T therapy studies: exclude engineered cell products (CAR+)
+#     and keep only patient-derived PBMC samples (CAR-)
+#   - Any study: drop samples with known quality issues
+#   - Any study: remove samples that do not match your biological question
+#
+annotator = SampleAnnotator(
+    "GSE224550",
+    cancer_type="blood_cancer",
+    exclude_gsm_ids=[
+        "GSM7025839", "GSM7025840",   # CAR-T product — patient P1
+        "GSM7025847", "GSM7025848",   # CAR-T product — patient P2
+        "GSM7025855", "GSM7025856",   # CAR-T product — patient P7
+        "GSM7025863", "GSM7025864",   # CAR-T product — patient P8
+    ],
+)
+
 # ── Run (same call for all options above) ────────────────────────────────
 normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = annotator.run()
 
@@ -205,6 +222,7 @@ normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = 
 # tumor           → list of tumour sample IDs
 # unspecified     → list of unclassified sample IDs
 # annotation_info → dict mapping sample ID → "tumor" / "normal" / "unspecified"
+#                   manually excluded IDs map to "manually_excluded"
 # query_h5ad      → path to the saved tumour h5ad (input for Module 2)
 # cancer_type     → cancer type string supplied by the user
 # results         → full per-GSE result dictionary
@@ -225,6 +243,15 @@ normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = 
 > from SCART.geo_fetcher import VALID_CANCER_TYPES
 > print(VALID_CANCER_TYPES)
 > ```
+
+> **Excluding specific samples (`exclude_gsm_ids`)**
+> No samples are automatically excluded based on cell type — all classified
+> samples appear in the summary.  After reviewing the summary, pass any IDs
+> you want to drop via `exclude_gsm_ids`.  They will be skipped when building
+> the h5ad and listed as "Manually excluded" in the output so the decision is
+> fully traceable.  This is the recommended approach for CAR-T therapy
+> datasets where engineered cell products (CAR+ samples) should not be
+> included alongside patient-derived disease samples.
 
 > **Manual annotation note**
 > When `manual_annotation_col` is provided, Module 1 stores `adata.uns['skip_popv'] = True`
