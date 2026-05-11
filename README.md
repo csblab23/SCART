@@ -4,11 +4,11 @@
 
 ---
 
-![SCART Overview](SCART/external/Screenshot1.png)
+![SCART Overview](SCART/external/image1.png)
 
 ---
 
-![Module 4 Workflow](SCART/external/Screenshot.png) To be added
+![Module 4 Workflow](SCART/external/image2.png) To be added
 
 ---
 
