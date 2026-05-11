@@ -747,68 +747,141 @@ class SampleAnnotator:
 
     # ──────────────────────────────────────────────────────────────────────
 
-    def _find_mtx_dir(self, root: str):
+    def _find_mtx_dir_canonical(self, root: str):
         """
-        Walk *root* recursively and return the first directory that contains
-        all three 10x MTX files (matrix.mtx / matrix.mtx.gz, features /
-        genes TSV, barcodes TSV).
+        Tier 1 — fast path.
 
-        This handles the common GEO pattern where the tarball extracts into
-        a subdirectory named after the sample, e.g.:
+        Walk *root* recursively and return the first directory that already
+        contains all three 10x MTX files with EXACT canonical names:
+            matrix.mtx.gz  (or matrix.mtx)
+            features.tsv.gz (or features.tsv or genes.tsv.gz or genes.tsv)
+            barcodes.tsv.gz (or barcodes.tsv)
 
-            Supp_GSM4257051_G2/
-              filtered_feature_bc_matrix/
-                matrix.mtx.gz
-                features.tsv.gz
-                barcodes.tsv.gz
+        Only canonical names are accepted here.  Prefix-named files such as
+        ``CID3586_matrix.mtx.gz`` are intentionally ignored — they are
+        handled by Tier 2 (_find_and_stage_prefix_named_mtx).
 
         Returns
         -------
         str or None
-            Absolute path to the directory containing the MTX triplet, or
-            ``None`` if no such directory is found under *root*.
         """
+        canonical_matrix   = {"matrix.mtx.gz",   "matrix.mtx"}
+        canonical_features = {"features.tsv.gz",  "features.tsv",
+                               "genes.tsv.gz",     "genes.tsv"}
+        canonical_barcodes = {"barcodes.tsv.gz",  "barcodes.tsv"}
+
         for dirpath, dirnames, filenames in os.walk(root):
-            lower = [f.lower() for f in filenames]
-
-            has_matrix   = any("matrix"   in f and (f.endswith(".mtx.gz") or f.endswith(".mtx"))   for f in lower)
-            has_features = any(("features" in f or "genes" in f) and (f.endswith(".tsv.gz") or f.endswith(".tsv")) for f in lower)
-            has_barcodes = any("barcodes" in f and (f.endswith(".tsv.gz") or f.endswith(".tsv"))   for f in lower)
-
-            if has_matrix and has_features and has_barcodes:
+            lower = set(f.lower() for f in filenames)
+            if (lower & canonical_matrix and
+                    lower & canonical_features and
+                    lower & canonical_barcodes):
                 return dirpath
 
         return None
 
     # ──────────────────────────────────────────────────────────────────────
 
-    def _rename_mtx_files(self, mtx_dir: str):
+    def _find_and_stage_prefix_named_mtx(self, root: str, gsm_id: str):
         """
-        Rename the MTX triplet inside *mtx_dir* to the canonical names that
-        ``sc.read_10x_mtx`` expects:
-            matrix.mtx.gz  /  features.tsv.gz  /  barcodes.tsv.gz
+        Tier 2 — prefix-named MTX triplet handler.
 
-        Skips any rename where the target name already exists.
+        GEO datasets frequently ship 10x files with a sample-ID or cohort
+        prefix instead of the canonical bare names, e.g.:
+
+            GSM5354513_CID3586_matrix.mtx.gz       <- inside CID3586/ subdir
+            GSM5354513_CID3586_barcodes.tsv.gz
+            GSM5354513_CID3586_features.tsv.gz
+
+        or flat in the GSM supplementary directory:
+
+            GSM4909278_B1-MH0033-matrix.mtx.gz
+            GSM4909278_B1-MH0033-barcodes.tsv.gz
+            GSM4909278_B1-MH0033-features.tsv.gz
+
+        sc.read_10x_mtx requires EXACTLY the canonical bare names, so these
+        cannot be read directly.  This method:
+
+          1. Walks the entire GSM directory tree collecting every file whose
+             lowercase name contains the role keywords "matrix", "barcodes",
+             and "features" / "genes" with valid extensions.
+
+          2. Groups the collected files by their shared prefix string
+             (everything in the filename before the role keyword), ensuring
+             that only files that truly belong to the same triplet are grouped.
+
+          3. For each complete triplet group, copies the three files into a
+             fresh canonical subdirectory (``_canonical_<hash>/``) using the
+             exact names sc.read_10x_mtx expects, then returns that path.
+
+        Using shutil.copy2 (not rename) is safe on re-runs — if the canonical
+        directory already exists and is complete it is returned immediately.
+
+        Returns
+        -------
+        str or None
+            Path to a directory containing canonical MTX triplet files,
+            or None if no complete triplet was found.
         """
-        for fname in os.listdir(mtx_dir):
-            src = os.path.join(mtx_dir, fname)
+        import shutil, hashlib
+
+        def _role(fname: str):
+            fl = fname.lower()
+            if fl.endswith(".mtx.gz") or fl.endswith(".mtx"):
+                if "matrix" in fl:
+                    return "matrix"
+            if fl.endswith(".tsv.gz") or fl.endswith(".tsv"):
+                if "barcodes" in fl:
+                    return "barcodes"
+                if "features" in fl or "genes" in fl:
+                    return "features"
+            return None
+
+        def _prefix(fname: str, role: str) -> str:
             fl  = fname.lower()
+            idx = fl.find(role)
+            return fl[:idx]
 
-            if "matrix" in fl and (fl.endswith(".mtx.gz") or fl.endswith(".mtx")):
-                dst_name = "matrix.mtx.gz" if fl.endswith(".gz") else "matrix.mtx"
-            elif ("features" in fl or "genes" in fl) and (fl.endswith(".tsv.gz") or fl.endswith(".tsv")):
-                dst_name = "features.tsv.gz" if fl.endswith(".gz") else "features.tsv"
-            elif "barcodes" in fl and (fl.endswith(".tsv.gz") or fl.endswith(".tsv")):
-                dst_name = "barcodes.tsv.gz" if fl.endswith(".gz") else "barcodes.tsv"
-            else:
+        groups: dict = {}
+        for dirpath, _, filenames in os.walk(root):
+            for fname in filenames:
+                role = _role(fname)
+                if role is None:
+                    continue
+                pre = _prefix(fname, role)
+                key = os.path.join(dirpath, pre)
+                if key not in groups:
+                    groups[key] = {}
+                if role not in groups[key]:
+                    groups[key][role] = os.path.join(dirpath, fname)
+
+        for key, roles in groups.items():
+            if not ("matrix" in roles and "barcodes" in roles and "features" in roles):
                 continue
 
-            dst = os.path.join(mtx_dir, dst_name)
-            if src != dst and not os.path.exists(dst):
-                try:
-                    os.rename(src, dst)
-                except Exception:
-                    pass
+            tag       = hashlib.md5(key.encode()).hexdigest()[:8]
+            canon_dir = os.path.join(root, f"_canonical_{tag}")
+
+            def _canon_name(src_path: str, role: str) -> str:
+                ext = ".gz" if src_path.endswith(".gz") else ""
+                if role == "matrix":   return f"matrix.mtx{ext}"
+                if role == "features": return f"features.tsv{ext}"
+                return f"barcodes.tsv{ext}"
+
+            # Return immediately if already staged and complete
+            if os.path.isdir(canon_dir) and len(os.listdir(canon_dir)) >= 3:
+                return canon_dir
+
+            os.makedirs(canon_dir, exist_ok=True)
+            for role, src_path in roles.items():
+                dst_path = os.path.join(canon_dir, _canon_name(src_path, role))
+                if not os.path.exists(dst_path):
+                    shutil.copy2(src_path, dst_path)
+
+            print(f"  Staged prefix-named MTX triplet for {gsm_id} → "
+                  f"{os.path.relpath(canon_dir, root)}")
+            return canon_dir
+
+        return None
 
     # ──────────────────────────────────────────────────────────────────────
 
@@ -840,38 +913,48 @@ class SampleAnnotator:
             # ── Step 1: extract any tarballs present in gsm_dir ───────────
             self._extract_tarballs(gsm_dir)
 
-            files = os.listdir(gsm_dir)
-
             adata = None
 
-            # ── Step 2: locate the MTX triplet (may be in a sub-directory) ─
-            mtx_dir = self._find_mtx_dir(gsm_dir)
+            # ── Tier 1: canonical layout ───────────────────────────────────
+            # Fast path — find a directory that already has exact canonical
+            # filenames (matrix.mtx.gz, features.tsv.gz, barcodes.tsv.gz).
+            mtx_dir = self._find_mtx_dir_canonical(gsm_dir)
 
             if mtx_dir is not None:
-                # Rename to canonical names expected by sc.read_10x_mtx
-                self._rename_mtx_files(mtx_dir)
-
                 try:
-                    print(f"Reading MTX matrix for {gsm_id} (from {os.path.relpath(mtx_dir, gse_dir)})")
+                    print(f"Reading MTX matrix for {gsm_id} "
+                          f"(from {os.path.relpath(mtx_dir, gse_dir)})")
                     adata = sc.read_10x_mtx(
-                        mtx_dir,
-                        var_names="gene_symbols",
-                        cache=False
+                        mtx_dir, var_names="gene_symbols", cache=False
                     )
                 except Exception as exc:
                     print(f"  MTX read failed for {gsm_id}: {exc}")
 
-            # ── Step 3: fallback — generic CSV/TSV matrix ──────────────────
+            # ── Tier 2: prefix-named layout ────────────────────────────────
+            # Handles files like CID3586_matrix.mtx.gz (GSE176078) or
+            # GSM4909278_B1-MH0033-matrix.mtx.gz (GSE161529) by copying
+            # them into a canonical temp subdirectory and reading from there.
             if adata is None:
+                staged_dir = self._find_and_stage_prefix_named_mtx(gsm_dir, gsm_id)
+                if staged_dir is not None:
+                    try:
+                        print(f"Reading prefix-named MTX for {gsm_id} "
+                              f"(staged at {os.path.relpath(staged_dir, gse_dir)})")
+                        adata = sc.read_10x_mtx(
+                            staged_dir, var_names="gene_symbols", cache=False
+                        )
+                    except Exception as exc:
+                        print(f"  Staged MTX read failed for {gsm_id}: {exc}")
+
+            # ── Tier 3: generic CSV/TSV matrix ─────────────────────────────
+            if adata is None:
+                files = os.listdir(gsm_dir)
                 for f in files:
                     fl = f.lower()
-                    # Skip tarballs — they are not flat matrices
                     if fl.endswith(".tar.gz") or fl.endswith(".tar"):
                         continue
-                    if (
-                        any(fl.endswith(ext) for ext in [".tsv", ".csv", ".txt", ".gz"])
-                        and "matrix" in fl
-                    ):
+                    if (any(fl.endswith(ext) for ext in [".tsv", ".csv", ".txt", ".gz"])
+                            and "matrix" in fl):
                         file_path = os.path.join(gsm_dir, f)
                         print(f"Reading generic matrix for {gsm_id}: {f}")
                         adata = self._read_generic_matrix(file_path)
