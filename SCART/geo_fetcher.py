@@ -46,108 +46,44 @@ TABULA_FILES = {
 # Valid cancer type keys for user reference
 VALID_CANCER_TYPES = sorted(TABULA_FILES.keys())
 
-# ── High-priority sample-level metadata fields ────────────────────────────────
-_PRIORITY_FIELDS = [
-    "characteristics_ch1",
-    "source_name_ch1",
-    "title",
-    "description",
-]
-
-# ── GSE series-level fields used to detect study disease context ──────────────
-_SERIES_FIELDS = [
-    "title",
-    "summary",
-    "overall_design",
-]
-
-# ── Disease / tumor keywords ──────────────────────────────────────────────────
+# ── Disease-specific keywords used for the "unspecified → tumor" rescue pass ──
+# These cover haematological and other malignancies that rarely use the
+# word "tumor" in their sample descriptions.
 DISEASE_TUMOR_KEYWORDS = [
-    # General malignancy
+    # ── General malignancy ───────────────────────────────────────────────────
     "tumor", "tumour", "cancer", "carcinoma", "adenocarcinoma",
     "malignant", "malignancy", "metastatic", "metastasis",
     "neoplasm", "neoplastic",
 
-    # Gynaecological / epithelial
-    "hgsoc", "lgsoc", "serous ovarian", "ovarian carcinoma",
-    "endometrioid carcinoma", "clear cell carcinoma",
-    "mucinous carcinoma", "fallopian tube carcinoma",
-    "stic", "peritoneal carcinoma", "ascites", "debulking",
-
-    # Haematological
+    # ── Haematological ───────────────────────────────────────────────────────
     "leukemia", "leukaemia", "lymphoma", "myeloma",
     "aml", "cml", "all", "cll", "mds",
     "acute myeloid", "chronic myeloid",
-    "acute lymphoblastic", "chronic lymphocytic", "acute lymphocytic",
+    "acute lymphoblastic", "chronic lymphocytic",
+    "acute lymphocytic",
     "t-cell leukemia", "b-cell leukemia",
     "hairy cell leukemia", "large granular lymphocyte",
     "myelodysplastic", "myeloproliferative",
-    "polycythemia vera", "essential thrombocythemia", "myelofibrosis",
+    "polycythemia vera", "essential thrombocythemia",
+    "myelofibrosis",
 
-    # Lymphoid
+    # ── Lymphoid ────────────────────────────────────────────────────────────
     "dlbcl", "follicular lymphoma", "mantle cell lymphoma",
     "burkitt lymphoma", "hodgkin", "non-hodgkin",
     "marginal zone lymphoma", "anaplastic large cell",
     "primary mediastinal b-cell",
-    "b-cell lymphoma", "t-cell lymphoma",
-    "large b-cell", "diffuse large",
 
-    # Plasma cell
+    # ── Plasma cell ─────────────────────────────────────────────────────────
     "multiple myeloma", "plasma cell dyscrasia",
     "plasmacytoma", "waldenström",
     "smoldering myeloma", "amyloidosis",
-    "myeloma patient", "mm patient",
 
-    # Solid-tumour aliases
-    "pdac", "nsclc", "sclc",
+    # ── Solid-tumour aliases missed by primary keywords ──────────────────────
+    "hgsoc", "lgsoc", "pdac", "nsclc", "sclc",
     "gbm", "glioblastoma", "glioma", "astrocytoma",
     "melanoma", "sarcoma", "blastoma",
     "hepatocellular", "cholangiocarcinoma",
     "seminoma", "teratoma",
-]
-
-# ── Normal keywords for Pass 1 (priority fields only) ────────────────────────
-_NORMAL_KEYWORDS = [
-    "normal",
-    "healthy",
-    "healthy control",
-    "healthy donor",
-    "healthy volunteer",
-    "control",
-    "adjacent normal",
-    "non-tumor",
-    "non-tumour",
-    "non-cancer",
-    "benign",
-    "non-malignant",
-]
-
-# ── Strict normal keywords for Pass 3 (full metadata blob) ───────────────────
-_NORMAL_KEYWORDS_STRICT = [
-    "adjacent normal",
-    "non-tumor",
-    "non-tumour",
-    "non-cancer",
-    "non-malignant",
-    "healthy donor",
-    "healthy volunteer",
-    "healthy control",
-    "normal donor",
-    "normal volunteer",
-]
-
-# ── Patient-origin indicators for Pass 2 (disease-context rescue) ─────────────
-_PATIENT_ORIGIN_TERMS = [
-    "patient",
-    "pbmc",
-    "peripheral blood",
-    "bone marrow",
-    "blood sample",
-    "preinfusion",
-    "pre-infusion",
-    "post-infusion",
-    "biopsy",
-    "aspirate",
 ]
 
 
@@ -181,117 +117,107 @@ class SampleAnnotator:
 
             cancer_type="blood_cancer"
             cancer_type="blood_cancer, bone_marrow_cancer"
-            cancer_type="my_custom_cancer"
+            cancer_type="my_custom_cancer"            # free-text, no Tabula ref
 
         To see all Tabula Sapiens keys::
 
             from SCART.geo_fetcher import VALID_CANCER_TYPES
             print(VALID_CANCER_TYPES)
 
-    exclude_gsm_ids : list of str or None, optional
-        A list of GSM IDs to exclude from the tumor h5ad, regardless of
-        how they were classified.  Excluded IDs are reported in the sample
-        summary as "Manually excluded".
-
-        Example::
-
-            annotator = SampleAnnotator(
-                "GSE224550",
-                cancer_type="blood_cancer",
-                exclude_gsm_ids=["GSM7025839", "GSM7025840"],
-            )
-
     min_genes : int or None, optional
-        Minimum number of genes detected per cell for QC filtering in
-        Module 3. Stored in ``adata.uns['qc_params']``.
+        Minimum number of genes detected per cell used for QC filtering in
+        Module 3 (preprocessing).  The value is stored in
+        ``adata.uns['qc_params']`` of every h5ad written by this module so
+        that Module 3 can read it automatically.
+        If not provided (default: None), the QC step is skipped in Module 3.
 
     max_mt : float or None, optional
-        Maximum mitochondrial gene percentage per cell for QC filtering.
-        Stored in ``adata.uns['qc_params']``.
+        Maximum mitochondrial gene percentage per cell used for QC filtering
+        in Module 3.  Stored alongside ``min_genes`` in
+        ``adata.uns['qc_params']``.
+        If not provided (default: None), the QC step is skipped in Module 3.
 
     manual_annotation_col : str or None, optional
         ONLY relevant when providing your own .h5ad file (not a GEO ID).
-        Name of the obs column holding cell-type annotations. When provided,
-        Module 2 (PopV) is skipped and annotations are used directly in
-        Module 3.
+
+        Name of the column in adata.obs that contains your cell-type
+        annotations.  When provided, Module 2 (PopV) is skipped entirely
+        and your annotations are used directly in Module 3 (preprocessing).
+
+        Requirements for the annotation column
+        ---------------------------------------
+        - Must exist in adata.obs of every h5ad file you pass.
+        - Must contain string cell-type labels for every cell.
+        - The column that identifies epithelial cells used by Module 3
+          must contain labels ending with the phrase "epithelial cell"
+          (case-insensitive).  Examples of valid epithelial labels:
+              "epithelial cell"
+              "glandular epithelial cell"
+              "ovarian surface epithelial cell"
+          Non-epithelial cells (all other labels) are used as the
+          comparison "rest" group in the DEG step.
+        - The column value is copied into a new column called
+          "popv_majority_vote_prediction" so that Module 3 can find it
+          without any changes to the downstream pipeline.
+
+        What is stored in the h5ad
+        --------------------------
+        adata.uns['manual_annotation_col'] = <your column name>
+            Tells downstream modules that PopV was skipped and which
+            obs column holds the cell-type labels.
+        adata.uns['skip_popv'] = True
+            Explicit flag so Module 2 auto_run_popv() can detect and
+            skip the PopV pipeline automatically.
+
+        Usage example
+        -------------
+        annotator = SampleAnnotator(
+            "my_data.h5ad",
+            cancer_type="blood_cancer",
+            manual_annotation_col="cell_type",
+            min_genes=200,
+            max_mt=40,
+        )
+
+        If not provided (default: None), PopV runs normally on the h5ad.
 
     Notes
     -----
-    Sample classification logic (three-pass, context-aware)
-    -------------------------------------------------------
-    Pass 1 — HIGH-PRIORITY FIELDS
-        Checks characteristics_ch1, source_name_ch1, title, description.
-        a. Normal keyword  → normal
-        b. Tumor keyword   → tumor
+    GEO ID inputs always run the full PopV pipeline regardless of
+    manual_annotation_col — the parameter is silently ignored for GEO IDs.
 
-    Pass 2 — GSE DISEASE CONTEXT RESCUE (only when Pass 1 inconclusive)
-        If the series IS a cancer study AND the sample's priority text
-        contains a patient-origin term → tumor.
+    Sample classification logic
+    ---------------------------
+    Each GSM is first checked against normal/control keywords; if found it
+    is labelled **normal**.  Next it is checked against a broad set of
+    tumour/malignancy keywords (including haematological disease terms such
+    as "aml", "leukemia", "myeloma", etc.); if found it is labelled
+    **tumor**.  A sample reaches **unspecified** only when *neither* group
+    of keywords is detected.
 
-    Pass 3 — FULL METADATA BLOB
-        a. Strict normal keyword → normal
-        b. Tumor keyword         → tumor
-
-    Pass 4 — unspecified
-
-    MTX reading strategy (three-tier)
-    ----------------------------------
-    GEO datasets package their 10x MTX triplets in several different ways.
-    The reader attempts three strategies in order:
-
-    Tier 1 — Canonical layout
-        Walk the GSM directory tree looking for a folder that already
-        contains all three canonical files (matrix.mtx / matrix.mtx.gz,
-        features/genes .tsv, barcodes .tsv).  If found, read directly
-        with sc.read_10x_mtx.
-
-    Tier 2 — Prefix-named layout (e.g. GSE176078, GSE161529)
-        Many datasets ship MTX files with a sample-ID or cohort prefix:
-            GSM5354513_CID3586_matrix.mtx.gz
-            GSM5354513_CID3586_barcodes.tsv.gz
-            GSM5354513_CID3586_features.tsv.gz
-        or flat in the GSM directory:
-            GSM4909278_B1-MH0033-matrix.mtx.gz
-            GSM4909278_B1-MH0033-barcodes.tsv.gz
-            GSM4909278_B1-MH0033-features.tsv.gz
-        _find_mtx_dir misses these because it checks for "barcodes" in the
-        filename, but the prefix obscures the pattern at the directory level
-        — actually _find_mtx_dir does match these correctly.  The real
-        problem is that sc.read_10x_mtx requires EXACTLY the canonical
-        names.  _rename_mtx_files renames them, but only if the target
-        does NOT already exist.  On re-runs where a previous partial rename
-        left stale files, or when the tarball puts all three files in the
-        same directory as a flat dump, this silently fails.
-
-        Tier 2 fixes this by:
-          a. Walking the entire GSM tree to collect every file whose name
-             contains "matrix", "features"/"genes", and "barcodes" (with
-             any prefix and any separator).
-          b. Grouping them by their shared prefix (everything before the
-             role keyword).
-          c. For each matched group, copying (not renaming — safe on
-             re-runs) the three files to a clean temp subdirectory with
-             canonical names and reading from there.
-
-    Tier 3 — Generic CSV/TSV matrix
-        Last resort for non-standard flat matrix files.
+    This two-step approach means that blood-cancer datasets whose GSM
+    descriptions use disease names instead of the word "tumor" (e.g.
+    "AML patient", "CLL cells") are correctly classified as tumor rather
+    than being silently dropped into the unspecified bucket.
     """
 
     def __init__(
         self,
         *inputs,
         cancer_type: str,
-        exclude_gsm_ids: list = None,
         min_genes: int = None,
         max_mt: float = None,
         manual_annotation_col: str = None,
     ):
-        self.inputs    = list(inputs)
-        self.base_dir  = "GSE_data"
+
+        self.inputs   = list(inputs)
+        self.base_dir = "GSE_data"
+
+        # ── QC parameters ──────────────────────────────────────────────────
         self.min_genes = min_genes
         self.max_mt    = max_mt
-        self.exclude_gsm_ids = set(exclude_gsm_ids) if exclude_gsm_ids else set()
 
+        # ── Cancer type (required) ─────────────────────────────────────────
         if not cancer_type or not isinstance(cancer_type, str):
             raise ValueError(
                 "\ncancer_type is required.\n\n"
@@ -304,11 +230,14 @@ class SampleAnnotator:
                 "  print(VALID_CANCER_TYPES)"
             )
 
+        # Parse and categorise each token as tabula or unknown
         self._user_cancer_type, self._tabula_types, self._unknown_types = (
             self._parse_cancer_type(cancer_type)
         )
 
+        # ── Manual annotation ──────────────────────────────────────────────
         self.manual_annotation_col = manual_annotation_col
+
         os.makedirs(self.base_dir, exist_ok=True)
 
         self.gse_ids     = []
@@ -325,38 +254,84 @@ class SampleAnnotator:
     # ──────────────────────────────────────────────────────────────────────
 
     def _parse_cancer_type(self, cancer_type: str):
-        tokens        = [t.strip() for t in cancer_type.split(",") if t.strip()]
+        """
+        Parse a (possibly comma-separated) cancer_type string.
+
+        Each token is checked against TABULA_FILES:
+          - Known tokens  → will get a Tabula Sapiens reference recommendation.
+          - Unknown tokens → user will be told to supply their own reference.
+
+        Returns
+        -------
+        normalised_str  : str   — joined, stripped version of all tokens
+        tabula_types    : list  — tokens that exist in TABULA_FILES
+        unknown_types   : list  — tokens not in TABULA_FILES
+        """
+        tokens = [t.strip() for t in cancer_type.split(",") if t.strip()]
+
         tabula_types  = [t for t in tokens if t in TABULA_FILES]
         unknown_types = [t for t in tokens if t not in TABULA_FILES]
-        return ", ".join(tokens), tabula_types, unknown_types
+
+        normalised = ", ".join(tokens)
+        return normalised, tabula_types, unknown_types
+
+    # ──────────────────────────────────────────────────────────────────────
 
     def _store_qc_params(self, adata):
+        """
+        Write QC thresholds into adata.uns['qc_params'] only when the user
+        has explicitly provided at least one threshold.
+        """
         if self.min_genes is None and self.max_mt is None:
             adata.uns.pop("qc_params", None)
             return
-        adata.uns["qc_params"] = {"min_genes": self.min_genes, "max_mt": self.max_mt}
+
+        adata.uns["qc_params"] = {
+            "min_genes": self.min_genes,
+            "max_mt":    self.max_mt,
+        }
+
+    # ──────────────────────────────────────────────────────────────────────
 
     def _store_manual_annotation(self, adata, source_file: str):
+        """
+        Validate and store manual annotation metadata when the user has
+        supplied manual_annotation_col.
+        """
         col = self.manual_annotation_col
 
+        # 1. Validate column exists
         if col not in adata.obs.columns:
+            available = list(adata.obs.columns)
             raise ValueError(
                 f"\nmanual_annotation_col='{col}' not found in adata.obs "
                 f"of '{source_file}'.\n"
-                f"Available obs columns: {list(adata.obs.columns)}\n\n"
-                "Please check the column name and try again."
+                f"Available obs columns: {available}\n\n"
+                "Please check the column name and try again.\n"
+                "See the README section 'Manual annotation requirements' "
+                "for full details."
             )
 
+        # 2. Copy into popv_majority_vote_prediction
         if "popv_majority_vote_prediction" in adata.obs.columns:
-            print(f"  WARNING: 'popv_majority_vote_prediction' already exists — overwriting with '{col}'.")
+            print(
+                f"  WARNING: 'popv_majority_vote_prediction' already exists "
+                f"in adata.obs — overwriting with values from '{col}'."
+            )
+        adata.obs["popv_majority_vote_prediction"] = (
+            adata.obs[col].astype(str)
+        )
 
-        adata.obs["popv_majority_vote_prediction"] = adata.obs[col].astype(str)
-        adata.uns["manual_annotation_col"]         = col
-        adata.uns["skip_popv"]                     = True
+        # 3 & 4. Store metadata flags
+        adata.uns["manual_annotation_col"] = col
+        adata.uns["skip_popv"]             = True
 
+        # 5. Print label summary
         unique_labels  = sorted(adata.obs["popv_majority_vote_prediction"].unique())
-        epithelial     = [l for l in unique_labels if "epithelial cell" in l.lower()]
-        non_epithelial = [l for l in unique_labels if "epithelial cell" not in l.lower()]
+        epithelial     = [l for l in unique_labels
+                          if "epithelial cell" in l.lower()]
+        non_epithelial = [l for l in unique_labels
+                          if "epithelial cell" not in l.lower()]
 
         print(f"\n  Manual annotation column : '{col}'")
         print(f"  Copied to               : 'popv_majority_vote_prediction'")
@@ -368,12 +343,25 @@ class SampleAnnotator:
         if not epithelial:
             print(
                 "\n  ⚠ WARNING: No epithelial labels detected.\n"
-                "  Module 3 looks for labels ending with 'epithelial cell' (case-insensitive).\n"
+                "  Module 3 identifies epithelial cells by matching labels that\n"
+                "  END WITH 'epithelial cell' (case-insensitive), for example:\n"
+                "    'epithelial cell'\n"
+                "    'glandular epithelial cell'\n"
+                "    'ovarian surface epithelial cell'\n"
                 f"  Your labels in '{col}' do not match this pattern.\n"
-                "  Please rename your epithelial label(s) to end with 'epithelial cell'."
+                "  Module 3 will find 0 epithelial cells and may fail.\n"
+                "  Please rename your epithelial label(s) to end with "
+                "'epithelial cell'."
             )
 
+    # ──────────────────────────────────────────────────────────────────────
+
     def _print_reference_guidance(self):
+        """
+        Print Tabula Sapiens reference guidance based on the user-supplied
+        cancer type(s).  Unknown types are flagged with instructions to
+        provide a custom reference.
+        """
         print("\n========== REFERENCE GUIDANCE ==========")
         print(f"Cancer type(s) provided: {self._user_cancer_type}\n")
 
@@ -398,96 +386,59 @@ class SampleAnnotator:
             print( "   👉 Please provide your own reference file for PopV / SCEVAN.")
 
     # ──────────────────────────────────────────────────────────────────────
-    # Text extraction
-    # ──────────────────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _extract_priority_text(gsm) -> str:
-        parts = []
-        for field in _PRIORITY_FIELDS:
-            vals = gsm.metadata.get(field, [])
-            if vals:
-                parts.append(" ".join(str(v) for v in vals))
-        return " ".join(parts).lower()
-
-    @staticmethod
-    def _extract_full_text(gsm) -> str:
-        return " ".join(str(v) for v in gsm.metadata.values()).lower()
-
-    @staticmethod
-    def _extract_series_disease_context(gse) -> str:
-        parts = []
-        for field in _SERIES_FIELDS:
-            vals = gse.metadata.get(field, [])
-            if vals:
-                parts.append(" ".join(str(v) for v in vals))
-        return " ".join(parts).lower()
-
-    # ──────────────────────────────────────────────────────────────────────
-    # Classification
-    # ──────────────────────────────────────────────────────────────────────
-
-    def _classify_gsm(self, gsm, series_is_cancer: bool) -> str:
-        priority_text = self._extract_priority_text(gsm)
-
-        if any(k in priority_text for k in _NORMAL_KEYWORDS):
-            return "normal"
-        if any(k in priority_text for k in DISEASE_TUMOR_KEYWORDS):
-            return "tumor"
-
-        if series_is_cancer and any(k in priority_text for k in _PATIENT_ORIGIN_TERMS):
-            return "tumor"
-
-        full_text = self._extract_full_text(gsm)
-        if any(k in full_text for k in _NORMAL_KEYWORDS_STRICT):
-            return "normal"
-        if any(k in full_text for k in DISEASE_TUMOR_KEYWORDS):
-            return "tumor"
-
-        return "unspecified"
-
-    # ──────────────────────────────────────────────────────────────────────
     # Public entry-point
     # ──────────────────────────────────────────────────────────────────────
 
     def run(self):
-        normal          = []
-        tumor           = []
-        unspecified     = []
+
+        normal      = []
+        tumor       = []
+        unspecified = []
         annotation_info = {}
-        tumor_adatas    = []
-        results         = {}
+
+        tumor_adatas = []
+        results      = {}
 
         for gse_id in self.gse_ids:
+
             n, t, u, ann = self._process_gse(gse_id)
+
             normal.extend(n)
             tumor.extend(t)
             unspecified.extend(u)
             annotation_info.update(ann)
 
             adata = self._build_h5ad(
-                gse_id, t,
+                gse_id,
+                t,
                 save_single=(len(self.gse_ids) == 1 and len(self.h5ad_inputs) == 0),
             )
+
             if adata is not None:
                 tumor_adatas.append(adata)
 
             results[gse_id] = (n, t, u, ann, None, self._user_cancer_type)
 
         for file in self.h5ad_inputs:
+
             print("\n========== Reading h5ad file ==========")
+
             adata = sc.read_h5ad(file)
             adata.obs_names_make_unique()
             adata.layers["counts"] = adata.X.copy()
             adata.raw = adata
+
+            # Store cancer type
             adata.uns["cancer_type"] = self._user_cancer_type
             print(f"  cancer_type stored: {self._user_cancer_type}")
 
+            # Handle manual annotation
             if self.manual_annotation_col is not None:
                 print("\n  Manual annotation mode activated.")
                 self._store_manual_annotation(adata, file)
 
             self._store_qc_params(adata)
+
             tumor_adatas.append(adata)
             results[file] = ([], [], [], {}, None, self._user_cancer_type)
 
@@ -495,7 +446,9 @@ class SampleAnnotator:
         total_inputs = len(self.gse_ids) + len(self.h5ad_inputs)
 
         if total_inputs == 1:
+
             if len(self.gse_ids) == 1:
+
                 query_h5ad = f"{self.gse_ids[0]}_tumor.h5ad"
                 results[self.gse_ids[0]] = (
                     normal, tumor, unspecified,
@@ -503,14 +456,20 @@ class SampleAnnotator:
                 )
 
             elif len(self.h5ad_inputs) == 1:
+
                 adata    = tumor_adatas[0]
                 filename = "input_tumor.h5ad"
+
                 adata.write(filename)
+
                 print("\n========== h5ad created ==========")
                 print(f"{filename} is created successfully")
 
                 if self.manual_annotation_col is not None:
-                    print(f"Manual annotation stored → col='{self.manual_annotation_col}', skip_popv=True")
+                    print(
+                        f"Manual annotation stored  → "
+                        f"col='{self.manual_annotation_col}', skip_popv=True"
+                    )
                     print("Next step: run Module 3 (preprocessing) directly.")
 
                 if self.min_genes is not None or self.max_mt is not None:
@@ -518,33 +477,47 @@ class SampleAnnotator:
                 else:
                     print("QC step disabled (no min_genes / max_mt provided — will be skipped in Module 3)")
 
-                query_h5ad   = filename
-                key          = self.h5ad_inputs[0]
+                query_h5ad = filename
+                key        = self.h5ad_inputs[0]
                 results[key] = ([], [], [], {}, query_h5ad, self._user_cancer_type)
 
         elif total_inputs > 1 and len(tumor_adatas) > 0:
+
             combined = ad.concat(tumor_adatas, join="outer")
             combined.obs_names_make_unique()
             combined.layers["counts"] = combined.X.copy()
             combined.raw = combined
+
             combined.uns["cancer_type"] = self._user_cancer_type
             print(f"\n  cancer_type stored in combined h5ad: {self._user_cancer_type}")
 
+            # Re-apply manual annotation after concat (uns is lost by concat)
             if self.manual_annotation_col is not None:
                 if "popv_majority_vote_prediction" in combined.obs.columns:
                     combined.uns["manual_annotation_col"] = self.manual_annotation_col
                     combined.uns["skip_popv"]             = True
-                    print(f"\n  Combined h5ad: manual annotation carried from '{self.manual_annotation_col}'.")
+                    print(
+                        f"\n  Combined h5ad: manual annotation carried through "
+                        f"from column '{self.manual_annotation_col}'."
+                    )
                 else:
-                    print("\n  WARNING: 'popv_majority_vote_prediction' lost during concat.")
+                    print(
+                        "\n  WARNING: 'popv_majority_vote_prediction' lost during "
+                        "concat — manual annotation NOT stored in combined h5ad."
+                    )
 
             self._store_qc_params(combined)
+
             combined.write("combined_tumor.h5ad")
+
             print("\n========== h5ad created ==========")
             print("combined_tumor.h5ad is created successfully")
 
             if self.manual_annotation_col is not None:
-                print(f"Manual annotation stored → col='{self.manual_annotation_col}', skip_popv=True")
+                print(
+                    f"Manual annotation stored  → "
+                    f"col='{self.manual_annotation_col}', skip_popv=True"
+                )
                 print("Next step: run Module 3 (preprocessing) directly.")
 
             if self.min_genes is not None or self.max_mt is not None:
@@ -568,43 +541,123 @@ class SampleAnnotator:
     # GEO processing
     # ──────────────────────────────────────────────────────────────────────
 
+    def _classify_gsm(self, text: str):
+        """
+        Classify a single GSM based on its full metadata text.
+
+        Classification order (first match wins)
+        ----------------------------------------
+        1. **normal**      – metadata clearly describes a non-malignant /
+                             healthy / control sample AND contains no disease
+                             keyword that would indicate it is a patient
+                             tumour sample with co-mentioned normal tissue.
+        2. **tumor**       – contains any tumour or disease-specific keyword
+                             from DISEASE_TUMOR_KEYWORDS (covers both generic
+                             terms like "tumor" and haematological terms like
+                             "aml", "leukemia", "myeloma", etc.).
+                             This label is also assigned to patient samples
+                             from therapeutic / CAR-T trial contexts —
+                             "relapsed", "refractory", "post-treatment" etc.
+                             describe the *patient's disease state*, not the
+                             sample type, so they belong in the tumour bucket.
+        3. **unspecified** – neither group matched.
+
+        Design note — no therapeutic exclusion
+        ----------------------------------------
+        Earlier versions of this classifier excluded samples labelled as
+        "therapeutic" or "CAR-T product".  This was too aggressive: patient
+        bone-marrow or blood samples from CAR-T trials describe their disease
+        state using terms like "relapsed-refractory" which was incorrectly
+        caught by the exclusion filter.  Therapeutic exclusion has been removed
+        entirely.  All patient samples from disease contexts are classified as
+        tumor so that downstream modules receive the full dataset.
+
+        Returns
+        -------
+        "normal" | "tumor" | "unspecified"
+        """
+        # ── Normal / control keywords ──────────────────────────────────────
+        # A sample is only labelled normal when it contains a normal keyword
+        # AND contains none of the disease keywords, preventing cases where
+        # "adjacent normal" or "control" appears alongside a disease label.
+        normal_keywords = [
+            "normal", "healthy", "control", "adjacent normal",
+            "non-tumor", "non-tumour", "non-cancer",
+            "benign", "non-malignant",
+        ]
+
+        has_normal_kw  = any(k in text for k in normal_keywords)
+        has_disease_kw = any(k in text for k in DISEASE_TUMOR_KEYWORDS)
+
+        if has_normal_kw and not has_disease_kw:
+            return "normal"
+
+        if has_disease_kw:
+            return "tumor"
+
+        # Pure control / normal with no disease mention at all
+        if has_normal_kw:
+            return "normal"
+
+        return "unspecified"
+
+    # ──────────────────────────────────────────────────────────────────────
+
     def _process_gse(self, gse_id):
+        """
+        Download a GEO series, classify each GSM, and return lists of
+        normal / tumor / unspecified sample IDs.
+        """
         gse_dir = os.path.join(self.base_dir, gse_id)
         os.makedirs(gse_dir, exist_ok=True)
 
         gse = GEOparse.get_GEO(geo=gse_id, destdir=gse_dir)
-        gse.download_supplementary_files(gse_dir)
 
-        series_text      = self._extract_series_disease_context(gse)
-        series_is_cancer = any(k in series_text for k in DISEASE_TUMOR_KEYWORDS)
+        # Skip supplementary download if every GSM already has a local
+        # directory (either GSM<id>/ or Supp_GSM<id>*/).  This prevents
+        # redundant network calls on every re-run of the same GSE ID.
+        def _supp_present(gsm_id: str) -> bool:
+            if os.path.isdir(os.path.join(gse_dir, gsm_id)):
+                return True
+            return any(
+                d.startswith(f"Supp_{gsm_id}")
+                for d in os.listdir(gse_dir)
+                if os.path.isdir(os.path.join(gse_dir, d))
+            )
 
-        normal             = []
-        tumor              = []
-        unspecified        = []
-        manually_excluded  = []
-        annotation_info    = {}
+        if all(_supp_present(gsm_id) for gsm_id in gse.gsms):
+            print(f"  Supplementary files already present for {gse_id} — skipping download.")
+        else:
+            gse.download_supplementary_files(gse_dir)
+
+        normal      = []
+        tumor       = []
+        unspecified = []
+        annotation_info = {}
+
         excluded_non_scrna = []
         excluded_non_human = []
 
         for gsm_id, gsm in gse.gsms.items():
 
+            # Build a single lowercase text blob from all metadata fields
+            text = " ".join(
+                [str(v) for v in gsm.metadata.values()]
+            ).lower()
+
+            # Filter: human only
             organism = " ".join(gsm.metadata.get("organism_ch1", [])).lower()
             if "homo sapiens" not in organism:
                 excluded_non_human.append(gsm_id)
                 continue
 
+            # Filter: scRNA-seq only
             library = " ".join(gsm.metadata.get("library_strategy", [])).lower()
             if not any(k in library for k in ["rna-seq", "scrna", "single cell"]):
                 excluded_non_scrna.append(gsm_id)
                 continue
 
-            if gsm_id in self.exclude_gsm_ids:
-                manually_excluded.append(gsm_id)
-                annotation_info[gsm_id] = "manually_excluded"
-                continue
-
-            label = self._classify_gsm(gsm, series_is_cancer)
-            annotation_info[gsm_id] = label
+            label = self._classify_gsm(text)
 
             if label == "normal":
                 normal.append(gsm_id)
@@ -613,22 +666,22 @@ class SampleAnnotator:
             else:
                 unspecified.append(gsm_id)
 
+            annotation_info[gsm_id] = label
+
         print(f"\n========== SAMPLE SUMMARY: {gse_id} ==========")
         print(f"Cancer type (user-supplied): {self._user_cancer_type}")
-        print("Normal samples:",       ", ".join(normal)            if normal            else "None")
-        print("Tumor samples:",        ", ".join(tumor)             if tumor             else "None")
-        print("Unspecified samples:",  ", ".join(unspecified)       if unspecified       else "None")
-        print("Manually excluded:",    ", ".join(manually_excluded) if manually_excluded else "None")
+        print("Normal samples:",       ", ".join(normal)              if normal              else "None")
+        print("Tumor samples:",        ", ".join(tumor)               if tumor               else "None")
+        print("Unspecified samples:",  ", ".join(unspecified)         if unspecified         else "None")
         print("Excluded (non-human):", ", ".join(excluded_non_human)  if excluded_non_human  else "None")
         print("Excluded (non-scRNA):", ", ".join(excluded_non_scrna)  if excluded_non_scrna  else "None")
 
         return normal, tumor, unspecified, annotation_info
 
     # ──────────────────────────────────────────────────────────────────────
-    # File I/O helpers
-    # ──────────────────────────────────────────────────────────────────────
 
     def _read_generic_matrix(self, file_path):
+
         try:
             if file_path.endswith(".gz"):
                 with gzip.open(file_path, 'rt') as f:
@@ -640,57 +693,107 @@ class SampleAnnotator:
                 df = df.T
 
             df = df.apply(pd.to_numeric, errors='coerce').fillna(0)
+
             return ad.AnnData(df)
+
         except Exception:
             return None
 
+    # ──────────────────────────────────────────────────────────────────────
+
     def _extract_tarballs(self, gsm_dir: str):
+        """
+        Extract any .tar.gz / .tar archives present in *gsm_dir* into that
+        same directory.
+
+        GEO sometimes ships the 10x MTX triplet packaged inside a tarball
+        (e.g. ``GSM4257051_G2_filtered_feature_bc_matrix.tar.gz``).  This
+        method unpacks every such archive it finds so that the subsequent
+        MTX-scanning logic can locate the individual files.
+
+        Already-extracted files are detected by checking whether the archive
+        member paths already exist on disk; if they do the archive is skipped
+        to avoid redundant work on re-runs.
+
+        Parameters
+        ----------
+        gsm_dir : str
+            Directory that was just located for this GSM sample.
+        """
         for fname in os.listdir(gsm_dir):
+            # Accept both .tar.gz and plain .tar
             if not (fname.endswith(".tar.gz") or fname.endswith(".tar")):
                 continue
+
             tar_path = os.path.join(gsm_dir, fname)
+
             try:
                 with tarfile.open(tar_path, "r:*") as tf:
-                    members     = tf.getmembers()
+                    members = tf.getmembers()
+
+                    # Skip if every member already exists on disk
                     all_present = all(
                         os.path.exists(os.path.join(gsm_dir, m.name))
                         for m in members if m.isfile()
                     )
                     if all_present:
                         continue
+
                     print(f"  Extracting {fname} → {gsm_dir}")
                     tf.extractall(path=gsm_dir)
+
             except Exception as exc:
                 print(f"  Warning: could not extract {fname}: {exc}")
 
+    # ──────────────────────────────────────────────────────────────────────
+
     def _find_mtx_dir(self, root: str):
         """
-        Walk *root* recursively and return the first directory that already
-        contains all three 10x MTX files with CANONICAL names
-        (matrix.mtx / matrix.mtx.gz, features/genes .tsv, barcodes .tsv).
+        Walk *root* recursively and return the first directory that contains
+        all three 10x MTX files (matrix.mtx / matrix.mtx.gz, features /
+        genes TSV, barcodes TSV).
 
-        This is Tier 1 — fast path for datasets that already ship canonical
-        names or have been successfully renamed on a previous run.
+        This handles the common GEO pattern where the tarball extracts into
+        a subdirectory named after the sample, e.g.:
+
+            Supp_GSM4257051_G2/
+              filtered_feature_bc_matrix/
+                matrix.mtx.gz
+                features.tsv.gz
+                barcodes.tsv.gz
+
+        Returns
+        -------
+        str or None
+            Absolute path to the directory containing the MTX triplet, or
+            ``None`` if no such directory is found under *root*.
         """
         for dirpath, dirnames, filenames in os.walk(root):
-            lower        = [f.lower() for f in filenames]
-            has_matrix   = any(f in ("matrix.mtx.gz", "matrix.mtx") for f in lower)
-            has_features = any(f in ("features.tsv.gz", "features.tsv",
-                                     "genes.tsv.gz",    "genes.tsv")   for f in lower)
-            has_barcodes = any(f in ("barcodes.tsv.gz", "barcodes.tsv") for f in lower)
+            lower = [f.lower() for f in filenames]
+
+            has_matrix   = any("matrix"   in f and (f.endswith(".mtx.gz") or f.endswith(".mtx"))   for f in lower)
+            has_features = any(("features" in f or "genes" in f) and (f.endswith(".tsv.gz") or f.endswith(".tsv")) for f in lower)
+            has_barcodes = any("barcodes" in f and (f.endswith(".tsv.gz") or f.endswith(".tsv"))   for f in lower)
+
             if has_matrix and has_features and has_barcodes:
                 return dirpath
+
         return None
+
+    # ──────────────────────────────────────────────────────────────────────
 
     def _rename_mtx_files(self, mtx_dir: str):
         """
-        Rename files in *mtx_dir* to canonical names expected by
-        sc.read_10x_mtx.  Skips if the canonical target already exists
-        to avoid clobbering on re-runs.
+        Rename the MTX triplet inside *mtx_dir* to the canonical names that
+        ``sc.read_10x_mtx`` expects:
+            matrix.mtx.gz  /  features.tsv.gz  /  barcodes.tsv.gz
+
+        Skips any rename where the target name already exists.
         """
         for fname in os.listdir(mtx_dir):
             src = os.path.join(mtx_dir, fname)
             fl  = fname.lower()
+
             if "matrix" in fl and (fl.endswith(".mtx.gz") or fl.endswith(".mtx")):
                 dst_name = "matrix.mtx.gz" if fl.endswith(".gz") else "matrix.mtx"
             elif ("features" in fl or "genes" in fl) and (fl.endswith(".tsv.gz") or fl.endswith(".tsv")):
@@ -699,6 +802,7 @@ class SampleAnnotator:
                 dst_name = "barcodes.tsv.gz" if fl.endswith(".gz") else "barcodes.tsv"
             else:
                 continue
+
             dst = os.path.join(mtx_dir, dst_name)
             if src != dst and not os.path.exists(dst):
                 try:
@@ -706,152 +810,21 @@ class SampleAnnotator:
                 except Exception:
                     pass
 
-    def _find_and_stage_prefix_named_mtx(self, root: str, gsm_id: str):
-        """
-        Tier 2 MTX reader — handles prefix-named MTX triplets.
-
-        GEO datasets frequently ship 10x files with a sample-ID or cohort
-        prefix instead of the canonical bare names, e.g.:
-
-            GSM5354513_CID3586_matrix.mtx.gz       ← inside CID3586/ subdir
-            GSM5354513_CID3586_barcodes.tsv.gz
-            GSM5354513_CID3586_features.tsv.gz
-
-        or flat in the GSM supplementary directory:
-
-            GSM4909278_B1-MH0033-matrix.mtx.gz
-            GSM4909278_B1-MH0033-barcodes.tsv.gz
-            GSM4909278_B1-MH0033-features.tsv.gz
-
-        sc.read_10x_mtx requires EXACTLY the canonical bare names, so these
-        cannot be read directly.  This method:
-
-          1. Walks the entire GSM directory tree collecting every file whose
-             lowercase name contains the role keywords "matrix", "barcodes",
-             and "features" / "genes" with valid extensions.
-
-          2. Groups the collected files by their shared prefix string
-             (everything in the filename before the role keyword), ensuring
-             that only files that truly belong to the same triplet are
-             grouped together.
-
-          3. For each complete triplet group, copies the three files into a
-             fresh canonical subdirectory (``_canonical_<hash>/``) using the
-             exact names sc.read_10x_mtx expects, then returns that directory
-             path.
-
-        Using copy (shutil.copy2) rather than rename is safe on re-runs —
-        if the canonical directory already exists and is complete, it is
-        returned immediately without re-copying.
-
-        Parameters
-        ----------
-        root : str
-            Root directory to search (the GSM supplementary directory).
-        gsm_id : str
-            The GSM accession string, used for informative print messages.
-
-        Returns
-        -------
-        str or None
-            Path to a directory containing canonical MTX triplet files,
-            or None if no complete triplet was found.
-        """
-        import shutil
-        import hashlib
-
-        # ── Role detection helpers ─────────────────────────────────────────
-        def _role(fname: str):
-            """Return 'matrix' | 'features' | 'barcodes' | None."""
-            fl = fname.lower()
-            if not (fl.endswith(".mtx.gz") or fl.endswith(".mtx")
-                    or fl.endswith(".tsv.gz") or fl.endswith(".tsv")):
-                return None
-            if fl.endswith(".mtx.gz") or fl.endswith(".mtx"):
-                if "matrix" in fl:
-                    return "matrix"
-            if fl.endswith(".tsv.gz") or fl.endswith(".tsv"):
-                if "barcodes" in fl:
-                    return "barcodes"
-                if "features" in fl or "genes" in fl:
-                    return "features"
-            return None
-
-        def _prefix(fname: str, role: str) -> str:
-            """
-            Extract the prefix part of the filename before the role keyword.
-            E.g. "GSM5354513_CID3586_matrix.mtx.gz" → "gsm5354513_cid3586_"
-            """
-            fl = fname.lower()
-            idx = fl.find(role)
-            return fl[:idx]
-
-        # ── Collect all candidate files ────────────────────────────────────
-        # Map: prefix → {role: absolute_path}
-        groups: dict = {}
-
-        for dirpath, _, filenames in os.walk(root):
-            for fname in filenames:
-                role = _role(fname)
-                if role is None:
-                    continue
-                pre  = _prefix(fname, role)
-                key  = os.path.join(dirpath, pre)   # unique per (dir, prefix)
-                if key not in groups:
-                    groups[key] = {}
-                # Keep first match per role (avoid duplicates from re-runs)
-                if role not in groups[key]:
-                    groups[key][role] = os.path.join(dirpath, fname)
-
-        # ── Find a complete triplet ────────────────────────────────────────
-        for key, roles in groups.items():
-            if not ("matrix" in roles and "barcodes" in roles and "features" in roles):
-                continue
-
-            # Build a stable canonical directory name from the key hash
-            tag      = hashlib.md5(key.encode()).hexdigest()[:8]
-            canon_dir = os.path.join(root, f"_canonical_{tag}")
-
-            # Canonical target filenames
-            def _canon_name(src_path: str, role: str) -> str:
-                ext = ".gz" if src_path.endswith(".gz") else ""
-                if role == "matrix":
-                    return f"matrix.mtx{ext}"
-                if role == "features":
-                    return f"features.tsv{ext}"
-                return f"barcodes.tsv{ext}"
-
-            # Check if already staged and complete
-            if os.path.isdir(canon_dir):
-                staged = os.listdir(canon_dir)
-                if len(staged) >= 3:
-                    return canon_dir    # already complete from a prior run
-
-            os.makedirs(canon_dir, exist_ok=True)
-
-            # Copy each file to its canonical name
-            for role, src_path in roles.items():
-                dst_name = _canon_name(src_path, role)
-                dst_path = os.path.join(canon_dir, dst_name)
-                if not os.path.exists(dst_path):
-                    shutil.copy2(src_path, dst_path)
-
-            print(f"  Staged prefix-named MTX triplet → {os.path.relpath(canon_dir, root)}")
-            return canon_dir
-
-        return None
-
     # ──────────────────────────────────────────────────────────────────────
 
     def _build_h5ad(self, gse_id, tumor_samples, save_single=False):
+
         if len(tumor_samples) == 0:
             return None
 
         gse_dir = os.path.join(self.base_dir, gse_id)
+
         print("\n========== Reading Tumor Samples ==========")
+
         adatas = []
 
         for gsm_id in tumor_samples:
+
             gsm_dir = os.path.join(gse_dir, gsm_id)
 
             if not os.path.isdir(gsm_dir):
@@ -859,60 +832,46 @@ class SampleAnnotator:
                     d for d in os.listdir(gse_dir)
                     if d.startswith(f"Supp_{gsm_id}")
                 ]
-                if supp_dirs:
+                if len(supp_dirs) > 0:
                     gsm_dir = os.path.join(gse_dir, supp_dirs[0])
                 else:
                     continue
 
-            # Extract any tarballs first
+            # ── Step 1: extract any tarballs present in gsm_dir ───────────
             self._extract_tarballs(gsm_dir)
+
+            files = os.listdir(gsm_dir)
 
             adata = None
 
-            # ── Tier 1: canonical layout ───────────────────────────────────
-            # Try to find a directory that already has canonical filenames,
-            # optionally after renaming prefix-free files.
+            # ── Step 2: locate the MTX triplet (may be in a sub-directory) ─
             mtx_dir = self._find_mtx_dir(gsm_dir)
-            if mtx_dir is not None:
-                self._rename_mtx_files(mtx_dir)
-                # Re-check after rename (in case rename just completed it)
-                mtx_dir = self._find_mtx_dir(gsm_dir)
 
             if mtx_dir is not None:
+                # Rename to canonical names expected by sc.read_10x_mtx
+                self._rename_mtx_files(mtx_dir)
+
                 try:
-                    print(f"Reading MTX matrix for {gsm_id} "
-                          f"(from {os.path.relpath(mtx_dir, gse_dir)})")
+                    print(f"Reading MTX matrix for {gsm_id} (from {os.path.relpath(mtx_dir, gse_dir)})")
                     adata = sc.read_10x_mtx(
-                        mtx_dir, var_names="gene_symbols", cache=False
+                        mtx_dir,
+                        var_names="gene_symbols",
+                        cache=False
                     )
                 except Exception as exc:
                     print(f"  MTX read failed for {gsm_id}: {exc}")
 
-            # ── Tier 2: prefix-named layout ────────────────────────────────
-            # Handles files like GSM5354513_CID3586_matrix.mtx.gz (GSE176078)
-            # or GSM4909278_B1-MH0033-matrix.mtx.gz (GSE161529) by staging
-            # them into a canonical temp directory.
+            # ── Step 3: fallback — generic CSV/TSV matrix ──────────────────
             if adata is None:
-                staged_dir = self._find_and_stage_prefix_named_mtx(gsm_dir, gsm_id)
-                if staged_dir is not None:
-                    try:
-                        print(f"Reading prefix-named MTX for {gsm_id} "
-                              f"(staged at {os.path.relpath(staged_dir, gse_dir)})")
-                        adata = sc.read_10x_mtx(
-                            staged_dir, var_names="gene_symbols", cache=False
-                        )
-                    except Exception as exc:
-                        print(f"  Staged MTX read failed for {gsm_id}: {exc}")
-
-            # ── Tier 3: generic CSV/TSV matrix ─────────────────────────────
-            if adata is None:
-                files = os.listdir(gsm_dir)
                 for f in files:
                     fl = f.lower()
+                    # Skip tarballs — they are not flat matrices
                     if fl.endswith(".tar.gz") or fl.endswith(".tar"):
                         continue
-                    if (any(fl.endswith(ext) for ext in [".tsv", ".csv", ".txt", ".gz"])
-                            and "matrix" in fl):
+                    if (
+                        any(fl.endswith(ext) for ext in [".tsv", ".csv", ".txt", ".gz"])
+                        and "matrix" in fl
+                    ):
                         file_path = os.path.join(gsm_dir, f)
                         print(f"Reading generic matrix for {gsm_id}: {f}")
                         adata = self._read_generic_matrix(file_path)
@@ -923,11 +882,12 @@ class SampleAnnotator:
                 print(f"Skipping {gsm_id} (no valid expression matrix found)")
                 continue
 
-            adata.obs["gsm_id"]    = gsm_id
-            adata.obs["gse_id"]    = gse_id
+            adata.obs["gsm_id"] = gsm_id
+            adata.obs["gse_id"] = gse_id
             adata.layers["counts"] = adata.X.copy()
-            adata.raw              = adata
+            adata.raw = adata
             adata.obs_names_make_unique()
+
             adatas.append(adata)
 
         if len(adatas) == 0:
@@ -939,11 +899,14 @@ class SampleAnnotator:
         print("... storing 'gsm_id' as categorical")
         print("... storing 'gse_id' as categorical")
 
-        combined.obs["gsm_id"]      = combined.obs["gsm_id"].astype("category")
-        combined.obs["gse_id"]      = combined.obs["gse_id"].astype("category")
+        combined.obs["gsm_id"] = combined.obs["gsm_id"].astype("category")
+        combined.obs["gse_id"] = combined.obs["gse_id"].astype("category")
+
+        # Store user-supplied cancer type
         combined.uns["cancer_type"] = self._user_cancer_type
         print(f"... stored cancer_type in h5ad: {self._user_cancer_type}")
 
+        # Store QC params
         self._store_qc_params(combined)
 
         if self.min_genes is not None or self.max_mt is not None:
@@ -954,6 +917,7 @@ class SampleAnnotator:
         if save_single:
             filename = f"{gse_id}_tumor.h5ad"
             combined.write(filename)
+
             print("\n========== h5ad created ==========")
             print(f"{filename} is created successfully")
 
