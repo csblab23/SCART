@@ -603,6 +603,65 @@ class SampleAnnotator:
 
     # ──────────────────────────────────────────────────────────────────────
 
+    def _download_gse_level_suppl(self, gse_id: str, gse_dir: str):
+        """
+        Download GSE-level supplementary files that GEOparse misses.
+
+        GEOparse.download_supplementary_files only fetches per-GSM files.
+        Some datasets (e.g. GSE161529) deposit shared files at the series
+        level — for example a single ``GSE161529_features.tsv.gz`` used by
+        all samples.  This method fetches those files directly from the
+        NCBI GEO FTP into *gse_dir* so that Tier 2.5 can find them.
+
+        The FTP listing is parsed for filenames that start with the GSE ID
+        (case-insensitive).  Files that already exist locally are skipped.
+        Network errors are caught and reported as warnings — a missing
+        GSE-level features file will still trigger the synthetic fallback
+        in Tier 2.5, so the pipeline remains functional.
+        """
+        import urllib.request, urllib.error, re
+
+        # GEO FTP path: series/GSE<nnn>nnn/GSE<id>/suppl/
+        series_stub = "GSE" + str(int(gse_id[3:]) // 1000) + "nnn"
+        ftp_base    = (
+            f"https://ftp.ncbi.nlm.nih.gov/geo/series/"
+            f"{series_stub}/{gse_id}/suppl/"
+        )
+
+        try:
+            with urllib.request.urlopen(ftp_base, timeout=30) as resp:
+                listing = resp.read().decode("utf-8", errors="replace")
+        except Exception as exc:
+            print(f"  Warning: could not fetch GSE-level FTP listing for "
+                  f"{gse_id}: {exc}")
+            return
+
+        # Extract filenames from the HTML/FTP directory listing.
+        # NCBI uses href="filename" links; we grab anything starting with
+        # the GSE accession (case-insensitive).
+        pattern = re.compile(
+            r'href="(' + re.escape(gse_id) + r'[^"]+)"',
+            re.IGNORECASE,
+        )
+        gse_files = pattern.findall(listing)
+
+        if not gse_files:
+            return  # Nothing to download
+
+        for fname in gse_files:
+            dest = os.path.join(gse_dir, fname)
+            if os.path.exists(dest):
+                continue  # Already downloaded
+
+            url = ftp_base + fname
+            print(f"  Downloading GSE-level supplementary file: {fname}")
+            try:
+                urllib.request.urlretrieve(url, dest)
+            except Exception as exc:
+                print(f"  Warning: failed to download {fname}: {exc}")
+
+    # ──────────────────────────────────────────────────────────────────────
+
     def _process_gse(self, gse_id):
         """
         Download a GEO series, classify each GSM, and return lists of
@@ -612,6 +671,10 @@ class SampleAnnotator:
         os.makedirs(gse_dir, exist_ok=True)
 
         gse = GEOparse.get_GEO(geo=gse_id, destdir=gse_dir)
+
+        # Fetch any GSE-level supplementary files (e.g. a shared features
+        # file) that GEOparse's per-GSM downloader would otherwise miss.
+        self._download_gse_level_suppl(gse_id, gse_dir)
 
         # Skip supplementary download if every GSM already has a local
         # directory (either GSM<id>/ or Supp_GSM<id>*/).  This prevents
@@ -1050,8 +1113,12 @@ class SampleAnnotator:
             if barcodes_path and features_path:
                 break
 
-        if barcodes_path is None or features_path is None:
-            return None  # Incomplete triplet — cannot stage
+        # If features/genes file is missing entirely, we will generate a
+        # synthetic placeholder after staging — see Step 3 below.
+        if barcodes_path is None:
+            return None  # No barcodes at all — cannot proceed
+
+        # features_path may be None here; handled in Step 3.
 
         # ── Step 3: stage the complete triplet into a canonical dir ───────
         tag       = hashlib.md5(matrix_path.encode()).hexdigest()[:8]
@@ -1066,14 +1133,41 @@ class SampleAnnotator:
 
         _copy_as_gz(matrix_path,   os.path.join(canon_dir, _CANON["matrix"]))
         _copy_as_gz(barcodes_path, os.path.join(canon_dir, _CANON["barcodes"]))
-        _copy_as_gz(features_path, os.path.join(canon_dir, _CANON["features"]))
+
+        if features_path is not None:
+            _copy_as_gz(features_path, os.path.join(canon_dir, _CANON["features"]))
+            features_note = os.path.relpath(features_path, gse_dir)
+        else:
+            # No features file found anywhere — generate a synthetic one.
+            # Row count is read from the MTX header (3rd token of the size line).
+            import scipy.io as _sio
+            import gzip as _gz
+            n_genes = None
+            try:
+                with _gz.open(matrix_path, "rt") as _mf:
+                    for _line in _mf:
+                        if _line.startswith("%"):
+                            continue
+                        n_genes = int(_line.split()[0])
+                        break
+            except Exception:
+                pass
+
+            feat_dst = os.path.join(canon_dir, _CANON["features"])
+            with _gz.open(feat_dst, "wt") as _ff:
+                if n_genes is not None:
+                    for _i in range(1, n_genes + 1):
+                        _ff.write(f"Gene{_i}\tGene{_i}\tGene Expression\n")
+                # If n_genes could not be determined, write an empty file;
+                # _read_10x_manual will fail gracefully and return None.
+            features_note = "(synthetic — not deposited in GEO)"
 
         print(
-            f"  Staged shared barcodes/features for {gsm_id} → "
+            f"  Staged MTX triplet for {gsm_id} → "
             f"{os.path.relpath(canon_dir, gse_dir)}"
             f"\n    matrix   : {os.path.relpath(matrix_path, gse_dir)}"
             f"\n    barcodes : {os.path.relpath(barcodes_path, gse_dir)}"
-            f"\n    features : {os.path.relpath(features_path, gse_dir)}"
+            f"\n    features : {features_note}"
         )
         return canon_dir
 
