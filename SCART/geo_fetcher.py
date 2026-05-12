@@ -675,6 +675,64 @@ class SampleAnnotator:
 
     # ──────────────────────────────────────────────────────────────────────
 
+    def _download_missing_gsm_suppl(self, gse, gse_dir: str):
+        """
+        Re-scan every GSM's supplementary_file_* metadata and download any
+        files that GEOparse's download_supplementary_files missed.
+
+        GEOparse silently skips supplementary files beyond the first one in
+        some datasets (e.g. GSE161529 where each GSM has both a barcodes file
+        and a matrix file registered under supplementary_file_1 /
+        supplementary_file_2).  This method iterates over all registered URLs
+        and fetches any that are not yet present on disk.
+
+        Files are placed in the same Supp_<GSM>_* directory that GEOparse
+        already created (or would create), mirroring GEOparse's layout so
+        that the existing tier logic finds them without any changes.
+        """
+        import urllib.request
+
+        for gsm_id, gsm in gse.gsms.items():
+
+            # Collect all supplementary file URLs from metadata
+            urls = []
+            for key, val in gsm.metadata.items():
+                if key.startswith("supplementary_file") and val:
+                    urls.extend(val)
+
+            if not urls:
+                continue
+
+            # Find the existing Supp_<GSM>_* directory for this sample
+            supp_dirs = [
+                d for d in os.listdir(gse_dir)
+                if d.startswith(f"Supp_{gsm_id}")
+                   and os.path.isdir(os.path.join(gse_dir, d))
+            ]
+            if not supp_dirs:
+                continue  # Directory not created yet — GEOparse will handle it
+
+            gsm_supp_dir = os.path.join(gse_dir, supp_dirs[0])
+
+            for url in urls:
+                url = url.strip()
+                if not url or url == "NONE":
+                    continue
+
+                fname = url.split("/")[-1]
+                dest  = os.path.join(gsm_supp_dir, fname)
+
+                if os.path.exists(dest):
+                    continue  # Already present
+
+                print(f"  Downloading missing supplementary file: {gsm_id}/{fname}")
+                try:
+                    urllib.request.urlretrieve(url, dest)
+                except Exception as exc:
+                    print(f"  Warning: failed to download {fname} for {gsm_id}: {exc}")
+
+    # ──────────────────────────────────────────────────────────────────────
+
     def _process_gse(self, gse_id):
         """
         Download a GEO series, classify each GSM, and return lists of
@@ -705,6 +763,11 @@ class SampleAnnotator:
             print(f"  Supplementary files already present for {gse_id} — skipping download.")
         else:
             gse.download_supplementary_files(gse_dir)
+
+        # GEOparse sometimes only downloads supplementary_file_1 and silently
+        # skips supplementary_file_2, _3, etc.  Re-scan all GSM metadata and
+        # fetch any registered files that are still missing from disk.
+        self._download_missing_gsm_suppl(gse, gse_dir)
 
         normal      = []
         tumor       = []
