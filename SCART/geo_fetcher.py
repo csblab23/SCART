@@ -983,14 +983,31 @@ class SampleAnnotator:
             return None
 
         # ── Step 1: find matrix file inside the GSM dir tree ─────────────
-        matrix_path = None
+        # When gsm_dir is a shared GSE-level directory (multiple samples'
+        # files coexist), prefer a matrix file whose name contains the GSM ID.
+        # Fall back to the first matrix found only when in a dedicated dir.
+        matrix_path     = None
+        matrix_path_any = None  # first matrix found regardless of GSM match
+        gsm_id_lower    = gsm_id.lower()
+
         for dirpath, _, filenames in os.walk(gsm_dir):
             for fname in filenames:
-                if _is_role(fname, "matrix"):
-                    matrix_path = os.path.join(dirpath, fname)
+                if not _is_role(fname, "matrix"):
+                    continue
+                full_path = os.path.join(dirpath, fname)
+                if gsm_id_lower in fname.lower():
+                    matrix_path = full_path
                     break
+                if matrix_path_any is None:
+                    matrix_path_any = full_path
             if matrix_path:
                 break
+
+        # Use GSM-matched path; fall back to any matrix only when gsm_dir is
+        # a dedicated per-GSM directory (not a shared GSE-level dir).
+        if matrix_path is None and matrix_path_any is not None:
+            if os.path.normpath(gsm_dir) != os.path.normpath(gse_dir):
+                matrix_path = matrix_path_any
 
         if matrix_path is None:
             return None  # No matrix at all — nothing to do
@@ -1138,14 +1155,41 @@ class SampleAnnotator:
             gsm_dir = os.path.join(gse_dir, gsm_id)
 
             if not os.path.isdir(gsm_dir):
+                # Priority 1: dedicated per-GSM supplement directory
                 supp_dirs = [
                     d for d in os.listdir(gse_dir)
                     if d.startswith(f"Supp_{gsm_id}")
+                       and os.path.isdir(os.path.join(gse_dir, d))
                 ]
                 if len(supp_dirs) > 0:
                     gsm_dir = os.path.join(gse_dir, supp_dirs[0])
                 else:
-                    continue
+                    # Priority 2: GSE-level layout — some datasets deposit all
+                    # sample files in a single shared supplement directory
+                    # (e.g. Supp_GSE161529_*/) rather than per-sample dirs.
+                    # Use gse_dir as the search root; Tier 2.5 will locate the
+                    # per-GSM matrix by scanning for filenames that contain the
+                    # GSM ID, and will pair it with shared barcodes/features.
+                    gse_supp_dirs = [
+                        os.path.join(gse_dir, d)
+                        for d in os.listdir(gse_dir)
+                        if os.path.isdir(os.path.join(gse_dir, d))
+                           and not d.startswith("Supp_GSM")   # exclude other GSMs' dirs
+                    ]
+                    # Check whether any GSE-level dir contains a file for this GSM
+                    found_gse_dir = None
+                    for candidate in [gse_dir] + gse_supp_dirs:
+                        try:
+                            files_here = os.listdir(candidate)
+                        except OSError:
+                            continue
+                        if any(gsm_id.lower() in f.lower() for f in files_here):
+                            found_gse_dir = candidate
+                            break
+                    if found_gse_dir is not None:
+                        gsm_dir = found_gse_dir
+                    else:
+                        continue
 
             # ── Step 1: extract any tarballs present in gsm_dir ───────────
             self._extract_tarballs(gsm_dir)
