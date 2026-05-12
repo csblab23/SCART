@@ -648,7 +648,20 @@ class SampleAnnotator:
         if not gse_files:
             return  # Nothing to download
 
+        # Only download lightweight shared reference files — features/genes/
+        # barcodes TSVs that are deposited once for the whole series.
+        # Explicitly skip _RAW.tar bundles (huge, duplicate per-sample data)
+        # and any other large archives.
+        def _is_shared_ref(fname: str) -> bool:
+            fl = fname.lower()
+            if fl.endswith("_raw.tar") or fl.endswith(".tar") or fl.endswith(".tar.gz"):
+                return False
+            return any(kw in fl for kw in ("features", "genes", "barcodes", "cell_types", "metadata"))
+
         for fname in gse_files:
+            if not _is_shared_ref(fname):
+                continue  # Skip large archives and non-reference files
+
             dest = os.path.join(gse_dir, fname)
             if os.path.exists(dest):
                 continue  # Already downloaded
