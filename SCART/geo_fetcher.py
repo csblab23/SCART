@@ -681,6 +681,17 @@ class SampleAnnotator:
     # ──────────────────────────────────────────────────────────────────────
 
     def _read_generic_matrix(self, file_path):
+        """
+        Read a generic CSV/TSV expression matrix.
+
+        IMPORTANT: .mtx / .mtx.gz files are NOT accepted here — they are
+        binary Matrix Market format and must be handled by the MTX readers
+        (Tiers 1 / 2 / 2.5).  Passing an MTX to this method will always
+        fail gracefully and return None.
+        """
+        # Guard: reject MTX files — they are not CSV/TSV
+        if file_path.lower().endswith(".mtx") or file_path.lower().endswith(".mtx.gz"):
+            return None
 
         try:
             if file_path.endswith(".gz"):
@@ -848,11 +859,13 @@ class SampleAnnotator:
 
         def _copy_as_gz(src_path: str, dst_path: str):
             """Copy src to dst as gzip, compressing on-the-fly if needed."""
+            import shutil as _sh
             if src_path.endswith(".gz"):
-                shutil.copy2(src_path, dst_path)
+                _sh.copy2(src_path, dst_path)
             else:
-                with open(src_path, "rb") as f_in,                         gzip.open(dst_path, "wb") as f_out:
-                    shutil.copyfileobj(f_in, f_out)
+                with open(src_path, "rb") as f_in, \
+                        gzip.open(dst_path, "wb") as f_out:
+                    _sh.copyfileobj(f_in, f_out)
 
         groups: dict = {}
         for dirpath, _, filenames in os.walk(root):
@@ -895,6 +908,157 @@ class SampleAnnotator:
             return canon_dir
 
         return None
+
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _find_and_stage_shared_barcodes_features(
+        self, gsm_dir: str, gse_dir: str, gsm_id: str
+    ):
+        """
+        Tier 2.5 — shared barcodes/features handler.
+
+        Some GEO datasets (e.g. GSE161529) ship a single shared
+        ``barcodes.tsv.gz`` and ``features.tsv.gz`` / ``genes.tsv.gz`` at
+        the GSE level (or in a sibling directory), while each per-sample
+        supplement only contains its own ``<prefix>-matrix.mtx.gz``.
+
+        This method:
+
+        1. Searches the GSM directory tree for a matrix file
+           (``*matrix*.mtx.gz`` or ``*matrix*.mtx``).
+
+        2. If found, searches upward from *gsm_dir* through *gse_dir* and
+           all immediate siblings of *gsm_dir* for barcodes and features
+           files — accepting both canonical bare names and any
+           prefix-named variants.
+
+        3. If a complete triplet is assembled across directories, all three
+           files are staged (gzip-copied) into a canonical subdirectory
+           inside *gsm_dir* and the path is returned.
+
+        This handles the pattern where barcodes and features are shared
+        across all samples in a series but each sample has its own matrix.
+
+        Returns
+        -------
+        str or None
+        """
+        import shutil, hashlib
+
+        _CANON = {
+            "matrix":   "matrix.mtx.gz",
+            "features": "features.tsv.gz",
+            "barcodes": "barcodes.tsv.gz",
+        }
+
+        def _copy_as_gz(src_path: str, dst_path: str):
+            import shutil as _sh
+            if src_path.endswith(".gz"):
+                _sh.copy2(src_path, dst_path)
+            else:
+                with open(src_path, "rb") as f_in, \
+                        gzip.open(dst_path, "wb") as f_out:
+                    _sh.copyfileobj(f_in, f_out)
+
+        def _is_role(fname: str, role: str) -> bool:
+            fl = fname.lower()
+            if role == "matrix":
+                return ("matrix" in fl and
+                        (fl.endswith(".mtx.gz") or fl.endswith(".mtx")))
+            if role == "barcodes":
+                return ("barcodes" in fl and
+                        (fl.endswith(".tsv.gz") or fl.endswith(".tsv")))
+            if role == "features":
+                return (("features" in fl or "genes" in fl) and
+                        (fl.endswith(".tsv.gz") or fl.endswith(".tsv")))
+            return False
+
+        def _find_role_in_dir(directory: str, role: str):
+            """Return first matching file path for *role* in *directory*."""
+            if not os.path.isdir(directory):
+                return None
+            for fname in os.listdir(directory):
+                if _is_role(fname, role):
+                    return os.path.join(directory, fname)
+            return None
+
+        # ── Step 1: find matrix file inside the GSM dir tree ─────────────
+        matrix_path = None
+        for dirpath, _, filenames in os.walk(gsm_dir):
+            for fname in filenames:
+                if _is_role(fname, "matrix"):
+                    matrix_path = os.path.join(dirpath, fname)
+                    break
+            if matrix_path:
+                break
+
+        if matrix_path is None:
+            return None  # No matrix at all — nothing to do
+
+        # ── Step 2: search for barcodes & features in candidate dirs ──────
+        # Search order:
+        #   a) same directory as the matrix file
+        #   b) gsm_dir itself (if matrix is in a subdirectory)
+        #   c) gse_dir (shared at series level)
+        #   d) all immediate subdirectories of gse_dir (sibling samples /
+        #      shared data directories deposited alongside sample dirs)
+        matrix_dir = os.path.dirname(matrix_path)
+        candidate_dirs = []
+
+        # Always try the matrix's own directory first
+        candidate_dirs.append(matrix_dir)
+
+        # Then the GSM root (if different from the matrix dir)
+        if gsm_dir != matrix_dir:
+            candidate_dirs.append(gsm_dir)
+
+        # Then the GSE root and its immediate children
+        candidate_dirs.append(gse_dir)
+        try:
+            for entry in os.listdir(gse_dir):
+                entry_path = os.path.join(gse_dir, entry)
+                if os.path.isdir(entry_path) and entry_path not in candidate_dirs:
+                    candidate_dirs.append(entry_path)
+        except OSError:
+            pass
+
+        barcodes_path = None
+        features_path = None
+
+        for cdir in candidate_dirs:
+            if barcodes_path is None:
+                barcodes_path = _find_role_in_dir(cdir, "barcodes")
+            if features_path is None:
+                features_path = _find_role_in_dir(cdir, "features")
+            if barcodes_path and features_path:
+                break
+
+        if barcodes_path is None or features_path is None:
+            return None  # Incomplete triplet — cannot stage
+
+        # ── Step 3: stage the complete triplet into a canonical dir ───────
+        tag       = hashlib.md5(matrix_path.encode()).hexdigest()[:8]
+        canon_dir = os.path.join(gsm_dir, f"_canonical_shared_{tag}")
+
+        if os.path.isdir(canon_dir):
+            staged = set(os.listdir(canon_dir))
+            if all(v in staged for v in _CANON.values()):
+                return canon_dir  # Already complete — reuse
+
+        os.makedirs(canon_dir, exist_ok=True)
+
+        _copy_as_gz(matrix_path,   os.path.join(canon_dir, _CANON["matrix"]))
+        _copy_as_gz(barcodes_path, os.path.join(canon_dir, _CANON["barcodes"]))
+        _copy_as_gz(features_path, os.path.join(canon_dir, _CANON["features"]))
+
+        print(
+            f"  Staged shared barcodes/features for {gsm_id} → "
+            f"{os.path.relpath(canon_dir, gse_dir)}"
+            f"\n    matrix   : {os.path.relpath(matrix_path, gse_dir)}"
+            f"\n    barcodes : {os.path.relpath(barcodes_path, gse_dir)}"
+            f"\n    features : {os.path.relpath(features_path, gse_dir)}"
+        )
+        return canon_dir
 
     # ──────────────────────────────────────────────────────────────────────
 
@@ -1002,7 +1166,7 @@ class SampleAnnotator:
                     )
                 except (SystemExit, Exception) as exc:
                     print(f"  sc.read_10x_mtx failed ({type(exc).__name__}) "
-                          f"\u2014 trying manual reader for {gsm_id}")
+                          f"— trying manual reader for {gsm_id}")
                     adata = self._read_10x_manual(mtx_dir)
                     if adata is None:
                         print(f"  Manual read also failed for {gsm_id}")
@@ -1022,17 +1186,46 @@ class SampleAnnotator:
                         )
                     except (SystemExit, Exception) as exc:
                         print(f"  sc.read_10x_mtx failed ({type(exc).__name__}) "
-                              f"\u2014 trying manual reader for {gsm_id}")
+                              f"— trying manual reader for {gsm_id}")
+                        adata = self._read_10x_manual(staged_dir)
+                        if adata is None:
+                            print(f"  Manual read also failed for {gsm_id}")
+
+            # ── Tier 2.5: shared barcodes/features layout ──────────────────
+            # Handles GEO datasets where barcodes.tsv.gz and features.tsv.gz
+            # are deposited once at the GSE level (shared across all samples)
+            # while each per-sample supplement contains only its matrix file.
+            # The three files may come from different directories; this tier
+            # assembles them into a canonical staging directory.
+            if adata is None:
+                staged_dir = self._find_and_stage_shared_barcodes_features(
+                    gsm_dir, gse_dir, gsm_id
+                )
+                if staged_dir is not None:
+                    try:
+                        print(f"Reading shared-barcodes MTX for {gsm_id} "
+                              f"(staged at {os.path.relpath(staged_dir, gse_dir)})")
+                        adata = sc.read_10x_mtx(
+                            staged_dir, var_names="gene_symbols", cache=False
+                        )
+                    except (SystemExit, Exception) as exc:
+                        print(f"  sc.read_10x_mtx failed ({type(exc).__name__}) "
+                              f"— trying manual reader for {gsm_id}")
                         adata = self._read_10x_manual(staged_dir)
                         if adata is None:
                             print(f"  Manual read also failed for {gsm_id}")
 
             # ── Tier 3: generic CSV/TSV matrix ─────────────────────────────
+            # Last resort for non-10x formats (CSV/TSV expression tables).
+            # MTX files are explicitly excluded — they must be handled above.
             if adata is None:
                 files = os.listdir(gsm_dir)
                 for f in files:
                     fl = f.lower()
                     if fl.endswith(".tar.gz") or fl.endswith(".tar"):
+                        continue
+                    # Skip MTX files — they are binary and not CSV/TSV
+                    if fl.endswith(".mtx") or fl.endswith(".mtx.gz"):
                         continue
                     if (any(fl.endswith(ext) for ext in [".tsv", ".csv", ".txt", ".gz"])
                             and "matrix" in fl):
