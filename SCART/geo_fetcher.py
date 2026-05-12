@@ -898,6 +898,66 @@ class SampleAnnotator:
 
     # ──────────────────────────────────────────────────────────────────────
 
+    def _read_10x_manual(self, mtx_dir: str):
+        """
+        Manual 10x MTX reader — fallback when sc.read_10x_mtx fails.
+
+        Handles CellRanger v2 (genes.tsv, 2-column) and v3 (features.tsv,
+        3-column) formats, both compressed (.gz) and plain.  sc.read_10x_mtx
+        calls sys.exit(1) on v2 files when var_names="gene_symbols" because
+        it expects a third type column — this method avoids that entirely.
+
+        Parameters
+        ----------
+        mtx_dir : str
+            Directory containing matrix.mtx.gz, barcodes.tsv.gz, and
+            features.tsv.gz or genes.tsv.gz.
+
+        Returns
+        -------
+        AnnData or None
+        """
+        import scipy.io as sio2
+        import pandas as pd
+
+        files = set(os.listdir(mtx_dir))
+
+        mtx_f = next((f for f in files if f == "matrix.mtx.gz"), None)
+        bar_f = next((f for f in files if f == "barcodes.tsv.gz"), None)
+        gen_f = next((f for f in files
+                      if f in ("features.tsv.gz", "genes.tsv.gz")), None)
+
+        if not all([mtx_f, bar_f, gen_f]):
+            return None
+
+        try:
+            with gzip.open(os.path.join(mtx_dir, mtx_f)) as f:
+                X = sio2.mmread(f).T.tocsr()
+
+            with gzip.open(os.path.join(mtx_dir, bar_f), "rt") as f:
+                barcodes = [l.strip() for l in f if l.strip()]
+
+            with gzip.open(os.path.join(mtx_dir, gen_f), "rt") as f:
+                lines = [l.strip().split("\t") for l in f if l.strip()]
+
+            # Support 1-col, 2-col (v2), and 3-col (v3) features files
+            gene_ids   = [l[0] for l in lines]
+            gene_names = [l[1] if len(l) > 1 else l[0] for l in lines]
+
+            var = pd.DataFrame(
+                {"gene_ids": gene_ids, "gene_symbols": gene_names},
+                index=gene_names
+            )
+            obs = pd.DataFrame(index=barcodes)
+
+            return ad.AnnData(X=X, obs=obs, var=var)
+
+        except Exception as exc:
+            print(f"    Manual MTX read error: {exc}")
+            return None
+
+    # ──────────────────────────────────────────────────────────────────────
+
     def _build_h5ad(self, gse_id, tumor_samples, save_single=False):
 
         if len(tumor_samples) == 0:
@@ -940,8 +1000,12 @@ class SampleAnnotator:
                     adata = sc.read_10x_mtx(
                         mtx_dir, var_names="gene_symbols", cache=False
                     )
-                except Exception as exc:
-                    print(f"  MTX read failed for {gsm_id}: {exc}")
+                except (SystemExit, Exception) as exc:
+                    print(f"  sc.read_10x_mtx failed ({type(exc).__name__}) "
+                          f"\u2014 trying manual reader for {gsm_id}")
+                    adata = self._read_10x_manual(mtx_dir)
+                    if adata is None:
+                        print(f"  Manual read also failed for {gsm_id}")
 
             # ── Tier 2: prefix-named layout ────────────────────────────────
             # Handles files like CID3586_matrix.mtx.gz (GSE176078) or
@@ -956,8 +1020,12 @@ class SampleAnnotator:
                         adata = sc.read_10x_mtx(
                             staged_dir, var_names="gene_symbols", cache=False
                         )
-                    except Exception as exc:
-                        print(f"  Staged MTX read failed for {gsm_id}: {exc}")
+                    except (SystemExit, Exception) as exc:
+                        print(f"  sc.read_10x_mtx failed ({type(exc).__name__}) "
+                              f"\u2014 trying manual reader for {gsm_id}")
+                        adata = self._read_10x_manual(staged_dir)
+                        if adata is None:
+                            print(f"  Manual read also failed for {gsm_id}")
 
             # ── Tier 3: generic CSV/TSV matrix ─────────────────────────────
             if adata is None:
