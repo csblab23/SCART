@@ -1468,6 +1468,61 @@ class SampleAnnotator:
                         if adata is not None:
                             break
 
+            # ── Tier 4: HDF5 / CellRanger .h5 ────────────────────────────
+            # CellRanger outputs filtered_feature_bc_matrix.h5 or
+            # raw_feature_bc_matrix.h5 — readable with sc.read_10x_h5().
+            # Also handles generic .h5 / .hdf5 files via sc.read_hdf5().
+            if adata is None:
+                files = os.listdir(gsm_dir)
+                for f in sorted(files):   # sorted: prefer filtered over raw
+                    fl = f.lower()
+                    if fl.endswith(".h5") or fl.endswith(".hdf5"):
+                        file_path = os.path.join(gsm_dir, f)
+                        print(f"Reading H5 file for {gsm_id}: {f}")
+                        try:
+                            adata = sc.read_10x_h5(file_path)
+                        except Exception:
+                            try:
+                                adata = sc.read_hdf5(file_path)
+                            except Exception as exc:
+                                print(f"  H5 read failed for {gsm_id}: {exc}")
+                                adata = None
+                        if adata is not None:
+                            break
+
+            # ── Tier 5: Loom ──────────────────────────────────────────────
+            # Loom is a HDF5-based format used by some pipelines (velocyto,
+            # STARsolo).  sc.read_loom() handles it natively.
+            if adata is None:
+                files = os.listdir(gsm_dir)
+                for f in files:
+                    if f.lower().endswith(".loom"):
+                        file_path = os.path.join(gsm_dir, f)
+                        print(f"Reading Loom file for {gsm_id}: {f}")
+                        try:
+                            adata = sc.read_loom(file_path)
+                        except Exception as exc:
+                            print(f"  Loom read failed for {gsm_id}: {exc}")
+                            adata = None
+                        if adata is not None:
+                            break
+
+            # ── Tier 6: H5AD ─────────────────────────────────────────────
+            # Some GEO deposits provide pre-built AnnData .h5ad files.
+            if adata is None:
+                files = os.listdir(gsm_dir)
+                for f in files:
+                    if f.lower().endswith(".h5ad"):
+                        file_path = os.path.join(gsm_dir, f)
+                        print(f"Reading H5AD file for {gsm_id}: {f}")
+                        try:
+                            adata = sc.read_h5ad(file_path)
+                        except Exception as exc:
+                            print(f"  H5AD read failed for {gsm_id}: {exc}")
+                            adata = None
+                        if adata is not None:
+                            break
+
             if adata is None:
                 print(f"Skipping {gsm_id} (no valid expression matrix found)")
                 continue
