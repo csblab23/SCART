@@ -84,6 +84,25 @@ DISEASE_TUMOR_KEYWORDS = [
     "melanoma", "sarcoma", "blastoma",
     "hepatocellular", "cholangiocarcinoma",
     "seminoma", "teratoma",
+
+    # ── Breast cancer molecular subtypes & staging ───────────────────────
+    "tnbc", "triple negative",
+    "her2+", "her2-positive", "her2 positive",
+    "er+", "er-positive", "er positive",
+    "pr+", "pr-positive", "pr positive",
+    "luminal a", "luminal b",
+    "dcis", "invasive ductal", "invasive lobular",
+
+    # ── TNM staging — any T/N/M notation indicates a cancer patient ──────
+    # Matches t1, t2, t3, t4 followed by n and m notation e.g. t2n1m0
+    "t1n", "t2n", "t3n", "t4n",
+    "tnm stage",
+
+    # ── Other clinical cancer terms ───────────────────────────────────────
+    "relapsed", "refractory", "recurrent",
+    "post-treatment", "post treatment",
+    "residual disease", "pathologic complete response",
+    "overall survival", "disease-free survival",
 ]
 
 
