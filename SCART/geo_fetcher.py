@@ -1,3 +1,5 @@
+python
+
 import GEOparse
 import os
 import tarfile
@@ -1358,50 +1360,52 @@ class SampleAnnotator:
             print(f"    Manual MTX read error: {exc}")
             return None
 
-    # ─────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────────────────
 
-def _read_h5_gz(self, file_path: str):
-    """
-    Tier 4.5 — gzip-compressed HDF5 handler.
+    def _read_h5_gz(self, file_path: str):
+        """
+        Tier 4.5 — gzip-compressed HDF5 handler.
 
-    GEO occasionally deposits CellRanger HDF5 files with an extra .gz
-    layer (e.g. *_raw_gene_bc_matrices_h5.h5.gz).  sc.read_10x_h5 cannot
-    read these directly; this method decompresses to a temp file first,
-    then delegates to sc.read_10x_h5 / sc.read_hdf5.
+        GEO occasionally deposits CellRanger HDF5 files with an extra .gz
+        layer (e.g. *_raw_gene_bc_matrices_h5.h5.gz).  sc.read_10x_h5 cannot
+        read these directly; this method decompresses to a temp file first,
+        then delegates to sc.read_10x_h5 / sc.read_hdf5.
 
-    Returns
-    -------
-    AnnData or None
-    """
-    import tempfile, shutil
-
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp:
-            tmp_path = tmp.name
-
-        with gzip.open(file_path, "rb") as f_in, \
-             open(tmp_path, "wb") as f_out:
-            shutil.copyfileobj(f_in, f_out)
+        Returns
+        -------
+        AnnData or None
+        """
+        import tempfile, shutil
 
         try:
-            adata = sc.read_10x_h5(tmp_path)
-        except Exception:
+            with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp:
+                tmp_path = tmp.name
+
+            with gzip.open(file_path, "rb") as f_in, \
+                 open(tmp_path, "wb") as f_out:
+                shutil.copyfileobj(f_in, f_out)
+
             try:
-                adata = sc.read_hdf5(tmp_path)
-            except Exception as exc:
-                print(f"    H5.gz read failed: {exc}")
-                adata = None
+                adata = sc.read_10x_h5(tmp_path)
+            except Exception:
+                try:
+                    adata = sc.read_hdf5(tmp_path)
+                except Exception as exc:
+                    print(f"    H5.gz read failed: {exc}")
+                    adata = None
 
-        return adata
+            return adata
 
-    except Exception as exc:
-        print(f"    H5.gz decompress failed: {exc}")
-        return None
-    finally:
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"    H5.gz decompress failed: {exc}")
+            return None
+        finally:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+    # ──────────────────────────────────────────────────────────────────────
 
     def _build_h5ad(self, gse_id, tumor_samples, save_single=False):
 
@@ -1580,7 +1584,7 @@ def _read_h5_gz(self, file_path: str):
                         adata = self._read_h5_gz(file_path)
                         if adata is not None:
                             break
-                            
+
             # ── Tier 5: Loom ──────────────────────────────────────────────
             # Loom is a HDF5-based format used by some pipelines (velocyto,
             # STARsolo).  sc.read_loom() handles it natively.
