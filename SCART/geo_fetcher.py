@@ -1295,9 +1295,28 @@ class SampleAnnotator:
             gene_ids   = [l[0] for l in lines]
             gene_names = [l[1] if len(l) > 1 else l[0] for l in lines]
 
+            # Make var index unique — duplicate gene symbols occur in
+            # CellRanger v2 genes.tsv files and cause ad.concat to crash.
+            # Strategy: use gene_ids (Ensembl) as the primary index since
+            # those are unique; fall back to disambiguating gene_names if
+            # gene_ids are also duplicated (rare but possible).
+            if len(set(gene_ids)) == len(gene_ids):
+                var_index = gene_ids
+            else:
+                # Disambiguate by appending a counter to duplicates
+                seen = {}
+                var_index = []
+                for gid in gene_ids:
+                    if gid in seen:
+                        seen[gid] += 1
+                        var_index.append(f"{gid}.{seen[gid]}")
+                    else:
+                        seen[gid] = 0
+                        var_index.append(gid)
+
             var = pd.DataFrame(
                 {"gene_ids": gene_ids, "gene_symbols": gene_names},
-                index=gene_names
+                index=var_index
             )
             obs = pd.DataFrame(index=barcodes)
 
@@ -1442,7 +1461,7 @@ class SampleAnnotator:
                     if fl.endswith(".mtx") or fl.endswith(".mtx.gz"):
                         continue
                     if (any(fl.endswith(ext) for ext in [".tsv", ".csv", ".txt", ".gz"])
-                            and "matrix" in fl):
+                            and ("matrix" in fl or "counts" in fl or "count" in fl)):
                         file_path = os.path.join(gsm_dir, f)
                         print(f"Reading generic matrix for {gsm_id}: {f}")
                         adata = self._read_generic_matrix(file_path)
@@ -1464,7 +1483,31 @@ class SampleAnnotator:
         if len(adatas) == 0:
             return None
 
-        combined = ad.concat(adatas, join="outer")
+        try:
+            combined = ad.concat(adatas, join="outer")
+        except Exception as exc:
+            # Duplicate var (gene) names across samples prevent concat.
+            # Make every adata's var_names unique before retrying.
+            print(f"  Warning: ad.concat failed ({type(exc).__name__}: {exc})")
+            print("  Retrying after making var_names unique per sample...")
+            for _a in adatas:
+                if not _a.var_names.is_unique:
+                    seen = {}
+                    new_idx = []
+                    for v in _a.var_names:
+                        if v in seen:
+                            seen[v] += 1
+                            new_idx.append(f"{v}.{seen[v]}")
+                        else:
+                            seen[v] = 0
+                            new_idx.append(v)
+                    _a.var_names = new_idx
+            try:
+                combined = ad.concat(adatas, join="outer")
+            except Exception as exc2:
+                print(f"  Warning: concat still failed after deduplication: {exc2}")
+                print("  Skipping this GSE — no h5ad will be written.")
+                return None
         combined.obs_names_make_unique()
 
         print("... storing 'gsm_id' as categorical")
