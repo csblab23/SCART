@@ -1,5 +1,3 @@
-python
-
 import GEOparse
 import os
 import tarfile
