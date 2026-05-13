@@ -541,62 +541,80 @@ class SampleAnnotator:
     # GEO processing
     # ──────────────────────────────────────────────────────────────────────
 
-    def _classify_gsm(self, text: str):
+    def _classify_gsm(self, gsm):
         """
-        Classify a single GSM based on its full metadata text.
+        Classify a single GSM as normal / tumor / unspecified.
+
+        Two-pass strategy
+        -----------------
+        Pass 1 — per-sample fields (title, source_name, characteristics)
+            These describe THIS sample specifically and are checked first.
+            If a normal keyword is found here AND no disease keyword is
+            present in the same fields, the sample is labelled **normal**
+            immediately — series-level disease text cannot override it.
+
+        Pass 2 — full metadata text (fallback)
+            Used only when Pass 1 finds no normal signal.  The full text
+            blob (all metadata fields joined) is scanned with the same
+            keyword sets.  This catches datasets where the sample type is
+            described only in the series summary or protocol fields, and
+            preserves the original behaviour for tumor / unspecified
+            classification.
 
         Classification order (first match wins)
         ----------------------------------------
-        1. **normal**      – metadata clearly describes a non-malignant /
-                             healthy / control sample AND contains no disease
-                             keyword that would indicate it is a patient
-                             tumour sample with co-mentioned normal tissue.
-        2. **tumor**       – contains any tumour or disease-specific keyword
-                             from DISEASE_TUMOR_KEYWORDS (covers both generic
-                             terms like "tumor" and haematological terms like
-                             "aml", "leukemia", "myeloma", etc.).
-                             This label is also assigned to patient samples
-                             from therapeutic / CAR-T trial contexts —
-                             "relapsed", "refractory", "post-treatment" etc.
-                             describe the *patient's disease state*, not the
-                             sample type, so they belong in the tumour bucket.
-        3. **unspecified** – neither group matched.
+        1. Per-sample fields contain a normal keyword AND no disease
+           keyword → **normal**
+        2. Full text contains a disease keyword → **tumor**
+        3. Full text contains a normal keyword AND no disease keyword
+           → **normal**
+        4. Neither → **unspecified**
 
-        Design note — no therapeutic exclusion
-        ----------------------------------------
-        Earlier versions of this classifier excluded samples labelled as
-        "therapeutic" or "CAR-T product".  This was too aggressive: patient
-        bone-marrow or blood samples from CAR-T trials describe their disease
-        state using terms like "relapsed-refractory" which was incorrectly
-        caught by the exclusion filter.  Therapeutic exclusion has been removed
-        entirely.  All patient samples from disease contexts are classified as
-        tumor so that downstream modules receive the full dataset.
+        Design note
+        -----------
+        Blood / PBMC / immune samples from cancer patients are NOT
+        excluded here — for blood cancers (AML, CLL, lymphoma etc.)
+        those ARE the tumour samples.  Users who wish to exclude
+        specific GSM IDs can filter the returned lists before
+        passing them downstream.
 
         Returns
         -------
         "normal" | "tumor" | "unspecified"
         """
-        # ── Normal / control keywords ──────────────────────────────────────
-        # A sample is only labelled normal when it contains a normal keyword
-        # AND contains none of the disease keywords, preventing cases where
-        # "adjacent normal" or "control" appears alongside a disease label.
         normal_keywords = [
             "normal", "healthy", "control", "adjacent normal",
             "non-tumor", "non-tumour", "non-cancer",
             "benign", "non-malignant",
         ]
 
-        has_normal_kw  = any(k in text for k in normal_keywords)
-        has_disease_kw = any(k in text for k in DISEASE_TUMOR_KEYWORDS)
+        # ── Pass 1: per-sample fields only ────────────────────────────────
+        per_sample_fields = ["title", "source_name_ch1", "characteristics_ch1"]
+        per_sample_text = " ".join(
+            " ".join(gsm.metadata.get(f, []))
+            for f in per_sample_fields
+        ).lower()
 
-        if has_normal_kw and not has_disease_kw:
+        has_normal_kw_ps  = any(k in per_sample_text for k in normal_keywords)
+        has_disease_kw_ps = any(k in per_sample_text for k in DISEASE_TUMOR_KEYWORDS)
+
+        # Normal signal in per-sample fields with no disease signal in
+        # those same fields → label as normal regardless of series text.
+        if has_normal_kw_ps and not has_disease_kw_ps:
             return "normal"
 
-        if has_disease_kw:
+        # ── Pass 2: full metadata text ────────────────────────────────────
+        full_text = " ".join(
+            [str(v) for v in gsm.metadata.values()]
+        ).lower()
+
+        has_disease_kw_full = any(k in full_text for k in DISEASE_TUMOR_KEYWORDS)
+        has_normal_kw_full  = any(k in full_text for k in normal_keywords)
+
+        if has_disease_kw_full:
             return "tumor"
 
-        # Pure control / normal with no disease mention at all
-        if has_normal_kw:
+        if has_normal_kw_full:
             return "normal"
 
         return "unspecified"
@@ -779,11 +797,6 @@ class SampleAnnotator:
 
         for gsm_id, gsm in gse.gsms.items():
 
-            # Build a single lowercase text blob from all metadata fields
-            text = " ".join(
-                [str(v) for v in gsm.metadata.values()]
-            ).lower()
-
             # Filter: human only
             organism = " ".join(gsm.metadata.get("organism_ch1", [])).lower()
             if "homo sapiens" not in organism:
@@ -796,7 +809,7 @@ class SampleAnnotator:
                 excluded_non_scrna.append(gsm_id)
                 continue
 
-            label = self._classify_gsm(text)
+            label = self._classify_gsm(gsm)
 
             if label == "normal":
                 normal.append(gsm_id)
