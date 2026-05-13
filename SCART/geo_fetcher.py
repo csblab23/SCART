@@ -1360,7 +1360,7 @@ class SampleAnnotator:
 
     # ─────────────────────────────────────────────────────────────────────
 
-    def _read_h5_gz(self, file_path: str):
+def _read_h5_gz(self, file_path: str):
     """
     Tier 4.5 — gzip-compressed HDF5 handler.
 
