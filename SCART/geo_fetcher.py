@@ -53,7 +53,7 @@ DISEASE_TUMOR_KEYWORDS = [
     # ── General malignancy ───────────────────────────────────────────────────
     "tumor", "tumour", "cancer", "carcinoma", "adenocarcinoma",
     "malignant", "malignancy", "metastatic", "metastasis",
-    "neoplasm", "neoplastic",
+    "neoplasm", "neoplastic", "CAR-T", "infusion", "pre-infusion", "post-infusion", "leukapheresis",
 
     # ── Haematological ───────────────────────────────────────────────────────
     "leukemia", "leukaemia", "lymphoma", "myeloma",
