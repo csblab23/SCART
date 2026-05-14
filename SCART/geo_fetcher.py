@@ -859,24 +859,103 @@ class SampleAnnotator:
         binary Matrix Market format and must be handled by the MTX readers
         (Tiers 1 / 2 / 2.5).  Passing an MTX to this method will always
         fail gracefully and return None.
+
+        Orientation detection
+        ---------------------
+        GEO expression matrices are deposited in two orientations:
+          - genes × cells  (rows = genes, columns = cells) — most common
+          - cells × genes  (rows = cells, columns = genes) — less common
+
+        We detect orientation by checking the first column: if it looks like
+        gene names (strings, not numbers) the matrix is genes × cells and we
+        transpose so that rows become cells.  This avoids the old shape-based
+        heuristic which was unreliable and, more importantly, avoids calling
+        df.T on a large dense DataFrame (which doubles peak memory usage).
+
+        Memory safety
+        -------------
+        Large dense expression matrices (e.g. 30k genes × 5k cells) easily
+        exceed available memory when loaded as a full pandas DataFrame and
+        then converted column-by-column with apply(pd.to_numeric).  Instead
+        we:
+          1. Read with index_col=0 so the gene/cell ID column is the index.
+          2. Cast the entire numeric block in one pass with astype(float32).
+          3. Convert directly to a scipy sparse matrix before building AnnData.
         """
+        import scipy.sparse as sp
+
         # Guard: reject MTX files — they are not CSV/TSV
         if file_path.lower().endswith(".mtx") or file_path.lower().endswith(".mtx.gz"):
             return None
 
+        # Guard: reject .h5 / .h5.gz files — handled by Tier 4 / 4.5
+        fl = file_path.lower()
+        if fl.endswith(".h5") or fl.endswith(".hdf5") or fl.endswith(".h5.gz"):
+            return None
+
         try:
+            opener = gzip.open(file_path, 'rt') if file_path.endswith(".gz") else open(file_path, 'r')
+            with opener as f:
+                # Sniff separator from first line
+                first_line = f.readline()
+                sep = "\t" if "\t" in first_line else ","
+
+            # Read with the first column as the index
             if file_path.endswith(".gz"):
                 with gzip.open(file_path, 'rt') as f:
-                    df = pd.read_csv(f, sep=None, engine='python')
+                    df = pd.read_csv(f, sep=sep, index_col=0)
             else:
-                df = pd.read_csv(file_path, sep=None, engine='python')
+                df = pd.read_csv(file_path, sep=sep, index_col=0)
 
-            if df.shape[0] < df.shape[1]:
+            if df.empty:
+                return None
+
+            # Orientation detection: if the index looks like gene names
+            # (non-numeric strings) and the columns look like cell barcodes
+            # or numeric IDs, the matrix is genes × cells → transpose.
+            # We check whether the index values are predominantly non-numeric.
+            def _index_is_strings(idx) -> bool:
+                sample = list(idx[:20])
+                numeric_count = 0
+                for v in sample:
+                    try:
+                        float(v)
+                        numeric_count += 1
+                    except (ValueError, TypeError):
+                        pass
+                return numeric_count < len(sample) / 2
+
+            index_is_gene_names = _index_is_strings(df.index)
+            cols_are_gene_names = _index_is_strings(df.columns)
+
+            if index_is_gene_names and not cols_are_gene_names:
+                # genes × cells — transpose to cells × genes
                 df = df.T
+            elif not index_is_gene_names and cols_are_gene_names:
+                # already cells × genes — no transpose needed
+                pass
+            elif index_is_gene_names and cols_are_gene_names:
+                # Both look like strings; fall back to shape heuristic
+                if df.shape[0] > df.shape[1]:
+                    # More rows than columns → likely genes × cells
+                    df = df.T
+            # else: both numeric → assume cells × genes, leave as-is
 
-            df = df.apply(pd.to_numeric, errors='coerce').fillna(0)
+            # Cast to float32 in one pass (avoids per-column apply overhead)
+            try:
+                numeric_block = df.values.astype("float32")
+            except (ValueError, TypeError):
+                # Some cells may contain non-numeric strings; coerce via pandas
+                df = df.apply(pd.to_numeric, errors='coerce').fillna(0)
+                numeric_block = df.values.astype("float32")
 
-            return ad.AnnData(df)
+            # Convert to sparse to save memory downstream
+            X_sparse = sp.csr_matrix(numeric_block)
+
+            obs = pd.DataFrame(index=df.index.astype(str))
+            var = pd.DataFrame(index=df.columns.astype(str))
+
+            return ad.AnnData(X=X_sparse, obs=obs, var=var)
 
         except Exception:
             return None
@@ -1369,12 +1448,18 @@ class SampleAnnotator:
         read these directly; this method decompresses to a temp file first,
         then delegates to sc.read_10x_h5 / sc.read_hdf5.
 
+        Parameters
+        ----------
+        file_path : str
+            Path to the .h5.gz file on disk.
+
         Returns
         -------
         AnnData or None
         """
         import tempfile, shutil
 
+        tmp_path = None
         try:
             with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp:
                 tmp_path = tmp.name
@@ -1392,16 +1477,32 @@ class SampleAnnotator:
                     print(f"    H5.gz read failed: {exc}")
                     adata = None
 
+            # Make var_names unique immediately — sc.read_10x_h5 uses gene
+            # symbols as the index by default and duplicate symbols (e.g.
+            # "TBCE", "MATR3") are common, causing ad.concat to fail later.
+            if adata is not None and not adata.var_names.is_unique:
+                seen: dict = {}
+                new_idx = []
+                for v in adata.var_names:
+                    if v in seen:
+                        seen[v] += 1
+                        new_idx.append(f"{v}.{seen[v]}")
+                    else:
+                        seen[v] = 0
+                        new_idx.append(v)
+                adata.var_names = new_idx
+
             return adata
 
         except Exception as exc:
             print(f"    H5.gz decompress failed: {exc}")
             return None
         finally:
-            try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
+            if tmp_path is not None:
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
 
     # ──────────────────────────────────────────────────────────────────────
 
@@ -1571,7 +1672,8 @@ class SampleAnnotator:
             # GEO sometimes wraps CellRanger .h5 output in an extra gzip
             # layer (e.g. *_raw_gene_bc_matrices_h5.h5.gz).  The Tier 4
             # scanner above only matches bare .h5 / .hdf5 — this tier
-            # catches the .h5.gz variant.
+            # catches the .h5.gz variant by decompressing to a temp file
+            # first, then reading with sc.read_10x_h5 / sc.read_hdf5.
             if adata is None:
                 files = os.listdir(gsm_dir)
                 for f in sorted(files):
@@ -1625,6 +1727,21 @@ class SampleAnnotator:
             adata.layers["counts"] = adata.X.copy()
             adata.raw = adata
             adata.obs_names_make_unique()
+
+            # Deduplicate var_names proactively — duplicate gene symbols
+            # (common in CellRanger h5 and some CSV matrices) cause
+            # ad.concat to raise InvalidIndexError even with join="outer".
+            if not adata.var_names.is_unique:
+                seen: dict = {}
+                new_idx = []
+                for v in adata.var_names:
+                    if v in seen:
+                        seen[v] += 1
+                        new_idx.append(f"{v}.{seen[v]}")
+                    else:
+                        seen[v] = 0
+                        new_idx.append(v)
+                adata.var_names = new_idx
 
             adatas.append(adata)
 
