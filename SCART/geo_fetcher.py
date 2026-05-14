@@ -823,10 +823,41 @@ class SampleAnnotator:
                 continue
 
             # Filter: scRNA-seq only
+            # library_strategy is checked first.  Many 10x Chromium datasets
+            # deposited on GEO have library_strategy = "OTHER" rather than
+            # "RNA-Seq", so we use a two-pass approach:
+            #   Pass A — explicit scRNA keywords in the library_strategy field.
+            #   Pass B — if library_strategy is "other" (or absent), scan the
+            #            full metadata text for scRNA-seq evidence: CellRanger
+            #            output filenames, 10x / droplet / scRNA keywords in
+            #            the data-processing or title fields.
             library = " ".join(gsm.metadata.get("library_strategy", [])).lower()
-            if not any(k in library for k in ["rna-seq", "scrna", "single cell"]):
-                excluded_non_scrna.append(gsm_id)
-                continue
+
+            _SCRNA_KEYWORDS = ["rna-seq", "scrna", "single cell", "single-cell",
+                                "singlenucleus", "single nucleus", "snrna"]
+
+            pass_a = any(k in library for k in _SCRNA_KEYWORDS)
+
+            if not pass_a:
+                # Pass B: check full metadata for scRNA evidence
+                full_meta = " ".join(str(v) for v in gsm.metadata.values()).lower()
+                _SCRNA_EVIDENCE = [
+                    # CellRanger output file patterns
+                    "feature_bc_matrix", "filtered_feature", "raw_feature",
+                    "gene_bc_matrices", "barcodes.tsv", "matrix.mtx",
+                    # Technology / protocol keywords
+                    "10x chromium", "10x genomics", "chromium controller",
+                    "dropseq", "drop-seq", "indrop", "indrops",
+                    "scrna-seq", "scrna seq", "sc rna-seq",
+                    "single-cell rna", "single cell rna",
+                    "snrna-seq", "snrna seq", "single-nucleus rna",
+                    "cellranger", "cell ranger", "seurat",
+                ]
+                pass_b = any(k in full_meta for k in _SCRNA_EVIDENCE)
+
+                if not pass_b:
+                    excluded_non_scrna.append(gsm_id)
+                    continue
 
             label = self._classify_gsm(gsm)
 
