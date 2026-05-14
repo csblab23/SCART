@@ -106,6 +106,200 @@ DISEASE_TUMOR_KEYWORDS = [
 ]
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Module-level helpers (used by SampleAnnotator._build_h5ad)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _read_10x_h5_via_h5py(file_path: str):
+    """
+    Fallback HDF5 reader using h5py directly.
+
+    Covers two CellRanger layouts:
+
+    CellRanger v3 ("matrix" group)
+    ───────────────────────────────
+        /matrix/barcodes          — 1-D bytes array
+        /matrix/features/id       — gene IDs
+        /matrix/features/name     — gene symbols
+        /matrix/data / indices / indptr / shape
+
+    CellRanger v2 (genome-named group, e.g. "/GRCh38")
+    ────────────────────────────────────────────────────
+        /<genome>/barcodes
+        /<genome>/gene_ids  (or gene_names)
+        /<genome>/gene_names
+        /<genome>/data / indices / indptr / shape
+
+    sc.read_10x_h5 raises an empty KeyError when the HDF5 file uses the v2
+    genome-group layout (no "matrix" key at the root).  sc.read_hdf5 also
+    fails because the schema doesn't match its expectations.  This function
+    reads both layouts with h5py directly, so v2 files are recovered instead
+    of silently skipped.
+
+    Returns AnnData or None.
+    """
+    import h5py
+    import scipy.sparse as sp
+
+    def _decode(arr):
+        """Decode a bytes array to a list of str."""
+        return [x.decode("utf-8") if isinstance(x, bytes) else str(x)
+                for x in arr]
+
+    try:
+        with h5py.File(file_path, "r") as f:
+
+            # ── Try v3 layout first ("matrix" group at root) ─────────────
+            if "matrix" in f:
+                g = f["matrix"]
+                data    = g["data"][:]
+                indices = g["indices"][:]
+                indptr  = g["indptr"][:]
+                shape   = tuple(g["shape"][:])   # (n_genes, n_barcodes)
+
+                barcodes = _decode(g["barcodes"][:])
+
+                feat = g["features"]
+                gene_ids   = _decode(feat["id"][:])
+                gene_names = _decode(feat["name"][:]) if "name" in feat \
+                             else gene_ids
+
+                # shape is (genes, barcodes); we want cells × genes
+                X = sp.csr_matrix(
+                    (data, indices, indptr), shape=shape
+                ).T
+
+            # ── Fall back to v2 genome-group layout ──────────────────────
+            else:
+                # Pick the first non-metadata top-level group that contains
+                # a "data" dataset (the CSR values array).
+                genome_key = next(
+                    (k for k in f.keys()
+                     if isinstance(f[k], h5py.Group)
+                     and "data" in f[k]),
+                    None
+                )
+                if genome_key is None:
+                    return None
+
+                g = f[genome_key]
+                data    = g["data"][:]
+                indices = g["indices"][:]
+                indptr  = g["indptr"][:]
+                shape   = tuple(g["shape"][:])
+
+                barcodes   = _decode(g["barcodes"][:])
+                gene_ids   = _decode(g["gene_ids"][:])   if "gene_ids"   in g \
+                             else _decode(g["gene_names"][:])
+                gene_names = _decode(g["gene_names"][:]) if "gene_names" in g \
+                             else gene_ids
+
+                X = sp.csr_matrix(
+                    (data, indices, indptr), shape=shape
+                ).T
+
+        obs = pd.DataFrame(index=barcodes)
+        var = pd.DataFrame(
+            {"gene_ids": gene_ids, "gene_symbols": gene_names},
+            index=gene_names,   # use symbols as primary index (matches sc default)
+        )
+
+        return ad.AnnData(X=X, obs=obs, var=var)
+
+    except Exception as exc:
+        print(f"    h5py fallback read failed: {exc}")
+        return None
+
+
+def _dedup_var_names(adata: ad.AnnData) -> ad.AnnData:
+    """
+    Return *adata* with guaranteed-unique var_names.
+    Appends .1, .2, … to duplicate names (same strategy as R's make.unique).
+    No-op when var_names are already unique.
+    """
+    if adata.var_names.is_unique:
+        return adata
+    seen: dict = {}
+    new_idx = []
+    for v in adata.var_names:
+        if v in seen:
+            seen[v] += 1
+            new_idx.append(f"{v}.{seen[v]}")
+        else:
+            seen[v] = 0
+            new_idx.append(v)
+    adata.var_names = new_idx
+    return adata
+
+
+def _safe_concat(adatas: list) -> ad.AnnData:
+    """
+    Concatenate a list of AnnData objects with join="outer", guaranteeing
+    that the union of var_names is unique before ad.concat is called.
+
+    Why the naive retry loop fails
+    ───────────────────────────────
+    Per-sample deduplication (appending .1, .2, … within each sample) is
+    not sufficient.  If sample A and sample B both contain a duplicate gene
+    "TBCE", they each independently produce "TBCE.1".  The *union* of their
+    var_names then contains "TBCE.1" twice — a collision that ad.concat with
+    join="outer" cannot resolve, raising InvalidIndexError.
+
+    Strategy
+    ─────────
+    1. Per-sample dedup  — make each adata's var_names unique in isolation.
+    2. Union dedup       — build the union of all var_names; if it still
+                           contains duplicates, apply a single global suffix
+                           pass so every name in the union is unique, then
+                           remap each sample's var_names accordingly.
+    3. concat            — now safe to call with join="outer".
+
+    Returns the combined AnnData, or raises if concat itself fails for an
+    unrelated reason.
+    """
+    # Step 1: per-sample dedup
+    adatas = [_dedup_var_names(a) for a in adatas]
+
+    # Step 2: check whether the union of all var_names is itself unique
+    all_names = []
+    for a in adatas:
+        all_names.extend(a.var_names.tolist())
+
+    # dict.fromkeys preserves insertion order and removes duplicates
+    union = list(dict.fromkeys(all_names))
+
+    if len(union) == len(all_names) or len(set(union)) == len(union):
+        # Union is already unique — go straight to concat
+        return ad.concat(adatas, join="outer")
+
+    # Step 3: union still has collisions — build a globally-unique remapping
+    print("  Post-dedup union var_names still contain duplicates; "
+          "applying global remapping …")
+    seen: dict = {}
+    global_map: dict = {}   # original_name → globally-unique_name
+    for name in all_names:
+        if name not in global_map:
+            if name not in seen:
+                seen[name] = 0
+                global_map[name] = name
+            else:
+                seen[name] += 1
+                global_map[name] = f"{name}.{seen[name]}"
+
+    # Remap var_names on a copy of each adata so we don't mutate the originals
+    remapped = []
+    for a in adatas:
+        new_names = [global_map.get(v, v) for v in a.var_names]
+        a = a.copy()
+        a.var_names = new_names
+        remapped.append(a)
+
+    return ad.concat(remapped, join="outer")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 class SampleAnnotator:
     """
     Downloads GEO datasets (or accepts pre-built h5ad files), classifies
@@ -1511,17 +1705,8 @@ class SampleAnnotator:
             # Make var_names unique immediately — sc.read_10x_h5 uses gene
             # symbols as the index by default and duplicate symbols (e.g.
             # "TBCE", "MATR3") are common, causing ad.concat to fail later.
-            if adata is not None and not adata.var_names.is_unique:
-                seen: dict = {}
-                new_idx = []
-                for v in adata.var_names:
-                    if v in seen:
-                        seen[v] += 1
-                        new_idx.append(f"{v}.{seen[v]}")
-                    else:
-                        seen[v] = 0
-                        new_idx.append(v)
-                adata.var_names = new_idx
+            if adata is not None:
+                adata = _dedup_var_names(adata)
 
             return adata
 
@@ -1681,6 +1866,18 @@ class SampleAnnotator:
             # CellRanger outputs filtered_feature_bc_matrix.h5 or
             # raw_feature_bc_matrix.h5 — readable with sc.read_10x_h5().
             # Also handles generic .h5 / .hdf5 files via sc.read_hdf5().
+            #
+            # Three-attempt strategy
+            # ──────────────────────
+            # Attempt 1: sc.read_10x_h5  — works for CellRanger v3 files
+            #            (root group "matrix").  Raises an empty KeyError on
+            #            v2 files (root group is genome name, e.g. "GRCh38").
+            # Attempt 2: sc.read_hdf5    — generic HDF5; rarely succeeds on
+            #            CellRanger files but worth trying before h5py.
+            # Attempt 3: _read_10x_h5_via_h5py — direct h5py reader that
+            #            handles both v2 and v3 layouts explicitly.  This
+            #            recovers the files that caused "H5 read failed: "
+            #            (empty error message) in the original code.
             if adata is None:
                 files = os.listdir(gsm_dir)
                 for f in sorted(files):   # sorted: prefer filtered over raw
@@ -1688,15 +1885,30 @@ class SampleAnnotator:
                     if fl.endswith(".h5") or fl.endswith(".hdf5"):
                         file_path = os.path.join(gsm_dir, f)
                         print(f"Reading H5 file for {gsm_id}: {f}")
+
+                        # Attempt 1: scanpy CellRanger v3 reader
                         try:
                             adata = sc.read_10x_h5(file_path)
                         except Exception:
+                            adata = None
+
+                        # Attempt 2: scanpy generic HDF5 reader
+                        if adata is None:
                             try:
                                 adata = sc.read_hdf5(file_path)
-                            except Exception as exc:
-                                print(f"  H5 read failed for {gsm_id}: {exc}")
+                            except Exception:
                                 adata = None
+
+                        # Attempt 3: h5py fallback (handles v2 genome-group layout)
+                        if adata is None:
+                            print(f"  sc readers failed — trying h5py fallback for {gsm_id}")
+                            adata = _read_10x_h5_via_h5py(file_path)
+                            if adata is None:
+                                print(f"  H5 read failed for {gsm_id} (all methods exhausted)")
+
+                        # Deduplicate var_names immediately after any successful read
                         if adata is not None:
+                            adata = _dedup_var_names(adata)
                             break
 
             # ── Tier 4.5: gzip-compressed HDF5 (.h5.gz) ──────────────────
@@ -1762,48 +1974,26 @@ class SampleAnnotator:
             # Deduplicate var_names proactively — duplicate gene symbols
             # (common in CellRanger h5 and some CSV matrices) cause
             # ad.concat to raise InvalidIndexError even with join="outer".
-            if not adata.var_names.is_unique:
-                seen: dict = {}
-                new_idx = []
-                for v in adata.var_names:
-                    if v in seen:
-                        seen[v] += 1
-                        new_idx.append(f"{v}.{seen[v]}")
-                    else:
-                        seen[v] = 0
-                        new_idx.append(v)
-                adata.var_names = new_idx
+            # _dedup_var_names is a no-op when var_names are already unique.
+            adata = _dedup_var_names(adata)
 
             adatas.append(adata)
 
         if len(adatas) == 0:
             return None
 
+        # ── Safe concat: guarantees the union var index is unique ──────────
+        # The old try/except/retry pattern failed when two samples each
+        # independently renamed a duplicate gene to the same suffix (e.g.
+        # both produced "TBCE.1"), causing a collision in the outer-join union.
+        # _safe_concat handles this with a global remapping pass if needed.
         try:
-            combined = ad.concat(adatas, join="outer")
+            combined = _safe_concat(adatas)
         except Exception as exc:
-            # Duplicate var (gene) names across samples prevent concat.
-            # Make every adata's var_names unique before retrying.
-            print(f"  Warning: ad.concat failed ({type(exc).__name__}: {exc})")
-            print("  Retrying after making var_names unique per sample...")
-            for _a in adatas:
-                if not _a.var_names.is_unique:
-                    seen = {}
-                    new_idx = []
-                    for v in _a.var_names:
-                        if v in seen:
-                            seen[v] += 1
-                            new_idx.append(f"{v}.{seen[v]}")
-                        else:
-                            seen[v] = 0
-                            new_idx.append(v)
-                    _a.var_names = new_idx
-            try:
-                combined = ad.concat(adatas, join="outer")
-            except Exception as exc2:
-                print(f"  Warning: concat still failed after deduplication: {exc2}")
-                print("  Skipping this GSE — no h5ad will be written.")
-                return None
+            print(f"  Warning: concat failed even after global dedup: {exc}")
+            print("  Skipping this GSE — no h5ad will be written.")
+            return None
+
         combined.obs_names_make_unique()
 
         print("... storing 'gsm_id' as categorical")
