@@ -1,0 +1,4 @@
+SCART/PopV/resources/ontology/*.obo filter=lfs diff=lfs merge=lfs -text
+SCART/PopV/resources/ontology/*.emb filter=lfs diff=lfs merge=lfs -text
+SCART/PopV/resources/ontology/*.json filter=lfs diff=lfs merge=lfs -text
+SCART/PopV/resources/ontology/*.tar.gz filter=lfs diff=lfs merge=lfs -text
