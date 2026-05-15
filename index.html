@@ -9,6 +9,219 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="css/style.css">
+<style>
+/* ── IGIB LOGO IN NAVBAR ─────────────────────────────────────────────── */
+.nav-igib {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  text-decoration: none;
+}
+.nav-igib img {
+  height: 36px;
+  width: auto;
+  border-radius: 4px;
+  opacity: 0.9;
+  transition: opacity 0.2s;
+  /* Fallback background if image not loaded */
+  background: rgba(255,255,255,0.05);
+}
+.nav-igib img:hover { opacity: 1; }
+.nav-igib-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+}
+.nav-igib-text span:first-child {
+  font-size: 11px;
+  font-weight: 700;
+  color: #e8f0fe;
+  letter-spacing: 0.5px;
+}
+.nav-igib-text span:last-child {
+  font-size: 9px;
+  color: #4d6080;
+  letter-spacing: 0.3px;
+}
+
+/* ── AUTHORS SECTION ─────────────────────────────────────────────────── */
+.authors-section {
+  padding: 100px 32px;
+  background: #050810;
+}
+.authors-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 28px;
+  margin-top: 48px;
+}
+.author-card {
+  background: #0a0e1a;
+  border: 1px solid rgba(99,168,255,0.10);
+  border-radius: 16px;
+  padding: 32px 24px;
+  text-align: center;
+  transition: transform 0.2s, border-color 0.2s;
+  position: relative;
+  overflow: hidden;
+}
+.author-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, #4f9cf9, #00d4aa);
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+.author-card:hover {
+  transform: translateY(-5px);
+  border-color: rgba(79,156,249,0.25);
+}
+.author-card:hover::before { opacity: 1; }
+
+.author-photo-wrap {
+  position: relative;
+  width: 100px;
+  height: 100px;
+  margin: 0 auto 20px;
+}
+.author-photo {
+  width: 100px;
+  height: 100px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 2px solid rgba(79,156,249,0.2);
+  background: #0f1422;
+  display: block;
+}
+/* Fallback avatar shown when image fails */
+.author-avatar-fallback {
+  width: 100px;
+  height: 100px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, rgba(79,156,249,0.15), rgba(0,212,170,0.1));
+  border: 2px solid rgba(79,156,249,0.2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 36px;
+  font-weight: 700;
+  color: #4f9cf9;
+  font-family: 'Space Grotesk', sans-serif;
+  position: absolute;
+  top: 0; left: 0;
+}
+.author-photo.loaded + .author-avatar-fallback { display: none; }
+
+.author-name {
+  font-size: 16px;
+  font-weight: 700;
+  color: #e8f0fe;
+  margin-bottom: 4px;
+  letter-spacing: -0.2px;
+}
+.author-role {
+  font-size: 12px;
+  color: #4f9cf9;
+  font-weight: 500;
+  margin-bottom: 8px;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+.author-affil {
+  font-size: 12px;
+  color: #4d6080;
+  margin-bottom: 14px;
+  line-height: 1.5;
+}
+.author-bio {
+  font-size: 13px;
+  color: #8fa3c8;
+  line-height: 1.7;
+  margin-bottom: 18px;
+}
+.author-links {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.author-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(99,168,255,0.15);
+  color: #8fa3c8;
+  text-decoration: none;
+  font-size: 11px;
+  font-weight: 500;
+  transition: all 0.2s;
+}
+.author-link:hover {
+  border-color: rgba(79,156,249,0.4);
+  color: #4f9cf9;
+}
+
+/* ── IGIB AFFILIATION BANNER ─────────────────────────────────────────── */
+.affil-banner {
+  margin-top: 56px;
+  background: linear-gradient(135deg, rgba(79,156,249,0.06), rgba(0,212,170,0.04));
+  border: 1px solid rgba(79,156,249,0.15);
+  border-radius: 16px;
+  padding: 28px 36px;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+.affil-logo-box {
+  width: 64px;
+  height: 64px;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(99,168,255,0.12);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+.affil-logo-box img {
+  width: 56px;
+  height: 56px;
+  object-fit: contain;
+  border-radius: 8px;
+}
+.affil-text h4 {
+  font-size: 15px;
+  font-weight: 600;
+  color: #e8f0fe;
+  margin-bottom: 4px;
+}
+.affil-text p {
+  font-size: 13px;
+  color: #4d6080;
+  line-height: 1.6;
+}
+.affil-text a {
+  color: #4f9cf9;
+  text-decoration: none;
+}
+.affil-text a:hover { text-decoration: underline; }
+
+@media (max-width: 900px) {
+  .authors-grid { grid-template-columns: 1fr; max-width: 400px; margin-left: auto; margin-right: auto; }
+  .nav-igib-text { display: none; }
+}
+@media (max-width: 600px) {
+  .authors-section { padding: 70px 20px; }
+  .affil-banner { flex-direction: column; text-align: center; }
+}
+</style>
 </head>
 <body>
 
@@ -24,8 +237,24 @@
       <li><a href="#pipeline">Pipeline</a></li>
       <li><a href="#usage">Usage</a></li>
       <li><a href="#database">Database</a></li>
-      <li><a href="https://github.com/Vinaya20000/SCART" target="_blank">GitHub</a></li>
+      <li><a href="#authors">Authors</a></li>
+      <li><a href="https://github.com/csblab23/SCART" target="_blank">GitHub</a></li>
     </ul>
+
+    <!-- IGIB Logo top-right -->
+    <a href="https://www.igib.res.in" target="_blank" class="nav-igib" title="CSIR-IGIB">
+      <img src="external/igib_logo.jpeg" alt="CSIR-IGIB Logo"
+           onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+      <div class="nav-igib-text" style="display:none">
+        <span>CSIR-IGIB</span>
+        <span>New Delhi, India</span>
+      </div>
+      <div class="nav-igib-text">
+        <span>CSIR-IGIB</span>
+        <span>New Delhi, India</span>
+      </div>
+    </a>
+
     <a href="YOUR_STREAMLIT_URL" class="btn-nav" target="_blank">Launch App →</a>
     <button class="hamburger" id="hamburger" aria-label="Menu">&#9776;</button>
   </div>
@@ -54,7 +283,7 @@
         <span>Launch Web App</span>
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </a>
-      <a href="https://github.com/Vinaya20000/SCART" class="btn-outline" target="_blank">
+      <a href="https://github.com/csblab23/SCART" class="btn-outline" target="_blank">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
         <span>View on GitHub</span>
       </a>
@@ -144,7 +373,6 @@
     <div class="section-label">Pipeline</div>
     <h2 class="section-title">Five automated modules</h2>
     <p class="section-sub">Run end-to-end from GEO accession IDs, or resume from any step with your own pre-processed data.</p>
-
     <div class="pipeline-flow">
       <div class="pipe-step">
         <div class="pipe-icon" style="background:rgba(34,197,94,0.1);border-color:rgba(34,197,94,0.25)">
@@ -153,9 +381,7 @@
         <div class="pipe-num">01</div>
         <h3>GEO Fetcher</h3>
         <p>Download scRNA-seq datasets by GEO accession ID. QC filtering, doublet removal, ambient RNA correction. Supports h5ad, 10X, loom.</p>
-        <div class="pipe-tags">
-          <span>GEOparse</span><span>Scrublet</span><span>SoupX</span>
-        </div>
+        <div class="pipe-tags"><span>GEOparse</span><span>Scrublet</span><span>SoupX</span></div>
       </div>
       <div class="pipe-arrow">→</div>
       <div class="pipe-step">
@@ -165,9 +391,7 @@
         <div class="pipe-num">02</div>
         <h3>Cell Annotation</h3>
         <p>PopV consensus annotation combining KNN, SVM, scANVI, and logistic regression. Tabula Sapiens reference auto-downloaded by cancer type.</p>
-        <div class="pipe-tags">
-          <span>PopV</span><span>Harmony</span><span>scANVI</span>
-        </div>
+        <div class="pipe-tags"><span>PopV</span><span>Harmony</span><span>scANVI</span></div>
       </div>
       <div class="pipe-arrow">→</div>
       <div class="pipe-step">
@@ -177,9 +401,7 @@
         <div class="pipe-num">03</div>
         <h3>Malignant ID</h3>
         <p>scMalignantFinder CNV inference cross-validated with SCEVAN. High-confidence malignant cell barcode list from epithelial cells only.</p>
-        <div class="pipe-tags">
-          <span>scMalignantFinder</span><span>SCEVAN</span>
-        </div>
+        <div class="pipe-tags"><span>scMalignantFinder</span><span>SCEVAN</span></div>
       </div>
       <div class="pipe-arrow">→</div>
       <div class="pipe-step">
@@ -189,9 +411,7 @@
         <div class="pipe-num">04</div>
         <h3>Surfaceome DE</h3>
         <p>Wilcoxon rank-sum DE between malignant and non-malignant cells. Filters against CSPA surfaceome database of 2,886 human surface proteins.</p>
-        <div class="pipe-tags">
-          <span>Wilcoxon</span><span>CSPA</span><span>DESeq2</span>
-        </div>
+        <div class="pipe-tags"><span>Wilcoxon</span><span>CSPA</span><span>DESeq2</span></div>
       </div>
       <div class="pipe-arrow">→</div>
       <div class="pipe-step">
@@ -201,9 +421,7 @@
         <div class="pipe-num">05</div>
         <h3>Gene Scoring</h3>
         <p>Score single genes and two-gene AND/OR/NOT logic-gate combinations for efficacy and safety. Genetic algorithm searches optimal pairs.</p>
-        <div class="pipe-tags">
-          <span>DEAP GA</span><span>HPA</span><span>GTEx</span>
-        </div>
+        <div class="pipe-tags"><span>DEAP GA</span><span>HPA</span><span>GTEx</span></div>
       </div>
     </div>
   </div>
@@ -292,23 +510,20 @@
           <button class="copy-btn" onclick="copyCode()" id="copy-btn">Copy</button>
         </div>
         <pre id="code-display"><code># Install SCART
-pip install git+https://github.com/Vinaya20000/SCART.git
+pip install git+https://github.com/csblab23/SCART.git
 
 # Or clone and install locally
-git clone https://github.com/Vinaya20000/SCART.git
+git clone https://github.com/csblab23/SCART.git
 cd SCART
 pip install -e .</code></pre>
       </div>
     </div>
-
     <div class="web-cta">
       <div class="cta-text">
         <h3>Prefer a web interface?</h3>
         <p>Run the full pipeline interactively — no coding required. Upload your h5ad or enter GEO accession IDs directly.</p>
       </div>
-      <a href="YOUR_STREAMLIT_URL" class="btn-primary" target="_blank">
-        Open Web App →
-      </a>
+      <a href="YOUR_STREAMLIT_URL" class="btn-primary" target="_blank">Open Web App →</a>
     </div>
   </div>
 </section>
@@ -344,8 +559,134 @@ pip install -e .</code></pre>
   </div>
 </section>
 
+<!-- ── AUTHORS ────────────────────────────────────────────────────────── -->
+<section class="authors-section" id="authors">
+  <div class="container">
+    <div class="section-label">Team</div>
+    <h2 class="section-title">Authors</h2>
+    <p class="section-sub">SCART is developed at the Computational Systems Biology Lab, CSIR-IGIB, New Delhi.</p>
+
+    <div class="authors-grid">
+
+      <!-- ── AUTHOR 1 — replace with real details ── -->
+      <div class="author-card">
+        <div class="author-photo-wrap">
+          <img class="author-photo"
+               src="external/author1.jpeg"
+               alt="Author 1"
+               onload="this.classList.add('loaded')"
+               onerror="this.style.display='none'">
+          <div class="author-avatar-fallback">V</div>
+        </div>
+        <div class="author-name">Vinaya [Last Name]</div>
+        <div class="author-role">Lead Developer</div>
+        <div class="author-affil">CSIR-IGIB, New Delhi</div>
+        <div class="author-bio">
+          PhD researcher specialising in single-cell transcriptomics and computational immunology. Developed the core SCART pipeline and gene scoring framework.
+        </div>
+        <div class="author-links">
+          <a href="#" class="author-link" target="_blank">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+            GitHub
+          </a>
+          <a href="#" class="author-link" target="_blank">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 8a6 6 0 0 1 6 6v7h-4v-7a2 2 0 0 0-2-2 2 2 0 0 0-2 2v7h-4v-7a6 6 0 0 1 6-6z"/><rect x="2" y="9" width="4" height="12"/><circle cx="4" cy="4" r="2"/></svg>
+            LinkedIn
+          </a>
+          <a href="mailto:author1@igib.res.in" class="author-link">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+            Email
+          </a>
+        </div>
+      </div>
+
+      <!-- ── AUTHOR 2 — replace with real details ── -->
+      <div class="author-card">
+        <div class="author-photo-wrap">
+          <img class="author-photo"
+               src="external/author2.jpeg"
+               alt="Author 2"
+               onload="this.classList.add('loaded')"
+               onerror="this.style.display='none'">
+          <div class="author-avatar-fallback">A</div>
+        </div>
+        <div class="author-name">Author Two</div>
+        <div class="author-role">Co-Developer</div>
+        <div class="author-affil">CSIR-IGIB, New Delhi</div>
+        <div class="author-bio">
+          Research scientist with expertise in CAR-T cell therapy design and tumour immunology. Contributed to the logic-gate scoring and safety evaluation framework.
+        </div>
+        <div class="author-links">
+          <a href="#" class="author-link" target="_blank">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+            GitHub
+          </a>
+          <a href="#" class="author-link" target="_blank">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 8a6 6 0 0 1 6 6v7h-4v-7a2 2 0 0 0-2-2 2 2 0 0 0-2 2v7h-4v-7a6 6 0 0 1 6-6z"/><rect x="2" y="9" width="4" height="12"/><circle cx="4" cy="4" r="2"/></svg>
+            LinkedIn
+          </a>
+          <a href="mailto:author2@igib.res.in" class="author-link">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+            Email
+          </a>
+        </div>
+      </div>
+
+      <!-- ── AUTHOR 3 — replace with real details ── -->
+      <div class="author-card">
+        <div class="author-photo-wrap">
+          <img class="author-photo"
+               src="external/author3.jpeg"
+               alt="Author 3"
+               onload="this.classList.add('loaded')"
+               onerror="this.style.display='none'">
+          <div class="author-avatar-fallback">P</div>
+        </div>
+        <div class="author-name">PI Name</div>
+        <div class="author-role">Principal Investigator</div>
+        <div class="author-affil">CSIR-IGIB, New Delhi</div>
+        <div class="author-bio">
+          Head of the Computational Systems Biology Lab. Research interests include single-cell genomics, network biology, and translational cancer genomics.
+        </div>
+        <div class="author-links">
+          <a href="https://www.igib.res.in" class="author-link" target="_blank">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+            Lab Page
+          </a>
+          <a href="#" class="author-link" target="_blank">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 8a6 6 0 0 1 6 6v7h-4v-7a2 2 0 0 0-2-2 2 2 0 0 0-2 2v7h-4v-7a6 6 0 0 1 6-6z"/><rect x="2" y="9" width="4" height="12"/><circle cx="4" cy="4" r="2"/></svg>
+            LinkedIn
+          </a>
+          <a href="mailto:pi@igib.res.in" class="author-link">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+            Email
+          </a>
+        </div>
+      </div>
+
+    </div><!-- /authors-grid -->
+
+    <!-- IGIB affiliation banner -->
+    <div class="affil-banner">
+      <div class="affil-logo-box">
+        <img src="external/igib_logo.jpeg" alt="CSIR-IGIB"
+             onerror="this.parentElement.innerHTML='🧬'">
+      </div>
+      <div class="affil-text">
+        <h4>CSIR — Institute of Genomics and Integrative Biology (IGIB)</h4>
+        <p>
+          SCART is developed at the Computational Systems Biology Lab, CSIR-IGIB, New Delhi, India.<br>
+          Part of the Council of Scientific & Industrial Research network.
+          <a href="https://www.igib.res.in" target="_blank">www.igib.res.in</a>
+        </p>
+      </div>
+    </div>
+
+  </div>
+</section>
+
 <!-- ── CITATION ───────────────────────────────────────────────────────── -->
-<section class="section">
+<section class="section section-dark">
   <div class="container">
     <div class="section-label">Citation</div>
     <h2 class="section-title">Cite SCART</h2>
@@ -353,7 +694,7 @@ pip install -e .</code></pre>
       <p class="citation-text">
         If you use SCART in your research, please cite:<br><br>
         <strong>Vinaya et al.</strong> SCART: End-to-end computational pipeline for CAR-T target discovery from single-cell RNA-seq data. <em>GitHub</em> (2025).
-        <a href="https://github.com/Vinaya20000/SCART" target="_blank">https://github.com/Vinaya20000/SCART</a>
+        <a href="https://github.com/csblab23/SCART" target="_blank">https://github.com/csblab23/SCART</a>
       </p>
       <button class="copy-cite-btn" onclick="copyCitation()">Copy BibTeX</button>
     </div>
@@ -362,7 +703,7 @@ pip install -e .</code></pre>
   author  = {Vinaya20000},
   title   = {SCART: CAR-T Target Discovery Pipeline},
   year    = {2025},
-  url     = {https://github.com/Vinaya20000/SCART},
+  url     = {https://github.com/csblab23/SCART},
   version = {2.0}
 }</code></pre>
     </div>
@@ -380,12 +721,13 @@ pip install -e .</code></pre>
       <a href="#about">About</a>
       <a href="#pipeline">Pipeline</a>
       <a href="#usage">Usage</a>
-      <a href="https://github.com/Vinaya20000/SCART" target="_blank">GitHub</a>
+      <a href="#authors">Authors</a>
+      <a href="https://github.com/csblab23/SCART" target="_blank">GitHub</a>
       <a href="YOUR_STREAMLIT_URL" target="_blank">Web App</a>
     </div>
     <div class="footer-copy">
       © 2025 SCART · SCART v2.0 · PopV + scMalignantFinder + SCEVAN<br>
-      Open source under MIT License
+      Developed at CSIR-IGIB, New Delhi · Open source under MIT License
     </div>
   </div>
 </footer>
