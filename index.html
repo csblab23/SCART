@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="SCART — End-to-end CAR-T target discovery from single-cell RNA-seq data. Automated pipeline: GEO download, cell annotation, malignant ID, surfaceome DE, and gene scoring.">
+<title>SCART — CAR-T Target Discovery</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<!-- ── NAVBAR ─────────────────────────────────────────────────────────── -->
+<nav id="navbar">
+  <div class="nav-inner">
+    <a href="#" class="nav-logo">
+      <span class="logo-icon">⬡</span>
+      <span class="logo-text">SCART</span>
+    </a>
+    <ul class="nav-links">
+      <li><a href="#about">About</a></li>
+      <li><a href="#pipeline">Pipeline</a></li>
+      <li><a href="#usage">Usage</a></li>
+      <li><a href="#database">Database</a></li>
+      <li><a href="https://github.com/Vinaya20000/SCART" target="_blank">GitHub</a></li>
+    </ul>
+    <a href="YOUR_STREAMLIT_URL" class="btn-nav" target="_blank">Launch App →</a>
+    <button class="hamburger" id="hamburger" aria-label="Menu">&#9776;</button>
+  </div>
+</nav>
+
+<!-- ── HERO ───────────────────────────────────────────────────────────── -->
+<section class="hero" id="about">
+  <div class="hero-bg">
+    <div class="grid-overlay"></div>
+    <div class="glow glow-1"></div>
+    <div class="glow glow-2"></div>
+  </div>
+  <div class="hero-content">
+    <div class="hero-badge">Open Source · Free to Use · v2.0</div>
+    <h1 class="hero-title">
+      CAR-T Target Discovery<br>
+      <span class="gradient-text">from scRNA-seq Data</span>
+    </h1>
+    <p class="hero-sub">
+      End-to-end computational pipeline for identifying tumour-specific surface
+      protein targets. From raw GEO accession IDs to ranked CAR-T candidates
+      with efficacy and safety scores — fully automated.
+    </p>
+    <div class="hero-actions">
+      <a href="YOUR_STREAMLIT_URL" class="btn-primary" target="_blank">
+        <span>Launch Web App</span>
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </a>
+      <a href="https://github.com/Vinaya20000/SCART" class="btn-outline" target="_blank">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        <span>View on GitHub</span>
+      </a>
+    </div>
+    <div class="hero-stats">
+      <div class="stat">
+        <span class="stat-num">5</span>
+        <span class="stat-label">Modules</span>
+      </div>
+      <div class="stat-div"></div>
+      <div class="stat">
+        <span class="stat-num">2,886</span>
+        <span class="stat-label">Surfaceome genes</span>
+      </div>
+      <div class="stat-div"></div>
+      <div class="stat">
+        <span class="stat-num">3</span>
+        <span class="stat-label">Logic gates</span>
+      </div>
+      <div class="stat-div"></div>
+      <div class="stat">
+        <span class="stat-num">Free</span>
+        <span class="stat-label">Open source</span>
+      </div>
+    </div>
+  </div>
+  <div class="hero-preview">
+    <div class="preview-window">
+      <div class="window-bar">
+        <span class="dot red"></span>
+        <span class="dot amber"></span>
+        <span class="dot green"></span>
+        <span class="window-title">SCART — Gene Scoring</span>
+      </div>
+      <div class="preview-body">
+        <div class="preview-row header">
+          <span>Rank</span><span>Target</span><span>Gate</span><span>Efficacy</span><span>Safety</span><span>Score</span>
+        </div>
+        <div class="preview-row">
+          <span class="rank gold">1</span>
+          <span class="gene-tag combo">MSLN + CD70</span>
+          <span class="gate and">AND</span>
+          <span><div class="mini-bar"><div class="fill" style="width:96%"></div></div></span>
+          <span><div class="mini-bar safe"><div class="fill" style="width:95%"></div></div></span>
+          <span class="score-val green">0.955</span>
+        </div>
+        <div class="preview-row">
+          <span class="rank silver">2</span>
+          <span class="gene-tag">EGFRvIII</span>
+          <span class="gate-dash">—</span>
+          <span><div class="mini-bar"><div class="fill" style="width:89%"></div></div></span>
+          <span><div class="mini-bar safe"><div class="fill" style="width:99%"></div></div></span>
+          <span class="score-val green">0.940</span>
+        </div>
+        <div class="preview-row">
+          <span class="rank bronze">3</span>
+          <span class="gene-tag">MSLN</span>
+          <span class="gate-dash">—</span>
+          <span><div class="mini-bar"><div class="fill" style="width:94%"></div></div></span>
+          <span><div class="mini-bar safe"><div class="fill" style="width:87%"></div></div></span>
+          <span class="score-val blue">0.905</span>
+        </div>
+        <div class="preview-row">
+          <span class="rank">4</span>
+          <span class="gene-tag">MUC16</span>
+          <span class="gate-dash">—</span>
+          <span><div class="mini-bar"><div class="fill" style="width:91%"></div></div></span>
+          <span><div class="mini-bar safe"><div class="fill" style="width:82%"></div></div></span>
+          <span class="score-val blue">0.865</span>
+        </div>
+        <div class="preview-row">
+          <span class="rank">5</span>
+          <span class="gene-tag combo">MSLN + FOLR1</span>
+          <span class="gate or">OR</span>
+          <span><div class="mini-bar"><div class="fill" style="width:97%"></div></div></span>
+          <span><div class="mini-bar safe"><div class="fill" style="width:75%"></div></div></span>
+          <span class="score-val amber">0.860</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── HOW IT WORKS ───────────────────────────────────────────────────── -->
+<section class="section" id="pipeline">
+  <div class="container">
+    <div class="section-label">Pipeline</div>
+    <h2 class="section-title">Five automated modules</h2>
+    <p class="section-sub">Run end-to-end from GEO accession IDs, or resume from any step with your own pre-processed data.</p>
+
+    <div class="pipeline-flow">
+      <div class="pipe-step">
+        <div class="pipe-icon" style="background:rgba(34,197,94,0.1);border-color:rgba(34,197,94,0.25)">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 9h6M9 13h4"/></svg>
+        </div>
+        <div class="pipe-num">01</div>
+        <h3>GEO Fetcher</h3>
+        <p>Download scRNA-seq datasets by GEO accession ID. QC filtering, doublet removal, ambient RNA correction. Supports h5ad, 10X, loom.</p>
+        <div class="pipe-tags">
+          <span>GEOparse</span><span>Scrublet</span><span>SoupX</span>
+        </div>
+      </div>
+      <div class="pipe-arrow">→</div>
+      <div class="pipe-step">
+        <div class="pipe-icon" style="background:rgba(79,156,249,0.1);border-color:rgba(79,156,249,0.25)">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#4f9cf9" stroke-width="1.5"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>
+        </div>
+        <div class="pipe-num">02</div>
+        <h3>Cell Annotation</h3>
+        <p>PopV consensus annotation combining KNN, SVM, scANVI, and logistic regression. Tabula Sapiens reference auto-downloaded by cancer type.</p>
+        <div class="pipe-tags">
+          <span>PopV</span><span>Harmony</span><span>scANVI</span>
+        </div>
+      </div>
+      <div class="pipe-arrow">→</div>
+      <div class="pipe-step">
+        <div class="pipe-icon" style="background:rgba(239,68,68,0.1);border-color:rgba(239,68,68,0.25)">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="1.5"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+        </div>
+        <div class="pipe-num">03</div>
+        <h3>Malignant ID</h3>
+        <p>scMalignantFinder CNV inference cross-validated with SCEVAN. High-confidence malignant cell barcode list from epithelial cells only.</p>
+        <div class="pipe-tags">
+          <span>scMalignantFinder</span><span>SCEVAN</span>
+        </div>
+      </div>
+      <div class="pipe-arrow">→</div>
+      <div class="pipe-step">
+        <div class="pipe-icon" style="background:rgba(245,158,11,0.1);border-color:rgba(245,158,11,0.25)">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="1.5"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="8" stroke-dasharray="3 2"/></svg>
+        </div>
+        <div class="pipe-num">04</div>
+        <h3>Surfaceome DE</h3>
+        <p>Wilcoxon rank-sum DE between malignant and non-malignant cells. Filters against CSPA surfaceome database of 2,886 human surface proteins.</p>
+        <div class="pipe-tags">
+          <span>Wilcoxon</span><span>CSPA</span><span>DESeq2</span>
+        </div>
+      </div>
+      <div class="pipe-arrow">→</div>
+      <div class="pipe-step">
+        <div class="pipe-icon" style="background:rgba(167,139,250,0.1);border-color:rgba(167,139,250,0.25)">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="1.5"><path d="M3 17l4-8 4 5 3-3 4 6"/></svg>
+        </div>
+        <div class="pipe-num">05</div>
+        <h3>Gene Scoring</h3>
+        <p>Score single genes and two-gene AND/OR/NOT logic-gate combinations for efficacy and safety. Genetic algorithm searches optimal pairs.</p>
+        <div class="pipe-tags">
+          <span>DEAP GA</span><span>HPA</span><span>GTEx</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── LOGIC GATES ────────────────────────────────────────────────────── -->
+<section class="section section-dark">
+  <div class="container">
+    <div class="section-label">Logic Gates</div>
+    <h2 class="section-title">Two-gene combination scoring</h2>
+    <p class="section-sub">SCART evaluates three logic-gate strategies for two-gene CAR-T combinations, each with different safety–efficacy tradeoffs.</p>
+    <div class="gates-grid">
+      <div class="gate-card gate-and">
+        <div class="gate-sym">A <span>&amp;</span> B</div>
+        <h3>AND gate</h3>
+        <p>Both genes must be co-expressed for CAR-T activation. Dramatically reduces on-target off-tumour toxicity. Best safety profile.</p>
+        <div class="gate-meter">
+          <span>Safety</span>
+          <div class="meter-bar"><div class="meter-fill" style="width:95%;background:#22c55e"></div></div>
+          <span>High</span>
+        </div>
+      </div>
+      <div class="gate-card gate-or">
+        <div class="gate-sym">A <span>|</span> B</div>
+        <h3>OR gate</h3>
+        <p>Either gene expression triggers activation. Maximises tumour coverage in heterogeneous tumours. Higher efficacy, broader target.</p>
+        <div class="gate-meter">
+          <span>Efficacy</span>
+          <div class="meter-bar"><div class="meter-fill" style="width:97%;background:#f59e0b"></div></div>
+          <span>High</span>
+        </div>
+      </div>
+      <div class="gate-card gate-not">
+        <div class="gate-sym">A <span>&amp;!</span> B</div>
+        <h3>NOT gate</h3>
+        <p>Gene A expressed AND gene B absent. Targets tumour-specific loss-of-expression patterns. Useful for tumour suppressor contexts.</p>
+        <div class="gate-meter">
+          <span>Specificity</span>
+          <div class="meter-bar"><div class="meter-fill" style="width:88%;background:#ef4444"></div></div>
+          <span>High</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── QUICK START ────────────────────────────────────────────────────── -->
+<section class="section" id="usage">
+  <div class="container">
+    <div class="section-label">Usage</div>
+    <h2 class="section-title">Get started in minutes</h2>
+    <div class="usage-grid">
+      <div class="usage-steps">
+        <div class="usage-step active" onclick="showCode(0,this)">
+          <div class="step-circle">1</div>
+          <div>
+            <div class="step-title">Install SCART</div>
+            <div class="step-desc">pip install from GitHub</div>
+          </div>
+        </div>
+        <div class="usage-step" onclick="showCode(1,this)">
+          <div class="step-circle">2</div>
+          <div>
+            <div class="step-title">Fetch GEO data</div>
+            <div class="step-desc">Download and QC scRNA-seq</div>
+          </div>
+        </div>
+        <div class="usage-step" onclick="showCode(2,this)">
+          <div class="step-circle">3</div>
+          <div>
+            <div class="step-title">Run annotation</div>
+            <div class="step-desc">PopV cell type annotation</div>
+          </div>
+        </div>
+        <div class="usage-step" onclick="showCode(3,this)">
+          <div class="step-circle">4</div>
+          <div>
+            <div class="step-title">Score targets</div>
+            <div class="step-desc">Efficacy + safety scoring</div>
+          </div>
+        </div>
+      </div>
+      <div class="code-block">
+        <div class="code-header">
+          <span class="code-lang" id="code-lang">bash</span>
+          <button class="copy-btn" onclick="copyCode()" id="copy-btn">Copy</button>
+        </div>
+        <pre id="code-display"><code># Install SCART
+pip install git+https://github.com/Vinaya20000/SCART.git
+
+# Or clone and install locally
+git clone https://github.com/Vinaya20000/SCART.git
+cd SCART
+pip install -e .</code></pre>
+      </div>
+    </div>
+
+    <div class="web-cta">
+      <div class="cta-text">
+        <h3>Prefer a web interface?</h3>
+        <p>Run the full pipeline interactively — no coding required. Upload your h5ad or enter GEO accession IDs directly.</p>
+      </div>
+      <a href="YOUR_STREAMLIT_URL" class="btn-primary" target="_blank">
+        Open Web App →
+      </a>
+    </div>
+  </div>
+</section>
+
+<!-- ── DATABASE ───────────────────────────────────────────────────────── -->
+<section class="section section-dark" id="database">
+  <div class="container">
+    <div class="section-label">Database</div>
+    <h2 class="section-title">Built-in surfaceome reference</h2>
+    <p class="section-sub">SCART uses the Cell Surface Protein Atlas (CSPA) and Human Protein Atlas as reference databases for surface protein filtering and healthy tissue safety checks.</p>
+    <div class="db-grid">
+      <div class="db-card">
+        <div class="db-num">2,886</div>
+        <div class="db-label">CSPA surface proteins</div>
+        <div class="db-desc">Cell Surface Protein Atlas — curated human surface proteome used for surfaceome DE filtering</div>
+      </div>
+      <div class="db-card">
+        <div class="db-num">54</div>
+        <div class="db-label">Tissue types</div>
+        <div class="db-desc">Human Protein Atlas (HPA) single-cell read counts across all major human tissues for safety scoring</div>
+      </div>
+      <div class="db-card">
+        <div class="db-num">30+</div>
+        <div class="db-label">Cancer types</div>
+        <div class="db-desc">Tabula Sapiens reference atlases available for 30+ cancer types via auto-download from Figshare</div>
+      </div>
+      <div class="db-card">
+        <div class="db-num">8</div>
+        <div class="db-label">Annotation methods</div>
+        <div class="db-desc">PopV consensus: KNN-BBKNN, KNN-SCVI, SVM, Random Forest, CellTypist, OnClass, scANVI, Harmony</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── CITATION ───────────────────────────────────────────────────────── -->
+<section class="section">
+  <div class="container">
+    <div class="section-label">Citation</div>
+    <h2 class="section-title">Cite SCART</h2>
+    <div class="citation-box">
+      <p class="citation-text">
+        If you use SCART in your research, please cite:<br><br>
+        <strong>Vinaya et al.</strong> SCART: End-to-end computational pipeline for CAR-T target discovery from single-cell RNA-seq data. <em>GitHub</em> (2025).
+        <a href="https://github.com/Vinaya20000/SCART" target="_blank">https://github.com/Vinaya20000/SCART</a>
+      </p>
+      <button class="copy-cite-btn" onclick="copyCitation()">Copy BibTeX</button>
+    </div>
+    <div class="bibtex" id="bibtex" style="display:none">
+<pre><code>@software{scart2025,
+  author  = {Vinaya20000},
+  title   = {SCART: CAR-T Target Discovery Pipeline},
+  year    = {2025},
+  url     = {https://github.com/Vinaya20000/SCART},
+  version = {2.0}
+}</code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- ── FOOTER ─────────────────────────────────────────────────────────── -->
+<footer>
+  <div class="footer-inner">
+    <div class="footer-logo">
+      <span class="logo-icon">⬡</span>
+      <span class="logo-text">SCART</span>
+    </div>
+    <div class="footer-links">
+      <a href="#about">About</a>
+      <a href="#pipeline">Pipeline</a>
+      <a href="#usage">Usage</a>
+      <a href="https://github.com/Vinaya20000/SCART" target="_blank">GitHub</a>
+      <a href="YOUR_STREAMLIT_URL" target="_blank">Web App</a>
+    </div>
+    <div class="footer-copy">
+      © 2025 SCART · SCART v2.0 · PopV + scMalignantFinder + SCEVAN<br>
+      Open source under MIT License
+    </div>
+  </div>
+</footer>
+
+<script src="js/main.js"></script>
+</body>
+</html>
