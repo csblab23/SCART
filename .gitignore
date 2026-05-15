@@ -21,3 +21,8 @@ cell_type_annotation_out/
 tumor_h5ad_out/
 
 
+SCART/PopV/resources/ontology/cl.obo
+SCART/PopV/resources/ontology/cl.ontology.nlp.emb
+SCART/PopV/resources/ontology/cl2.obo
+SCART/PopV/resources/ontology/cl_popv.json
+SCART/PopV/resources/ontology/nlp.emb.tar.gz
