@@ -1,0 +1,5 @@
+SCART/PopV/resources/ontology/cl.obo filter=lfs diff=lfs merge=lfs -text
+SCART/PopV/resources/ontology/cl.ontology.nlp.emb filter=lfs diff=lfs merge=lfs -text
+SCART/PopV/resources/ontology/cl2.obo filter=lfs diff=lfs merge=lfs -text
+SCART/PopV/resources/ontology/cl_popv.json filter=lfs diff=lfs merge=lfs -text
+SCART/PopV/resources/ontology/nlp.emb.tar.gz filter=lfs diff=lfs merge=lfs -text
