@@ -77,19 +77,18 @@ conda install -c conda-forge -c bioconda \
   r-base r-devtools r-remotes r-ggplot2 r-data.table \
   r-igraph r-gdtools r-ragg r-dplyr \
   cairo freetype fontconfig harfbuzz fribidi \
-  libpng libtiff libjpeg libwebp
+  libpng libtiff jpeg libwebp
 ```
 
 ```bash
-conda install -c bioconda -c conda-forge \
-  r-fgsea \
-  bioconductor-genomeinfoDb \
-  bioconductor-genomicranges \
-  bioconductor-summarizedexperiment \
-  bioconductor-singlecellexperiment \
-  bioconductor-scuttle \
-  bioconductor-scran \
-  r-rcurl -y
+conda install -c conda-forge -c bioconda \
+  bioconductor-annotationdbi bioconductor-go.db \
+  bioconductor-org.hs.eg.db bioconductor-biomart \
+  bioconductor-scran bioconductor-genomicfeatures \
+  bioconductor-rtracklayer \
+  bioconductor-txdb.hsapiens.ucsc.hg19.knowngene \
+  bioconductor-clusterprofiler bioconductor-enrichplot \
+  bioconductor-ggtree bioconductor-homo.sapiens
 ```
 
 Then inside R:
