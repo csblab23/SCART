@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Installation — SCART</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600;9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+
+<nav id="navbar">
+  <div class="nav-inner">
+    <a href="../index.html" class="nav-logo">
+      <img src="../../external/igib_logo.jpeg" alt="CSIR-IGIB" class="nav-logo-img" onerror="this.style.display='none'">
+      <span class="nav-logo-text">SC<span>ART</span></span>
+    </a>
+    <ul class="nav-links">
+      <li><a href="../index.html">Home</a></li>
+      <li><a href="overview.html">Overview</a></li>
+      <li><a href="install.html" class="active">Installation</a></li>
+      <li><a href="tutorial.html">Tutorial</a></li>
+      <li><a href="authors.html">Authors</a></li>
+    </ul>
+    <div class="nav-spacer"></div>
+    <a href="https://github.com/csblab23/SCART" class="nav-github" target="_blank">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<div class="page-header">
+  <div class="page-header-inner">
+    <div class="page-header-tag">Get Started</div>
+    <h1>Installation</h1>
+    <p>Set up SCART in four steps — conda environment, Python package, R dependencies, and Jupyter notebook.</p>
+  </div>
+</div>
+
+<div class="content-layout">
+  <aside class="sidebar">
+    <ul class="sidebar-nav">
+      <li class="sidebar-group">Installation</li>
+      <li><a href="#requirements">Requirements</a></li>
+      <li><a href="#conda">1. Conda Environment</a></li>
+      <li><a href="#python">2. Python Install</a></li>
+      <li><a href="#r-deps">3. R Dependencies</a></li>
+      <li><a href="#jupyter">4. Jupyter Setup</a></li>
+      <li><a href="#verify">5. Verify Installation</a></li>
+      <li class="sidebar-group">Platform Notes</li>
+      <li><a href="#windows">Windows</a></li>
+      <li><a href="#hpc">HPC / Cluster</a></li>
+    </ul>
+  </aside>
+
+  <div class="content-body">
+
+    <h2 id="requirements">Requirements</h2>
+    <p>SCART requires Python 3.10 and R for the SCEVAN module. The recommended installation uses conda for environment management.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Requirement</th><th>Version</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td>Python</td><td>3.10</td><td>Other versions not tested</td></tr>
+          <tr><td>R</td><td>≥ 4.1</td><td>Required for SCEVAN (Module 3)</td></tr>
+          <tr><td>conda / mamba</td><td>any</td><td>Recommended for environment management</td></tr>
+          <tr><td>RAM</td><td>≥ 16 GB</td><td>32 GB+ recommended for large datasets</td></tr>
+          <tr><td>Disk</td><td>≥ 20 GB</td><td>For GEO downloads + reference files</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- STEP 1 -->
+    <h2 id="conda">Step 1 — Create Conda Environment</h2>
+    <p>Create a dedicated conda environment with Python 3.10. Using a dedicated environment avoids dependency conflicts.</p>
+
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre><span class="c"># Create and activate the environment</span>
+conda create -n scart_env python=3.10 -y
+conda activate scart_env</pre>
+    </div>
+
+    <div class="callout callout-tip">
+      <span class="callout-icon">💡</span>
+      <div>Using <strong>mamba</strong> instead of conda will significantly speed up the dependency resolution steps. Install with <code>conda install -c conda-forge mamba</code> and replace <code>conda</code> with <code>mamba</code> in all commands below.</div>
+    </div>
+
+    <!-- STEP 2 -->
+    <h2 id="python">Step 2 — Install SCART (Python)</h2>
+    <p>Install directly from GitHub using pip. Make sure your <code>scart_env</code> conda environment is active.</p>
+
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre><span class="c"># Install from GitHub (recommended)</span>
+pip install git+https://github.com/csblab23/SCART.git
+
+<span class="c"># OR clone and install in editable mode (for development)</span>
+git clone https://github.com/csblab23/SCART.git
+cd SCART
+pip install -e .</pre>
+    </div>
+
+    <div id="windows" class="callout callout-warn">
+      <span class="callout-icon">⚠️</span>
+      <div><strong>Windows only:</strong> Run these two lines <em>before</em> the pip install command above to avoid dependency conflicts:
+        <div class="code-wrap" style="margin-top:10px;margin-bottom:0;">
+          <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+          <pre>pip install "orbax-checkpoint<0.5" "flax<0.8"
+pip install scvi-tools==1.1.6.post2</pre>
+        </div>
+      </div>
+    </div>
+
+    <!-- STEP 3 -->
+    <h2 id="r-deps">Step 3 — Install R Dependencies (for SCEVAN)</h2>
+    <p>SCEVAN is required for malignant cell identification in Module 3. All R packages must be installed inside the <code>scart_env</code> environment.</p>
+
+    <h3>3a. Install R and system libraries via conda</h3>
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre>conda install -c conda-forge -c bioconda \
+  r-base r-devtools r-remotes r-ggplot2 r-data.table \
+  r-igraph r-gdtools r-ragg r-dplyr \
+  cairo freetype fontconfig harfbuzz fribidi \
+  libpng libtiff jpeg libwebp</pre>
+    </div>
+
+    <h3>3b. Install Bioconductor packages</h3>
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre>conda install -c conda-forge -c bioconda \
+  bioconductor-annotationdbi bioconductor-go.db \
+  bioconductor-org.hs.eg.db bioconductor-biomart \
+  bioconductor-scran bioconductor-genomicfeatures \
+  bioconductor-rtracklayer \
+  bioconductor-txdb.hsapiens.ucsc.hg19.knowngene \
+  bioconductor-clusterprofiler bioconductor-enrichplot \
+  bioconductor-ggtree bioconductor-homo.sapiens</pre>
+    </div>
+
+    <h3>3c. Install SCEVAN from R</h3>
+    <p>Open an R console inside the activated environment and run:</p>
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">R</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre>library(devtools)
+install_github(<span class="str">"miccec/yaGST"</span>)
+install_github(<span class="str">"AntonioDeFalco/SCEVAN"</span>)
+
+<span class="c"># Verify installation</span>
+library(SCEVAN)
+<span class="c"># Should load without error</span></pre>
+    </div>
+
+    <div class="callout callout-info">
+      <span class="callout-icon">ℹ️</span>
+      <div>If you do not need SCEVAN (e.g. you plan to use <code>malignant_strategy="scMalignant"</code> only), you can skip Step 3 entirely. Module 3 will use scMalignantFinder alone.</div>
+    </div>
+
+    <!-- STEP 4 -->
+    <h2 id="jupyter">Step 4 — Jupyter Notebook Setup</h2>
+    <p>Register the <code>scart_env</code> environment as a Jupyter kernel so you can run SCART notebooks interactively.</p>
+
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre>pip install notebook ipykernel
+python -m ipykernel install --user \
+  --name=scart_env \
+  --display-name "Python (scart_env)"
+jupyter notebook</pre>
+    </div>
+
+    <!-- STEP 5 -->
+    <h2 id="verify">Step 5 — Verify Installation</h2>
+    <p>Confirm SCART is installed and all imports work:</p>
+
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre><span class="kw">import</span> SCART
+print(SCART.__version__)   <span class="c"># should print version string</span>
+
+<span class="c"># Test module imports</span>
+<span class="kw">from</span> SCART.geo_fetcher <span class="kw">import</span> SampleAnnotator
+<span class="kw">from</span> SCART <span class="kw">import</span> popv_annotation
+<span class="kw">from</span> SCART <span class="kw">import</span> preprocessing
+<span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> one_gene_combination
+<span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> two_gene_combination
+
+<span class="c"># List all valid cancer type keys</span>
+<span class="kw">from</span> SCART.geo_fetcher <span class="kw">import</span> VALID_CANCER_TYPES
+print(VALID_CANCER_TYPES)</pre>
+    </div>
+
+    <div class="callout callout-tip">
+      <span class="callout-icon">✅</span>
+      <div>If all imports succeed without errors, you are ready to proceed to the <a href="tutorial.html">Tutorial</a>.</div>
+    </div>
+
+    <!-- HPC -->
+    <h2 id="hpc">HPC / Cluster Notes</h2>
+    <p>When running SCART on an HPC cluster (SLURM, PBS, etc.), install the conda environment in your home or project directory and load the appropriate modules before activating.</p>
+
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre><span class="c"># Example HPC setup (SLURM)</span>
+module load conda/latest
+conda activate scart_env
+
+<span class="c"># For large GEO downloads, run on a compute node</span>
+<span class="c"># See the Tutorial SBATCH section for full scripts</span></pre>
+    </div>
+
+    <p>See the <a href="tutorial.html#sbatch">SBATCH Guide</a> in the tutorial for ready-to-use SLURM submission scripts for each module.</p>
+
+  </div>
+</div>
+
+<footer>
+  <div class="footer-inner">
+    <div class="footer-brand">
+      <a href="../index.html" class="nav-logo" style="margin-bottom:10px;">
+        <span class="nav-logo-text" style="color:white;">SC<span style="color:#79c0ff;">ART</span></span>
+      </a>
+      <p>End-to-end CAR-T target discovery from single-cell RNA-seq data.</p>
+    </div>
+    <div class="footer-col">
+      <h5>Documentation</h5>
+      <a href="overview.html">Overview</a>
+      <a href="install.html">Installation</a>
+      <a href="tutorial.html">Tutorial</a>
+    </div>
+    <div class="footer-col">
+      <h5>Links</h5>
+      <a href="https://github.com/csblab23/SCART" target="_blank">GitHub</a>
+      <a href="https://www.igib.res.in" target="_blank">CSIR-IGIB</a>
+      <a href="authors.html">Authors</a>
+    </div>
+  </div>
+  <div class="footer-bottom">
+    <span>© 2025 SCART · CSIR-IGIB · MIT License</span>
+    <a href="https://github.com/csblab23/SCART" target="_blank">GitHub</a>
+  </div>
+</footer>
+
+<script src="../js/main.js"></script>
+</body>
+</html>

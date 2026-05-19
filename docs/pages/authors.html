@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SCART — Single-Cell Automated CAR-T Target Discovery</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600;9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="docs/css/style.css">
+</head>
+<body>
+
+<!-- ── NAVBAR ───────────────────────────────────────────────────── -->
+<nav id="navbar">
+  <div class="nav-inner">
+    <a href="index.html" class="nav-logo">
+      <img src="external/igib_logo.jpeg" alt="CSIR-IGIB" class="nav-logo-img" onerror="this.style.display='none'">
+      <span class="nav-logo-text">SC<span>ART</span></span>
+    </a>
+    <ul class="nav-links">
+      <li><a href="index.html" class="active">Home</a></li>
+      <li><a href="docs/pages/overview.html">Overview</a></li>
+      <li><a href="docs/pages/install.html">Installation</a></li>
+      <li><a href="docs/pages/tutorial.html">Tutorial</a></li>
+      <li><a href="docs/pages/authors.html">Authors</a></li>
+    </ul>
+    <div class="nav-spacer"></div>
+    <a href="https://github.com/csblab23/SCART" class="nav-github" target="_blank">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<!-- ── HERO ─────────────────────────────────────────────────────── -->
+<section class="hero">
+  <div class="hero-inner">
+    <div class="hero-content">
+      <div class="hero-badge">
+        <div class="hero-badge-dot"></div>
+        Open Source · MIT License
+      </div>
+      <h1>CAR-T target<br>discovery from<br><em>single-cell data</em></h1>
+      <p class="hero-sub">End-to-end pipeline from GEO accession ID to ranked tumour-specific surface antigen candidates.</p>
+      <p class="hero-institution">Developed at CSIR-IGIB, New Delhi, India</p>
+      <div class="hero-ctas">
+        <a href="docs/pages/install.html" class="btn-primary">
+          <svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor"><path d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"/></svg>
+          Get Started
+        </a>
+        <a href="docs/pages/overview.html" class="btn-secondary">
+          Read the Docs →
+        </a>
+      </div>
+    </div>
+
+    <!-- Hero code card -->
+    <div class="hero-code">
+      <div class="hero-code-tabs">
+        <div class="hero-code-tab active" data-tab="quick">Quick Start</div>
+        <div class="hero-code-tab" data-tab="install">Install</div>
+      </div>
+      <div class="hero-code-body">
+        <pre data-panel="quick" class="hero-code-panel"><span class="kw">from</span> SCART.geo_fetcher <span class="kw">import</span> <span class="fn">SampleAnnotator</span>
+<span class="kw">from</span> SCART <span class="kw">import</span> popv_annotation, preprocessing
+<span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> (
+    one_gene_combination, two_gene_combination
+)
+
+<span class="c"># Module 1 — Fetch scRNA-seq from GEO</span>
+annotator = <span class="fn">SampleAnnotator</span>(
+    <span class="str">"GSE131907"</span>,
+    cancer_type=<span class="str">"lung_cancer"</span>,
+    min_genes=<span class="num">200</span>, max_mt=<span class="num">40</span>
+)
+_, tumor, _, _, path, ct, _ = annotator.<span class="fn">run</span>()
+
+<span class="c"># Module 2 — Annotate cell types (PopV)</span>
+adata = popv_annotation.<span class="fn">auto_run_popv</span>(
+    input_type=<span class="str">"raw"</span>, nsamples=<span class="num">300</span>
+)
+
+<span class="c"># Module 3 — Identify malignant cells</span>
+adata = preprocessing.<span class="fn">run_preprocessing_pipeline</span>(
+    malignant_strategy=<span class="str">"intersection"</span>,
+    log2fc_threshold=<span class="num">2.0</span>
+)
+
+<span class="c"># Module 4a — Single-gene scoring</span>
+df = one_gene_combination.<span class="fn">run</span>(safety_threshold=<span class="num">0.9</span>)
+
+<span class="c"># Module 4b — Two-gene logic-gate scoring</span>
+hof, _ = two_gene_combination.<span class="fn">run</span>(
+    pop_size=<span class="num">1000</span>, n_cpus=<span class="num">8</span>, n_runs=<span class="num">10</span>
+)
+print(hof.head(<span class="num">10</span>))</pre>
+        <pre data-panel="install" class="hero-code-panel" hidden><span class="c"># Step 1 — Create conda environment</span>
+conda create -n scart_env python=3.10 -y
+conda activate scart_env
+
+<span class="c"># Step 2 — Install SCART</span>
+pip install git+https://github.com/csblab23/SCART.git
+
+<span class="c"># Step 3 — Verify</span>
+<span class="kw">import</span> SCART
+print(SCART.__version__)</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── STATS ROW ─────────────────────────────────────────────────── -->
+<div class="stats-row">
+  <div class="stats-inner">
+    <div class="stat-item">
+      <div class="stat-value">3,568</div>
+      <div class="stat-label">CSPA surfaceome genes</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-value">54</div>
+      <div class="stat-label">HPA healthy tissue types</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-value">5</div>
+      <div class="stat-label">Pipeline modules</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-value">3</div>
+      <div class="stat-label">Logic gate types</div>
+    </div>
+  </div>
+</div>
+
+<!-- ── PIPELINE ──────────────────────────────────────────────────── -->
+<section class="section">
+  <div class="section-inner">
+    <div class="section-label">How it works</div>
+    <h2 class="section-title">Five-module automated pipeline</h2>
+    <p class="section-desc">Each module writes a structured output that feeds the next. Resume from any step using intermediate files.</p>
+
+    <div class="pipeline-grid">
+      <div class="pipeline-step">
+        <div class="pipeline-step-num">Module 1</div>
+        <div class="pipeline-step-icon">🌐</div>
+        <h4>GEO Fetcher</h4>
+        <p>Downloads scRNA-seq data from GEO, classifies tumour / normal samples, applies QC filters.</p>
+        <span class="pipeline-step-badge">GEOparse · Scrublet</span>
+      </div>
+      <div class="pipeline-step">
+        <div class="pipeline-step-num">Module 2</div>
+        <div class="pipeline-step-icon">🔬</div>
+        <h4>Cell Annotation</h4>
+        <p>Consensus cell-type annotation using 8 methods. Majority-vote prediction per cell.</p>
+        <span class="pipeline-step-badge">PopV</span>
+      </div>
+      <div class="pipeline-step">
+        <div class="pipeline-step-num">Module 3</div>
+        <div class="pipeline-step-icon">🧬</div>
+        <h4>Malignant ID</h4>
+        <p>Identifies malignant epithelial cells; performs surfaceome DE analysis filtered by CSPA.</p>
+        <span class="pipeline-step-badge">scMalignantFinder · SCEVAN</span>
+      </div>
+      <div class="pipeline-step">
+        <div class="pipeline-step-num">Module 4a</div>
+        <div class="pipeline-step-icon">🎯</div>
+        <h4>Single Gene</h4>
+        <p>Ranks candidate surface genes by tumour efficacy and off-tumour safety scores.</p>
+        <span class="pipeline-step-badge">HPA reference</span>
+      </div>
+      <div class="pipeline-step">
+        <div class="pipeline-step-num">Module 4b</div>
+        <div class="pipeline-step-icon">⚡</div>
+        <h4>Two-Gene GA</h4>
+        <p>Genetic algorithm searches AND / OR / NAND two-gene combinations for optimal targets.</p>
+        <span class="pipeline-step-badge">DEAP genetic algorithm</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── LOGIC GATES ───────────────────────────────────────────────── -->
+<section class="section section-alt">
+  <div class="section-inner">
+    <div class="section-label">Module 4b</div>
+    <h2 class="section-title">Two-gene combination scoring</h2>
+    <p class="section-desc">A genetic algorithm (DEAP) evaluates two-gene pairs across three logic gate types to maximise tumour coverage while minimising off-target risk.</p>
+
+    <div class="logic-gate-grid">
+      <div class="logic-gate-card gate-and">
+        <div class="gate-symbol">A &amp; B</div>
+        <h3>AND Gate</h3>
+        <p>CAR-T activates only when <em>both</em> genes are expressed on the same cell. Delivers the safest selectivity profile against healthy tissue.</p>
+        <span class="gate-tag">Best safety</span>
+      </div>
+      <div class="logic-gate-card gate-or">
+        <div class="gate-symbol">A | B</div>
+        <h3>OR Gate</h3>
+        <p>CAR-T activates when <em>either</em> gene is expressed. Maximises tumour cell coverage at the cost of slightly broader targeting.</p>
+        <span class="gate-tag">Best coverage</span>
+      </div>
+      <div class="logic-gate-card gate-nand">
+        <div class="gate-symbol">A &amp;! B</div>
+        <h3>NAND Gate</h3>
+        <p>CAR-T activates when gene A is expressed <em>and</em> gene B is absent. Exploits loss-of-expression patterns unique to tumour cells.</p>
+        <span class="gate-tag">Exploits antigen loss</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── FEATURES ──────────────────────────────────────────────────── -->
+<section class="section">
+  <div class="section-inner">
+    <div class="section-label">Features</div>
+    <h2 class="section-title">Everything in one pipeline</h2>
+    <p class="section-desc">SCART automates every step from raw data retrieval to ranked CAR-T target candidates.</p>
+
+    <div class="features-grid">
+      <div class="feature-card">
+        <div class="feature-icon">📥</div>
+        <h3>GEO Integration</h3>
+        <p>Fetch any scRNA-seq dataset directly from NCBI GEO with automatic tumour/normal sample classification.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🗳️</div>
+        <h3>Consensus Annotation</h3>
+        <p>PopV runs 8 independent cell-type classification methods and reports a majority-vote prediction per cell.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🔍</div>
+        <h3>Dual Malignancy Calling</h3>
+        <p>Intersection of scMalignantFinder and SCEVAN provides high-confidence malignant cell identification.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🛡️</div>
+        <h3>Safety Scoring</h3>
+        <p>Off-tumour safety evaluated against 54 healthy tissue types from the Human Protein Atlas.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🧪</div>
+        <h3>Surfaceome Filtering</h3>
+        <p>DE candidates are automatically filtered against the Cell Surface Protein Atlas (3,568 genes).</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">⚙️</div>
+        <h3>HPC Ready</h3>
+        <p>Full SLURM / SBATCH support with per-module job scripts and dependency chaining guidance.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── DATABASES ─────────────────────────────────────────────────── -->
+<section class="section section-alt">
+  <div class="section-inner">
+    <div class="section-label">Built-in Surfaceome Reference</div>
+    <h2 class="section-title">Four curated databases</h2>
+    <p class="section-desc">All reference databases are either bundled or auto-downloaded at runtime. No manual setup required.</p>
+
+    <div class="db-grid">
+      <div class="db-card">
+        <div class="db-icon">🧫</div>
+        <div>
+          <h4>CSPA — Cell Surface Protein Atlas</h4>
+          <p>Curated atlas of human cell surface proteins used for surfaceome DE filtering in Module 3.</p>
+          <div class="db-meta">3,568 genes · Module 3</div>
+          <br>
+          <a href="http://wlab.ethz.ch/cspa/" target="_blank" class="db-link">cspa.ethz.ch →</a>
+        </div>
+      </div>
+      <div class="db-card">
+        <div class="db-icon">🫀</div>
+        <div>
+          <h4>HPA — Human Protein Atlas</h4>
+          <p>54-tissue healthy expression reference for off-tumour safety scoring in Modules 4a and 4b.</p>
+          <div class="db-meta">54 tissue types · Module 4</div>
+          <br>
+          <a href="https://www.proteinatlas.org/" target="_blank" class="db-link">proteinatlas.org →</a>
+        </div>
+      </div>
+      <div class="db-card">
+        <div class="db-icon">🧠</div>
+        <div>
+          <h4>Tabula Sapiens</h4>
+          <p>Multi-organ single-cell atlas used as the cell-type annotation reference in Module 2 (PopV).</p>
+          <div class="db-meta">30+ tissue types · Module 2</div>
+          <br>
+          <a href="https://tabula-sapiens-portal.ds.czbiohub.org/" target="_blank" class="db-link">tabula-sapiens →</a>
+        </div>
+      </div>
+      <div class="db-card">
+        <div class="db-icon">🗂️</div>
+        <div>
+          <h4>PopV — Consensus Annotation</h4>
+          <p>Multi-method consensus framework running 8 classifiers with majority-vote cell-type predictions.</p>
+          <div class="db-meta">8 methods · Module 2</div>
+          <br>
+          <a href="https://github.com/YosefLab/PopV" target="_blank" class="db-link">github.com/YosefLab/PopV →</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── QUICK INSTALL ─────────────────────────────────────────────── -->
+<div class="install-strip">
+  <div class="install-strip-inner">
+    <h2>Get started in minutes</h2>
+    <p>Install from GitHub with pip. Python 3.10 and conda recommended.</p>
+
+    <div class="install-cmd">
+      <span class="install-cmd-dollar">$</span>
+      <code>pip install git+https://github.com/csblab23/SCART.git</code>
+      <button class="install-cmd-copy" onclick="copyInstall(this)">Copy</button>
+    </div>
+
+    <div class="install-steps">
+      <div class="install-step">
+        <div class="install-step-n">Step 1</div>
+        <p>Create a conda environment with Python 3.10</p>
+      </div>
+      <div class="install-step">
+        <div class="install-step-n">Step 2</div>
+        <p>pip install SCART from GitHub</p>
+      </div>
+      <div class="install-step">
+        <div class="install-step-n">Step 3</div>
+        <p>Install R dependencies for SCEVAN (Module 3)</p>
+      </div>
+      <div class="install-step">
+        <div class="install-step-n">Step 4</div>
+        <p>Register kernel and open Jupyter notebook</p>
+      </div>
+    </div>
+
+    <br>
+    <a href="docs/pages/install.html" class="btn-primary" style="display:inline-flex;margin-top:8px;">
+      Full Installation Guide →
+    </a>
+  </div>
+</div>
+
+<!-- ── FOOTER ────────────────────────────────────────────────────── -->
+<footer>
+  <div class="footer-inner">
+    <div class="footer-brand">
+      <a href="index.html" class="nav-logo" style="margin-bottom:10px;">
+        <span class="nav-logo-text" style="color:white;">SC<span style="color:#79c0ff;">ART</span></span>
+      </a>
+      <p>End-to-end CAR-T target discovery from single-cell RNA-seq data. Developed at CSIR-IGIB, New Delhi, India.</p>
+    </div>
+    <div class="footer-col">
+      <h5>Documentation</h5>
+      <a href="docs/pages/overview.html">Overview</a>
+      <a href="docs/pages/install.html">Installation</a>
+      <a href="docs/pages/tutorial.html">Tutorial</a>
+    </div>
+    <div class="footer-col">
+      <h5>Links</h5>
+      <a href="https://github.com/csblab23/SCART" target="_blank">GitHub</a>
+      <a href="https://www.igib.res.in" target="_blank">CSIR-IGIB</a>
+      <a href="docs/pages/authors.html">Authors</a>
+    </div>
+  </div>
+  <div class="footer-bottom">
+    <span>© 2025 SCART · CSIR-IGIB · MIT License</span>
+    <a href="https://github.com/csblab23/SCART" target="_blank">GitHub</a>
+  </div>
+</footer>
+
+<script src="docs/js/main.js"></script>
+</body>
+</html>
