@@ -1,4 +1,4 @@
-![SCART — Single-Cell CAR-T Target Discovery](SCART/external/scart_logo_updated1.svg)
+![SCART — Single-Cell CAR-T Target Discovery](SCART/external/logo1.png)
 
 **SCART** is an end-to-end computational pipeline for identifying tumour-specific surface protein targets for CAR-T cell therapy from single-cell RNA-seq data. Starting from **RAW** GEO accession IDs or user-provided h5ad files with **RAW** data, SCART automates cell-type annotation, malignant cell identification, surfaceome differential expression, and logic-gate gene combination scoring to rank One and Two gene combination candidate CAR-T targets by efficacy and safety.
 
@@ -77,19 +77,18 @@ conda install -c conda-forge -c bioconda \
   r-base r-devtools r-remotes r-ggplot2 r-data.table \
   r-igraph r-gdtools r-ragg r-dplyr \
   cairo freetype fontconfig harfbuzz fribidi \
-  libpng libtiff libjpeg libwebp
+  libpng libtiff jpeg libwebp
 ```
 
 ```bash
-conda install -c bioconda -c conda-forge \
-  r-fgsea \
-  bioconductor-genomeinfoDb \
-  bioconductor-genomicranges \
-  bioconductor-summarizedexperiment \
-  bioconductor-singlecellexperiment \
-  bioconductor-scuttle \
-  bioconductor-scran \
-  r-rcurl -y
+conda install -c conda-forge -c bioconda \
+  bioconductor-annotationdbi bioconductor-go.db \
+  bioconductor-org.hs.eg.db bioconductor-biomart \
+  bioconductor-scran bioconductor-genomicfeatures \
+  bioconductor-rtracklayer \
+  bioconductor-txdb.hsapiens.ucsc.hg19.knowngene \
+  bioconductor-clusterprofiler bioconductor-enrichplot \
+  bioconductor-ggtree bioconductor-homo.sapiens
 ```
 
 Then inside R:
