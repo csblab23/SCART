@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Overview — SCART</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600;9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+
+<nav id="navbar">
+  <div class="nav-inner">
+    <a href="../index.html" class="nav-logo">
+      <img src="../../external/igib_logo.jpeg" alt="CSIR-IGIB" class="nav-logo-img" onerror="this.style.display='none'">
+      <span class="nav-logo-text">SC<span>ART</span></span>
+    </a>
+    <ul class="nav-links">
+      <li><a href="../index.html">Home</a></li>
+      <li><a href="overview.html" class="active">Overview</a></li>
+      <li><a href="install.html">Installation</a></li>
+      <li><a href="tutorial.html">Tutorial</a></li>
+      <li><a href="authors.html">Authors</a></li>
+    </ul>
+    <div class="nav-spacer"></div>
+    <a href="https://github.com/csblab23/SCART" class="nav-github" target="_blank">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<div class="page-header">
+  <div class="page-header-inner">
+    <div class="page-header-tag">Documentation</div>
+    <h1>Overview &amp; Module Reference</h1>
+    <p>Comprehensive guide to SCART's pipeline architecture, parameters, and output files.</p>
+  </div>
+</div>
+
+<div class="content-layout">
+  <!-- SIDEBAR -->
+  <aside class="sidebar">
+    <ul class="sidebar-nav">
+      <li class="sidebar-group">General</li>
+      <li><a href="#overview">What is SCART?</a></li>
+      <li><a href="#architecture">Pipeline Architecture</a></li>
+      <li><a href="#databases">Reference Databases</a></li>
+      <li class="sidebar-group">Modules</li>
+      <li><a href="#module1">Module 1 — GEO Fetcher</a></li>
+      <li><a href="#module2">Module 2 — Cell Annotation</a></li>
+      <li><a href="#module3">Module 3 — Malignant ID</a></li>
+      <li><a href="#module4a">Module 4a — Single Gene</a></li>
+      <li><a href="#module4b">Module 4b — Two Gene</a></li>
+      <li class="sidebar-group">Reference</li>
+      <li><a href="#outputs">Output Files</a></li>
+      <li><a href="#cancer-types">Cancer Type Keys</a></li>
+      <li><a href="#manual-annotation">Manual Annotation</a></li>
+    </ul>
+  </aside>
+
+  <!-- CONTENT -->
+  <div class="content-body">
+
+    <h2 id="overview">What is SCART?</h2>
+    <p>SCART (<strong>S</strong>ingle-<strong>C</strong>ell <strong>A</strong>utomated CAR-T target discovery) is an end-to-end computational pipeline for identifying tumour-specific surface protein targets for CAR-T cell therapy from single-cell RNA-seq data.</p>
+    <p>CAR-T therapy requires surface antigens that are highly expressed on tumour cells and absent (or minimally expressed) on healthy tissues. SCART automates this discovery by integrating GEO data retrieval, cell-type annotation, malignant cell identification, surfaceome differential expression, and logic-gate gene combination scoring into a single cohesive pipeline.</p>
+
+    <div class="callout callout-info">
+      <span class="callout-icon">ℹ️</span>
+      <div>SCART accepts raw GEO accession IDs <em>or</em> user-supplied h5ad files with raw counts. You can also resume from any module by providing preprocessed data.</div>
+    </div>
+
+    <h2 id="architecture">Pipeline Architecture</h2>
+    <p>The pipeline consists of five sequential modules. Each module writes an output h5ad or CSV that serves as input to the next. All intermediate outputs are saved so you can resume from any step.</p>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Module</th><th>Input</th><th>Output</th><th>Key tool</th></tr></thead>
+        <tbody>
+          <tr><td><strong>1 — GEO Fetcher</strong></td><td>GEO accession ID / h5ad</td><td><code>*_tumor.h5ad</code></td><td>GEOparse, Scrublet</td></tr>
+          <tr><td><strong>2 — Cell Annotation</strong></td><td>Module 1 output</td><td><code>final_popv_annotated.h5ad</code></td><td>PopV</td></tr>
+          <tr><td><strong>3 — Malignant ID</strong></td><td>Module 2 output</td><td><code>final_tumor.h5ad</code></td><td>scMalignantFinder, SCEVAN</td></tr>
+          <tr><td><strong>4a — Single Gene</strong></td><td>Module 3 output</td><td><code>single_gene_results.csv</code></td><td>HPA reference</td></tr>
+          <tr><td><strong>4b — Two Gene</strong></td><td>Module 3 output</td><td><code>two_gene_hof.csv</code></td><td>DEAP genetic algorithm</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="databases">Reference Databases</h2>
+    <p>SCART integrates four curated databases. All are either bundled or auto-downloaded during the pipeline run.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Database</th><th>Size</th><th>Usage</th><th>Link</th></tr></thead>
+        <tbody>
+          <tr><td><strong>CSPA</strong> — Cell Surface Protein Atlas</td><td>3,568 genes</td><td>Surfaceome DE filtering (Module 3)</td><td><a href="http://wlab.ethz.ch/cspa/" target="_blank">cspa →</a></td></tr>
+          <tr><td><strong>HPA</strong> — Human Protein Atlas</td><td>54 tissue types</td><td>Off-tumour safety scoring (Module 4)</td><td><a href="https://www.proteinatlas.org/" target="_blank">proteinatlas.org →</a></td></tr>
+          <tr><td><strong>Tabula Sapiens</strong></td><td>30+ cancer types</td><td>PopV annotation reference (Module 2)</td><td><a href="https://tabula-sapiens-portal.ds.czbiohub.org/" target="_blank">tabula-sapiens →</a></td></tr>
+          <tr><td><strong>PopV</strong> — multi-method consensus</td><td>8 methods</td><td>Cell-type annotation (Module 2)</td><td><a href="https://github.com/YosefLab/PopV" target="_blank">GitHub →</a></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- ── MODULE 1 ─────────────────────────────────────────────────── -->
+    <h2 id="module1">Module 1 — GEO Fetcher</h2>
+    <p>Downloads and parses scRNA-seq datasets from GEO, classifies samples as tumour / normal / unspecified, applies QC filters, and writes a tumour h5ad file for downstream analysis.</p>
+
+    <h3>Basic usage</h3>
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre><span class="kw">from</span> SCART.geo_fetcher <span class="kw">import</span> <span class="fn">SampleAnnotator</span>
+
+annotator = <span class="fn">SampleAnnotator</span>(
+    <span class="str">"GSE131907"</span>,
+    cancer_type=<span class="str">"lung_cancer"</span>,
+    min_genes=<span class="num">200</span>,
+    max_mt=<span class="num">40</span>
+)
+normal, tumor, unspecified, info, path, ct, results = annotator.<span class="fn">run</span>()</pre>
+    </div>
+
+    <h3>Parameters</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Parameter</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>*inputs</code></td><td>str</td><td>—</td><td>One or more GEO accession IDs (e.g. <code>"GSE131907"</code>) or paths to <code>.h5ad</code> files</td></tr>
+          <tr><td><code>cancer_type</code></td><td>str</td><td><strong>required</strong></td><td>Cancer type label. Tabula Sapiens key for auto reference recommendation, or free-text string.</td></tr>
+          <tr><td><code>min_genes</code></td><td>int or None</td><td><code>None</code></td><td>Minimum genes per cell for QC. <code>None</code> = QC skipped</td></tr>
+          <tr><td><code>max_mt</code></td><td>float or None</td><td><code>None</code></td><td>Maximum mitochondrial % per cell</td></tr>
+          <tr><td><code>manual_annotation_col</code></td><td>str or None</td><td><code>None</code></td><td>obs column name with your own cell-type labels. When set, Module 2 (PopV) is skipped.</td></tr>
+          <tr><td><code>exclude_gsm_ids</code></td><td>list or None</td><td><code>None</code></td><td>List of GSM IDs to exclude (e.g. engineered CAR-T products)</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout callout-tip">
+      <span class="callout-icon">💡</span>
+      <div>To see all valid Tabula Sapiens cancer type keys: <code>from SCART.geo_fetcher import VALID_CANCER_TYPES; print(VALID_CANCER_TYPES)</code></div>
+    </div>
+
+    <h3>Sample classification logic</h3>
+    <p>Each GSM is classified in strict priority order (first match wins): <strong>normal</strong> (keywords: normal, healthy, control, adjacent normal, non-tumor…) → <strong>tumor</strong> (keywords: carcinoma, malignant, aml, cml, leukemia, lymphoma, myeloma, glioblastoma, melanoma, sarcoma…) → <strong>unspecified</strong>.</p>
+
+    <!-- ── MODULE 2 ─────────────────────────────────────────────────── -->
+    <h2 id="module2">Module 2 — Cell-Type Annotation (PopV)</h2>
+    <p>Annotates cell types using PopV, a consensus framework running 8 methods and reporting a majority-vote prediction per cell. Can be skipped entirely when <code>manual_annotation_col</code> was provided in Module 1.</p>
+
+    <h3>Basic usage</h3>
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre><span class="kw">from</span> SCART <span class="kw">import</span> popv_annotation
+
+adata = popv_annotation.<span class="fn">auto_run_popv</span>(
+    input_type     = <span class="str">"raw"</span>,
+    nsamples       = <span class="num">300</span>,
+    user_reference = <span class="str">"/path/to/Lung_TSP1_30_version2d_10X_smartseq_scvi.h5ad"</span>
+)</pre>
+    </div>
+
+    <h3>Parameters</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Parameter</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>input_type</code></td><td>str</td><td><code>"raw"</code></td><td><code>"raw"</code> for raw counts; <code>"log1p"</code> for pre-normalised data (runs CellTypist only)</td></tr>
+          <tr><td><code>nsamples</code></td><td>int</td><td><code>300</code></td><td>Cells sampled per cell-type label during reference subsampling</td></tr>
+          <tr><td><code>output_dir</code></td><td>str</td><td><code>"popv_results"</code></td><td>Directory where <code>final_popv_annotated.h5ad</code> is saved</td></tr>
+          <tr><td><code>user_reference</code></td><td>str or None</td><td><code>None</code></td><td>Path to Tabula Sapiens tissue h5ad. If <code>None</code>, auto-downloaded from Figshare</td></tr>
+          <tr><td><code>drop_reference_columns</code></td><td>bool</td><td><code>True</code></td><td>Remove Tabula Sapiens metadata columns from output</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout callout-info">
+      <span class="callout-icon">ℹ️</span>
+      <div>Tabula Sapiens tissue references are available at <a href="https://doi.org/10.6084/m9.figshare.27921984" target="_blank">figshare.com/27921984</a>. Module 1 prints the recommended file name for your cancer type.</div>
+    </div>
+
+    <!-- ── MODULE 3 ─────────────────────────────────────────────────── -->
+    <h2 id="module3">Module 3 — Malignant Cell Identification</h2>
+    <p>Identifies malignant epithelial cells using scMalignantFinder and SCEVAN. Performs surfaceome DE analysis (Wilcoxon rank-sum, malignant vs non-malignant) filtered against the CSPA database. Outputs a binarised tumour expression matrix for Module 4.</p>
+    <p>Epithelial cells are selected by substring-matching <code>"epithelial cell"</code> (case-insensitive) in the <code>popv_majority_vote_prediction</code> column.</p>
+
+    <h3>Basic usage</h3>
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre><span class="kw">from</span> SCART <span class="kw">import</span> preprocessing
+
+adata_preprocessed = preprocessing.<span class="fn">run_preprocessing_pipeline</span>(
+    reference_h5ad     = <span class="str">"/path/to/tissue_reference.h5ad"</span>,
+    log2fc_threshold   = <span class="num">2.0</span>,
+    pval_adj_threshold = <span class="num">0.05</span>,
+    malignant_strategy = <span class="str">"intersection"</span>,
+)</pre>
+    </div>
+
+    <h3>Malignant strategy options</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Strategy</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>"intersection"</code></td><td><strong>Recommended.</strong> Cell must be called malignant by both scMalignantFinder AND SCEVAN. Most stringent, highest confidence.</td></tr>
+          <tr><td><code>"scMalignant"</code></td><td>Use only scMalignantFinder. Does not require SCEVAN or a reference h5ad.</td></tr>
+          <tr><td><code>"scevan"</code></td><td>Use only SCEVAN CNV analysis. Requires <code>reference_h5ad</code>.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Key parameters</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>log2fc_threshold</code></td><td><code>1.0</code></td><td>DEG log2 fold-change cutoff</td></tr>
+          <tr><td><code>pval_adj_threshold</code></td><td><code>0.05</code></td><td>BH-adjusted p-value cutoff</td></tr>
+          <tr><td><code>reference_h5ad</code></td><td><code>None</code></td><td>Normal tissue reference for SCEVAN. SCEVAN skipped if None.</td></tr>
+          <tr><td><code>scevan_ref_max_cells</code></td><td><code>500</code></td><td>Max normal reference cells subsampled for SCEVAN</td></tr>
+          <tr><td><code>scevan_batch_size</code></td><td><code>3000</code></td><td>Query cells per SCEVAN batch</td></tr>
+          <tr><td><code>scevan_par_cores</code></td><td><code>1</code></td><td>CPU cores for parallel SCEVAN batches</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- ── MODULE 4a ─────────────────────────────────────────────────── -->
+    <h2 id="module4a">Module 4a — Single-Gene Scoring</h2>
+    <p>Scores every surfaceome-DE gene for efficacy (tumour coverage) and safety (healthy tissue sparing). Outputs a ranked CSV of all candidate genes.</p>
+
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre><span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> one_gene_combination
+
+df = one_gene_combination.<span class="fn">run</span>(
+    hpa_path         = <span class="str">"/path/to/HPA_updated.h5ad"</span>,
+    safety_threshold = <span class="num">0.9</span>,
+)
+
+df_filtered = df[df[<span class="str">"Safety"</span>] >= <span class="num">0.9</span>].sort_values(<span class="str">"Efficacy"</span>, ascending=<span class="kw">False</span>)
+print(df_filtered.head(<span class="num">10</span>))</pre>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>safety_threshold</code></td><td><code>0.9</code></td><td>Minimum fraction of healthy cells that must NOT express the gene</td></tr>
+          <tr><td><code>hpa_path</code></td><td><code>None</code></td><td>Healthy reference (h5ad or tsv). Auto-downloaded if None.</td></tr>
+          <tr><td><code>tumor_path</code></td><td><code>None</code></td><td>Module 3 output. Auto-detected if None.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- ── MODULE 4b ─────────────────────────────────────────────────── -->
+    <h2 id="module4b">Module 4b — Two-Gene Logic-Gate Scoring</h2>
+    <p>Uses a genetic algorithm (DEAP) to search optimal two-gene combinations with AND, OR, and NAND logic gates. Runs multiple independent random-seed runs for robust discovery.</p>
+
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre><span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> two_gene_combination
+
+df_hof, df_all = two_gene_combination.<span class="fn">run</span>(
+    hpa_path         = <span class="str">"/path/to/HPA_updated.h5ad"</span>,
+    safety_threshold = <span class="num">0.9</span>,
+    pop_size         = <span class="num">1000</span>,
+    Gmax             = <span class="num">100</span>,
+    patience         = <span class="num">50</span>,
+    n_cpus           = <span class="num">8</span>,
+    n_runs           = <span class="num">10</span>,
+)</pre>
+    </div>
+
+    <h3>Logic gates evaluated</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Gate</th><th>Symbol</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><strong>AND</strong></td><td><code>A &amp; B</code></td><td>Both genes expressed on the same cell. Best safety profile.</td></tr>
+          <tr><td><strong>OR</strong></td><td><code>A | B</code></td><td>Either gene triggers activation. Best tumour coverage.</td></tr>
+          <tr><td><strong>NAND</strong></td><td><code>A &amp;! B</code></td><td>Gene A expressed AND gene B absent. Exploits loss-of-expression patterns.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Hardware recommendations</h3>
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre><span class="c"># Laptop (quick test)</span>
+two_gene_combination.<span class="fn">run</span>(pop_size=<span class="num">200</span>, Gmax=<span class="num">20</span>, patience=<span class="num">10</span>, n_cpus=<span class="num">4</span>, n_runs=<span class="num">2</span>)
+
+<span class="c"># Standard workstation</span>
+two_gene_combination.<span class="fn">run</span>(pop_size=<span class="num">1000</span>, Gmax=<span class="num">100</span>, patience=<span class="num">50</span>, n_cpus=<span class="num">8</span>, n_runs=<span class="num">10</span>)
+
+<span class="c"># HPC node</span>
+two_gene_combination.<span class="fn">run</span>(pop_size=<span class="num">2000</span>, Gmax=<span class="num">200</span>, patience=<span class="num">100</span>, n_cpus=<span class="num">40</span>, n_runs=<span class="num">10</span>)</pre>
+    </div>
+
+    <!-- ── OUTPUTS ─────────────────────────────────────────────────── -->
+    <h2 id="outputs">Output Files</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Module</th><th>File</th><th>Contents</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td><code>GSE*_tumor.h5ad</code> / <code>combined_tumor.h5ad</code></td><td>Raw tumour counts, cancer type, QC params, annotation flags</td></tr>
+          <tr><td>2</td><td><code>popv_results/final_popv_annotated.h5ad</code></td><td>Cell-type labels, raw counts layer</td></tr>
+          <tr><td>3</td><td><code>preprocessing_results/final_tumor.h5ad</code></td><td>Malignant cells, binarised expression, DEG results</td></tr>
+          <tr><td>4a</td><td><code>single_gene_results.csv</code></td><td>Columns: gene, efficacy, safety</td></tr>
+          <tr><td>4b</td><td><code>two_gene_hof.csv</code></td><td>Best gene pairs: seed, generation, LogicGates, Genes, Efficacy, Safety</td></tr>
+          <tr><td>4b</td><td><code>two_gene_complete.csv</code></td><td>All evaluated pairs across every generation and run</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- ── CANCER TYPES ─────────────────────────────────────────────── -->
+    <h2 id="cancer-types">Cancer Type Keys (Tabula Sapiens)</h2>
+    <p>Pass any of the following exact strings as <code>cancer_type</code> to receive an automatic Tabula Sapiens reference file recommendation. Other values are accepted as free-text and prompt you to supply your own reference.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Key</th><th>Tissue / Cancer</th></tr></thead>
+        <tbody>
+          <tr><td><code>bladder_cancer</code></td><td>Bladder / urothelial carcinoma</td></tr>
+          <tr><td><code>blood_cancer</code></td><td>Blood / leukaemia (AML, CML, ALL, CLL), lymphoma, myeloma</td></tr>
+          <tr><td><code>bone_marrow_cancer</code></td><td>Bone marrow / multiple myeloma, MDS</td></tr>
+          <tr><td><code>breast_cancer</code></td><td>Breast / TNBC, HER2+, luminal A/B, IDC, ILC</td></tr>
+          <tr><td><code>kidney_cancer</code></td><td>Kidney / RCC (clear cell, papillary, chromophobe), Wilms</td></tr>
+          <tr><td><code>large_intestine_cancer</code></td><td>Colon &amp; rectum / colorectal cancer, CRC</td></tr>
+          <tr><td><code>liver_cancer</code></td><td>Liver / HCC, cholangiocarcinoma</td></tr>
+          <tr><td><code>lung_cancer</code></td><td>Lung / NSCLC (LUAD, LUSC), SCLC, mesothelioma</td></tr>
+          <tr><td><code>lymph_node_cancer</code></td><td>Lymph node / DLBCL, follicular, Hodgkin, mantle cell</td></tr>
+          <tr><td><code>ovary_cancer</code></td><td>Ovary / HGSOC, LGSOC, clear cell, endometrioid</td></tr>
+          <tr><td><code>pancreas_cancer</code></td><td>Pancreas / PDAC, PNET</td></tr>
+          <tr><td><code>prostate_cancer</code></td><td>Prostate / adenocarcinoma, CRPC</td></tr>
+          <tr><td><code>skin_cancer</code></td><td>Skin / melanoma, squamous cell, basal cell</td></tr>
+          <tr><td><code>stomach_cancer</code></td><td>Stomach / gastric carcinoma, diffuse, GEJ</td></tr>
+          <tr><td><code>uterus_cancer</code></td><td>Uterus / endometrial, cervical, uterine sarcoma</td></tr>
+          <tr><td colspan="2" style="color:var(--text-muted);font-style:italic;">+ ear, eye, fat, heart, muscle, salivary gland, small intestine, spleen, testis, thymus, tongue, trachea, vasculature</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- ── MANUAL ANNOTATION ─────────────────────────────────────────── -->
+    <h2 id="manual-annotation">Manual Annotation — Skip PopV</h2>
+    <p>If you already have cell-type annotations (from Seurat, Scanpy, CellTypist, etc.), provide your annotation column in Module 1 to skip PopV entirely.</p>
+
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre>annotator = <span class="fn">SampleAnnotator</span>(
+    <span class="str">"my_data.h5ad"</span>,
+    cancer_type=<span class="str">"ovary_cancer"</span>,
+    manual_annotation_col=<span class="str">"cell_type"</span>,  <span class="c"># your obs column</span>
+    min_genes=<span class="num">200</span>,
+    max_mt=<span class="num">40</span>,
+)
+<span class="c"># Then skip Module 2 — go directly to Module 3</span></pre>
+    </div>
+
+    <div class="callout callout-warn">
+      <span class="callout-icon">⚠️</span>
+      <div><strong>Label requirement:</strong> Epithelial cell labels must contain the substring <code>"epithelial cell"</code> (case-insensitive). Labels like <code>"epithelial"</code> or <code>"Epithelial_cells"</code> will NOT be recognised. Examples that work: <code>"glandular epithelial cell"</code>, <code>"lung epithelial cell"</code>, <code>"ovarian surface epithelial cell"</code>.</div>
+    </div>
+
+  </div>
+</div>
+
+<!-- FOOTER -->
+<footer>
+  <div class="footer-inner">
+    <div class="footer-brand">
+      <a href="../index.html" class="nav-logo" style="margin-bottom:10px;">
+        <span class="nav-logo-text" style="color:white;">SC<span style="color:#79c0ff;">ART</span></span>
+      </a>
+      <p>End-to-end CAR-T target discovery from single-cell RNA-seq data. Developed at CSIR-IGIB, New Delhi, India.</p>
+    </div>
+    <div class="footer-col">
+      <h5>Documentation</h5>
+      <a href="overview.html">Overview</a>
+      <a href="install.html">Installation</a>
+      <a href="tutorial.html">Tutorial</a>
+    </div>
+    <div class="footer-col">
+      <h5>Links</h5>
+      <a href="https://github.com/csblab23/SCART" target="_blank">GitHub</a>
+      <a href="https://www.igib.res.in" target="_blank">CSIR-IGIB</a>
+      <a href="authors.html">Authors</a>
+    </div>
+  </div>
+  <div class="footer-bottom">
+    <span>© 2025 SCART · CSIR-IGIB · MIT License</span>
+    <a href="https://github.com/csblab23/SCART" target="_blank">GitHub</a>
+  </div>
+</footer>
+
+<script src="../js/main.js"></script>
+</body>
+</html>
