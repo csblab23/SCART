@@ -324,16 +324,21 @@ footer {
   pointer-events: none;
 }
 /* Subtle grid */
+
 .hero::after {
   content: '';
-  position: absolute; inset: 0;
-  background-image:
+  position: absolute;
+  inset: 0;
+  /* remove these lines */
+  /* background-image:
     linear-gradient(var(--border-light) 1px, transparent 1px),
     linear-gradient(90deg, var(--border-light) 1px, transparent 1px);
-  background-size: 40px 40px;
-  opacity: .5;
+  background-size: 40px 40px; */
+  
+  opacity: 0;
   pointer-events: none;
 }
+
 .hero-inner {
   max-width: 1160px; margin: 0 auto; width: 100%;
   position: relative; z-index: 1;
