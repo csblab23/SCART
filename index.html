@@ -75,8 +75,8 @@ body { background: #ffffff !important; }
   align-items: flex-start !important;
   max-width: 560px !important;
   margin: 0 !important;
-  /* Moved further right toward center */
-  padding: 0 0 0 140px !important;
+  /* CHANGED: moved closer to center by reducing left padding */
+  padding: 0 0 0 60px !important;
   width: 48% !important;
   position: relative;
   z-index: 2;
@@ -171,13 +171,11 @@ body { background: #ffffff !important; }
   font-style: italic;
 }
 
-/* Apoptosis red glow overlay on the entire page */
+/* CHANGED: Apoptosis red glow — now absolute inside hero, not fixed */
 #apoptosisOverlay {
-  position: fixed;
-  inset: 0;
+  position: absolute;
   pointer-events: none;
-  z-index: 9999;
-  background: radial-gradient(ellipse at center, rgba(200,30,40,0.18) 0%, rgba(200,30,40,0.06) 50%, transparent 80%);
+  z-index: 1;
   opacity: 0;
   transition: none;
 }
@@ -190,9 +188,6 @@ body { background: #ffffff !important; }
 </style>
 </head>
 <body>
-
-<!-- Apoptosis full-screen glow overlay -->
-<div id="apoptosisOverlay"></div>
 
 <!-- ═══════════════════════════════════════
      NAVBAR
@@ -229,6 +224,9 @@ body { background: #ffffff !important; }
      HERO
 ═══════════════════════════════════════ -->
 <section class="hero">
+  <!-- Apoptosis glow overlay — INSIDE hero so it scrolls with the page -->
+  <div id="apoptosisOverlay"></div>
+
   <div class="hero-inner">
     <div class="hero-content">
       <div class="scart-wordmark hero-scart-logo">S<span class="car">CAR</span>T</div>
@@ -694,6 +692,27 @@ body { background: #ffffff !important; }
     return [dists[0].i, dists[1].i];
   }
 
+  /* ── Size and position the overlay div to match the cancer cell area ── */
+  function updateOverlayPosition(tumX, tumY, tumR, glowOpacity) {
+    const glowR = tumR * 3.5;
+    // Convert canvas coords to hero-section-relative coords
+    const hero = canvas.closest('section');
+    const heroRect = hero.getBoundingClientRect();
+    const canvasRect = canvas.getBoundingClientRect();
+    // canvas is absolutely positioned inside hero-anim-panel which is inside hero
+    // canvas coords map 1:1 to hero coords since panel covers the full hero
+    const left = tumX - glowR;
+    const top  = tumY - glowR;
+    const size = glowR * 2;
+    overlay.style.left    = left + 'px';
+    overlay.style.top     = top + 'px';
+    overlay.style.width   = size + 'px';
+    overlay.style.height  = size + 'px';
+    overlay.style.borderRadius = '50%';
+    overlay.style.background = 'radial-gradient(ellipse at center, rgba(200,30,40,0.55) 0%, rgba(200,30,40,0.22) 35%, rgba(200,30,40,0.06) 65%, transparent 100%)';
+    overlay.style.opacity = glowOpacity.toFixed(3);
+  }
+
   /* ── Main loop ── */
   function draw() {
     requestAnimationFrame(draw);
@@ -718,7 +737,8 @@ body { background: #ffffff !important; }
     const cy    = H * .5;
     const cartR = Math.min(W, H) * .13;
     const tumR  = Math.min(W, H) * .115;
-    const tumX  = W - tumR - Math.min(W,H)*.08;
+    // CHANGED: moved cancer cell closer to center (was W - tumR - Math.min(W,H)*.08)
+    const tumX  = W * 0.62;
     const tumY  = cy;
     const SPIKES = 11;
 
@@ -814,9 +834,9 @@ body { background: #ffffff !important; }
       tumAlpha  = Math.max(0, 1 - pf*7);
       cartAlpha = Math.max(0, 1 - pf*2.8);
 
-      // Full-screen red glow: ramps up quickly, fades by end
+      // Localised glow at cancer cell position only
       const glowFade = pf < .25 ? pf/.25 : Math.max(0, 1-(pf-.25)/.75);
-      overlay.style.opacity = (glowFade * 0.85).toFixed(3);
+      updateOverlayPosition(tumX, tumY, tumR, glowFade * 0.85);
 
       if (pf < .22 && Math.random() < .28) {
         const a = Math.random()*Math.PI*2, sp=1.4+Math.random()*2.4;
