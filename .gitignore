@@ -19,5 +19,6 @@ __pycache__/
 final_test_output/
 cell_type_annotation_out/
 tumor_h5ad_out/
-
+git-lfs-3.4.0/
+git-lfs-linux-amd64-v3.4.0.tar.gz
 
