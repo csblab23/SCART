@@ -1,0 +1,871 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SCART — Single-Cell Automated CAR-T Target Discovery</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600;9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="docs/css/style.css">
+<style>
+/* ── NAVBAR LOGO OVERRIDE ─────────────────────────────── */
+.nav-logo-img-scart {
+  height: 38px;
+  width: auto;
+  object-fit: contain;
+  display: block;
+}
+.nav-logo-img-igib {
+  height: 52px;
+  width: auto;
+  object-fit: contain;
+  display: block;
+  filter: drop-shadow(0 1px 3px rgba(0,0,0,0.15));
+}
+.nav-igib-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: 18px;
+}
+.nav-igib-right span {
+  font-size: 11px;
+  color: var(--text-muted, #8b9ab0);
+  line-height: 1.3;
+  max-width: 90px;
+}
+
+/* ── SCROLL ANIMATION SECTION ─────────────────────────── */
+.scroll-scene-section {
+  position: relative;
+  height: 400vh;
+  background: linear-gradient(180deg, #0a0f1a 0%, #0d1526 40%, #071020 100%);
+  overflow: hidden;
+}
+.scroll-scene-sticky {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.scroll-scene-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.scroll-caption {
+  position: absolute;
+  bottom: 60px;
+  left: 50%;
+  transform: translateX(-50%);
+  text-align: center;
+  color: white;
+  z-index: 10;
+  pointer-events: none;
+}
+.scroll-caption h2 {
+  font-family: 'Instrument Serif', serif;
+  font-size: clamp(1.8rem, 4vw, 3rem);
+  font-weight: 400;
+  margin: 0 0 8px;
+  color: #fff;
+  opacity: 0;
+  transform: translateY(20px);
+  transition: opacity 0.6s ease, transform 0.6s ease;
+}
+.scroll-caption p {
+  font-family: 'DM Sans', sans-serif;
+  font-size: 1rem;
+  color: rgba(255,255,255,0.6);
+  margin: 0;
+  opacity: 0;
+  transition: opacity 0.6s ease 0.15s;
+}
+.scroll-caption.visible h2,
+.scroll-caption.visible p {
+  opacity: 1;
+  transform: translateY(0);
+}
+.scroll-phase-label {
+  position: absolute;
+  top: 40px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: rgba(121,192,255,0.7);
+  background: rgba(121,192,255,0.08);
+  border: 1px solid rgba(121,192,255,0.2);
+  padding: 6px 16px;
+  border-radius: 20px;
+  z-index: 10;
+  pointer-events: none;
+  transition: opacity 0.4s;
+}
+.scroll-progress-bar {
+  position: absolute;
+  right: 32px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 10;
+}
+.scroll-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.2);
+  border: 1px solid rgba(255,255,255,0.3);
+  transition: background 0.3s, transform 0.3s;
+}
+.scroll-dot.active {
+  background: #79c0ff;
+  transform: scale(1.4);
+  box-shadow: 0 0 8px #79c0ff;
+}
+</style>
+</head>
+<body>
+
+<!-- ── NAVBAR ───────────────────────────────────────────────────── -->
+<nav id="navbar">
+  <div class="nav-inner" style="justify-content: space-between;">
+    <!-- LEFT: SCART logo image -->
+    <a href="index.html" class="nav-logo" style="gap:10px;">
+      <img src="SCART/external/scart_logo.png" alt="SCART" class="nav-logo-img-scart"
+           onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+      <span class="nav-logo-text" style="display:none;">SC<span>ART</span></span>
+    </a>
+
+    <!-- CENTER: nav links -->
+    <ul class="nav-links" style="margin:0 auto;">
+      <li><a href="index.html" class="active">Home</a></li>
+      <li><a href="docs/pages/overview.html">Overview</a></li>
+      <li><a href="docs/pages/install.html">Installation</a></li>
+      <li><a href="docs/pages/tutorial.html">Tutorial</a></li>
+      <li><a href="docs/pages/authors.html">Authors</a></li>
+    </ul>
+
+    <!-- RIGHT: GitHub + IGIB logo -->
+    <div style="display:flex;align-items:center;gap:12px;flex-shrink:0;">
+      <a href="https://github.com/csblab23/SCART" class="nav-github" target="_blank">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        GitHub
+      </a>
+      <div class="nav-igib-right">
+        <img src="SCART/external/igib_logo.jpeg" alt="CSIR-IGIB"
+             class="nav-logo-img-igib"
+             onerror="this.style.display='none';">
+      </div>
+    </div>
+  </div>
+</nav>
+
+<!-- ── HERO ─────────────────────────────────────────────────────── -->
+<section class="hero">
+  <div class="hero-inner">
+    <div class="hero-content">
+      <div class="hero-badge">
+        <div class="hero-badge-dot"></div>
+        Open Source · MIT License
+      </div>
+      <h1>CAR-T target<br>discovery from<br><em>single-cell data</em></h1>
+      <p class="hero-sub">End-to-end pipeline from GEO accession ID to ranked tumour-specific surface antigen candidates.</p>
+      <p class="hero-institution">Developed at CSIR-IGIB, New Delhi, India</p>
+      <div class="hero-ctas">
+        <a href="docs/pages/install.html" class="btn-primary">
+          <svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor"><path d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"/></svg>
+          Get Started
+        </a>
+        <a href="docs/pages/overview.html" class="btn-secondary">Read the Docs →</a>
+      </div>
+    </div>
+    <div class="hero-code">
+      <div class="hero-code-tabs">
+        <div class="hero-code-tab active" data-tab="quick">Quick Start</div>
+        <div class="hero-code-tab" data-tab="install">Install</div>
+      </div>
+      <div class="hero-code-body">
+        <pre data-panel="quick" class="hero-code-panel"><span class="kw">from</span> SCART.geo_fetcher <span class="kw">import</span> <span class="fn">SampleAnnotator</span>
+<span class="kw">from</span> SCART <span class="kw">import</span> popv_annotation, preprocessing
+<span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> (
+    one_gene_combination, two_gene_combination
+)
+
+<span class="c"># Module 1 — Fetch scRNA-seq from GEO</span>
+annotator = <span class="fn">SampleAnnotator</span>(
+    <span class="str">"GSE131907"</span>,
+    cancer_type=<span class="str">"lung_cancer"</span>,
+    min_genes=<span class="num">200</span>, max_mt=<span class="num">40</span>
+)
+_, tumor, _, _, path, ct, _ = annotator.<span class="fn">run</span>()
+
+<span class="c"># Module 2 — Annotate cell types (PopV)</span>
+adata = popv_annotation.<span class="fn">auto_run_popv</span>(
+    input_type=<span class="str">"raw"</span>, nsamples=<span class="num">300</span>
+)
+
+<span class="c"># Module 3 — Identify malignant cells</span>
+adata = preprocessing.<span class="fn">run_preprocessing_pipeline</span>(
+    malignant_strategy=<span class="str">"intersection"</span>,
+    log2fc_threshold=<span class="num">2.0</span>
+)
+
+<span class="c"># Module 4a — Single-gene scoring</span>
+df = one_gene_combination.<span class="fn">run</span>(safety_threshold=<span class="num">0.9</span>)
+
+<span class="c"># Module 4b — Two-gene logic-gate scoring</span>
+hof, _ = two_gene_combination.<span class="fn">run</span>(
+    pop_size=<span class="num">1000</span>, n_cpus=<span class="num">8</span>, n_runs=<span class="num">10</span>
+)
+print(hof.head(<span class="num">10</span>))</pre>
+        <pre data-panel="install" class="hero-code-panel" hidden><span class="c"># Step 1 — Create conda environment</span>
+conda create -n scart_env python=3.10 -y
+conda activate scart_env
+
+<span class="c"># Step 2 — Install SCART</span>
+pip install git+https://github.com/csblab23/SCART.git
+
+<span class="c"># Step 3 — Verify</span>
+<span class="kw">import</span> SCART
+print(SCART.__version__)</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── STATS ROW ─────────────────────────────────────────────────── -->
+<div class="stats-row">
+  <div class="stats-inner">
+    <div class="stat-item"><div class="stat-value">3,568</div><div class="stat-label">CSPA surfaceome genes</div></div>
+    <div class="stat-item"><div class="stat-value">54</div><div class="stat-label">HPA healthy tissue types</div></div>
+    <div class="stat-item"><div class="stat-value">5</div><div class="stat-label">Pipeline modules</div></div>
+    <div class="stat-item"><div class="stat-value">3</div><div class="stat-label">Logic gate types</div></div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════
+     SCROLL-DRIVEN CAR-T ANIMATION
+═══════════════════════════════════════════════════════════════════ -->
+<div class="scroll-scene-section" id="cartScene">
+  <div class="scroll-scene-sticky">
+    <canvas class="scroll-scene-canvas" id="cartCanvas"></canvas>
+
+    <!-- Phase label -->
+    <div class="scroll-phase-label" id="phaseLabel">Phase 1 — CAR-T Activation</div>
+
+    <!-- Progress dots -->
+    <div class="scroll-progress-bar">
+      <div class="scroll-dot active" id="dot0"></div>
+      <div class="scroll-dot" id="dot1"></div>
+      <div class="scroll-dot" id="dot2"></div>
+      <div class="scroll-dot" id="dot3"></div>
+    </div>
+
+    <!-- Caption -->
+    <div class="scroll-caption" id="scrollCaption">
+      <h2 id="captionTitle">CAR-T Cell Activation</h2>
+      <p id="captionSub">Scroll to watch the targeted immunotherapy in action</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── PIPELINE ──────────────────────────────────────────────────── -->
+<section class="section">
+  <div class="section-inner">
+    <div class="section-label">How it works</div>
+    <h2 class="section-title">Five-module automated pipeline</h2>
+    <p class="section-desc">Each module writes a structured output that feeds the next. Resume from any step using intermediate files.</p>
+    <div class="pipeline-grid">
+      <div class="pipeline-step">
+        <div class="pipeline-step-num">Module 1</div>
+        <div class="pipeline-step-icon">🌐</div>
+        <h4>GEO Fetcher</h4>
+        <p>Downloads scRNA-seq data from GEO, classifies tumour / normal samples, applies QC filters.</p>
+        <span class="pipeline-step-badge">GEOparse · Scrublet</span>
+      </div>
+      <div class="pipeline-step">
+        <div class="pipeline-step-num">Module 2</div>
+        <div class="pipeline-step-icon">🔬</div>
+        <h4>Cell Annotation</h4>
+        <p>Consensus cell-type annotation using 8 methods. Majority-vote prediction per cell.</p>
+        <span class="pipeline-step-badge">PopV</span>
+      </div>
+      <div class="pipeline-step">
+        <div class="pipeline-step-num">Module 3</div>
+        <div class="pipeline-step-icon">🧬</div>
+        <h4>Malignant ID</h4>
+        <p>Identifies malignant epithelial cells; performs surfaceome DE analysis filtered by CSPA.</p>
+        <span class="pipeline-step-badge">scMalignantFinder · SCEVAN</span>
+      </div>
+      <div class="pipeline-step">
+        <div class="pipeline-step-num">Module 4a</div>
+        <div class="pipeline-step-icon">🎯</div>
+        <h4>Single Gene</h4>
+        <p>Ranks candidate surface genes by tumour efficacy and off-tumour safety scores.</p>
+        <span class="pipeline-step-badge">HPA reference</span>
+      </div>
+      <div class="pipeline-step">
+        <div class="pipeline-step-num">Module 4b</div>
+        <div class="pipeline-step-icon">⚡</div>
+        <h4>Two-Gene GA</h4>
+        <p>Genetic algorithm searches AND / OR / NAND two-gene combinations for optimal targets.</p>
+        <span class="pipeline-step-badge">DEAP genetic algorithm</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── LOGIC GATES ───────────────────────────────────────────────── -->
+<section class="section section-alt">
+  <div class="section-inner">
+    <div class="section-label">Module 4b</div>
+    <h2 class="section-title">Two-gene combination scoring</h2>
+    <p class="section-desc">A genetic algorithm (DEAP) evaluates two-gene pairs across three logic gate types to maximise tumour coverage while minimising off-target risk.</p>
+    <div class="logic-gate-grid">
+      <div class="logic-gate-card gate-and">
+        <div class="gate-symbol">A &amp; B</div>
+        <h3>AND Gate</h3>
+        <p>CAR-T activates only when <em>both</em> genes are expressed on the same cell. Delivers the safest selectivity profile against healthy tissue.</p>
+        <span class="gate-tag">Best safety</span>
+      </div>
+      <div class="logic-gate-card gate-or">
+        <div class="gate-symbol">A | B</div>
+        <h3>OR Gate</h3>
+        <p>CAR-T activates when <em>either</em> gene is expressed. Maximises tumour cell coverage at the cost of slightly broader targeting.</p>
+        <span class="gate-tag">Best coverage</span>
+      </div>
+      <div class="logic-gate-card gate-nand">
+        <div class="gate-symbol">A &amp;! B</div>
+        <h3>NAND Gate</h3>
+        <p>CAR-T activates when gene A is expressed <em>and</em> gene B is absent. Exploits loss-of-expression patterns unique to tumour cells.</p>
+        <span class="gate-tag">Exploits antigen loss</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── FEATURES ──────────────────────────────────────────────────── -->
+<section class="section">
+  <div class="section-inner">
+    <div class="section-label">Features</div>
+    <h2 class="section-title">Everything in one pipeline</h2>
+    <p class="section-desc">SCART automates every step from raw data retrieval to ranked CAR-T target candidates.</p>
+    <div class="features-grid">
+      <div class="feature-card"><div class="feature-icon">📥</div><h3>GEO Integration</h3><p>Fetch any scRNA-seq dataset directly from NCBI GEO with automatic tumour/normal sample classification.</p></div>
+      <div class="feature-card"><div class="feature-icon">🗳️</div><h3>Consensus Annotation</h3><p>PopV runs 8 independent cell-type classification methods and reports a majority-vote prediction per cell.</p></div>
+      <div class="feature-card"><div class="feature-icon">🔍</div><h3>Dual Malignancy Calling</h3><p>Intersection of scMalignantFinder and SCEVAN provides high-confidence malignant cell identification.</p></div>
+      <div class="feature-card"><div class="feature-icon">🛡️</div><h3>Safety Scoring</h3><p>Off-tumour safety evaluated against 54 healthy tissue types from the Human Protein Atlas.</p></div>
+      <div class="feature-card"><div class="feature-icon">🧪</div><h3>Surfaceome Filtering</h3><p>DE candidates are automatically filtered against the Cell Surface Protein Atlas (3,568 genes).</p></div>
+      <div class="feature-card"><div class="feature-icon">⚙️</div><h3>HPC Ready</h3><p>Full SLURM / SBATCH support with per-module job scripts and dependency chaining guidance.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ── DATABASES ─────────────────────────────────────────────────── -->
+<section class="section section-alt">
+  <div class="section-inner">
+    <div class="section-label">Built-in Surfaceome Reference</div>
+    <h2 class="section-title">Four curated databases</h2>
+    <p class="section-desc">All reference databases are either bundled or auto-downloaded at runtime. No manual setup required.</p>
+    <div class="db-grid">
+      <div class="db-card"><div class="db-icon">🧫</div><div><h4>CSPA — Cell Surface Protein Atlas</h4><p>Curated atlas of human cell surface proteins used for surfaceome DE filtering in Module 3.</p><div class="db-meta">3,568 genes · Module 3</div><br><a href="http://wlab.ethz.ch/cspa/" target="_blank" class="db-link">cspa.ethz.ch →</a></div></div>
+      <div class="db-card"><div class="db-icon">🫀</div><div><h4>HPA — Human Protein Atlas</h4><p>54-tissue healthy expression reference for off-tumour safety scoring in Modules 4a and 4b.</p><div class="db-meta">54 tissue types · Module 4</div><br><a href="https://www.proteinatlas.org/" target="_blank" class="db-link">proteinatlas.org →</a></div></div>
+      <div class="db-card"><div class="db-icon">🧠</div><div><h4>Tabula Sapiens</h4><p>Multi-organ single-cell atlas used as the cell-type annotation reference in Module 2 (PopV).</p><div class="db-meta">30+ tissue types · Module 2</div><br><a href="https://tabula-sapiens-portal.ds.czbiohub.org/" target="_blank" class="db-link">tabula-sapiens →</a></div></div>
+      <div class="db-card"><div class="db-icon">🗂️</div><div><h4>PopV — Consensus Annotation</h4><p>Multi-method consensus framework running 8 classifiers with majority-vote cell-type predictions.</p><div class="db-meta">8 methods · Module 2</div><br><a href="https://github.com/YosefLab/PopV" target="_blank" class="db-link">github.com/YosefLab/PopV →</a></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ── QUICK INSTALL ─────────────────────────────────────────────── -->
+<div class="install-strip">
+  <div class="install-strip-inner">
+    <h2>Get started in minutes</h2>
+    <p>Install from GitHub with pip. Python 3.10 and conda recommended.</p>
+    <div class="install-cmd">
+      <span class="install-cmd-dollar">$</span>
+      <code>pip install git+https://github.com/csblab23/SCART.git</code>
+      <button class="install-cmd-copy" onclick="copyInstall(this)">Copy</button>
+    </div>
+    <div class="install-steps">
+      <div class="install-step"><div class="install-step-n">Step 1</div><p>Create a conda environment with Python 3.10</p></div>
+      <div class="install-step"><div class="install-step-n">Step 2</div><p>pip install SCART from GitHub</p></div>
+      <div class="install-step"><div class="install-step-n">Step 3</div><p>Install R dependencies for SCEVAN (Module 3)</p></div>
+      <div class="install-step"><div class="install-step-n">Step 4</div><p>Register kernel and open Jupyter notebook</p></div>
+    </div>
+    <br>
+    <a href="docs/pages/install.html" class="btn-primary" style="display:inline-flex;margin-top:8px;">Full Installation Guide →</a>
+  </div>
+</div>
+
+<!-- ── FOOTER ────────────────────────────────────────────────────── -->
+<footer>
+  <div class="footer-inner">
+    <div class="footer-brand">
+      <a href="index.html" class="nav-logo" style="margin-bottom:10px;">
+        <span class="nav-logo-text" style="color:white;">SC<span style="color:#79c0ff;">ART</span></span>
+      </a>
+      <p>End-to-end CAR-T target discovery from single-cell RNA-seq data. Developed at CSIR-IGIB, New Delhi, India.</p>
+    </div>
+    <div class="footer-col">
+      <h5>Documentation</h5>
+      <a href="docs/pages/overview.html">Overview</a>
+      <a href="docs/pages/install.html">Installation</a>
+      <a href="docs/pages/tutorial.html">Tutorial</a>
+    </div>
+    <div class="footer-col">
+      <h5>Links</h5>
+      <a href="https://github.com/csblab23/SCART" target="_blank">GitHub</a>
+      <a href="https://www.igib.res.in" target="_blank">CSIR-IGIB</a>
+      <a href="docs/pages/authors.html">Authors</a>
+    </div>
+  </div>
+  <div class="footer-bottom">
+    <span>© 2025 SCART · CSIR-IGIB · MIT License</span>
+    <a href="https://github.com/csblab23/SCART" target="_blank">GitHub</a>
+  </div>
+</footer>
+
+<script src="docs/js/main.js"></script>
+<script>
+/* ═══════════════════════════════════════════════════════════════════
+   SCROLL-DRIVEN CAR-T ANIMATION
+   4 phases:
+   0 → 0.25 : CAR-T cell drifts in, receptors glow, floats gently
+   0.25→0.5 : CAR-T approaches tumour cell, recognises antigen
+   0.5→0.75 : CAR-T locks on, connection formed, energy pulses
+   0.75→1.0 : Cancer cell fragments into apoptotic bodies
+═══════════════════════════════════════════════════════════════════ */
+(function () {
+  const section = document.getElementById('cartScene');
+  const canvas  = document.getElementById('cartCanvas');
+  const ctx     = canvas.getContext('2d');
+  const phaseLabel = document.getElementById('phaseLabel');
+  const caption = document.getElementById('scrollCaption');
+  const captionTitle = document.getElementById('captionTitle');
+  const captionSub = document.getElementById('captionSub');
+  const dots = [0,1,2,3].map(i => document.getElementById('dot'+i));
+
+  const phases = [
+    { label: 'Phase 1 — CAR-T Recognition',   title: 'CAR-T Cell Recognition',   sub: 'Engineered receptors scan for tumour-specific surface antigens' },
+    { label: 'Phase 2 — Target Engagement',    title: 'Antigen Binding',           sub: 'CAR receptor locks onto the tumour-specific surface protein' },
+    { label: 'Phase 3 — Immune Synapse',       title: 'Immune Synapse Formation',  sub: 'Cytotoxic signals are transmitted into the cancer cell' },
+    { label: 'Phase 4 — Apoptosis Induced',    title: 'Tumour Cell Apoptosis',     sub: 'Cancer cell fragments into apoptotic bodies — mission complete' },
+  ];
+
+  let W, H, dpr, t = 0, raf;
+
+  function resize() {
+    dpr = window.devicePixelRatio || 1;
+    W = canvas.clientWidth;
+    H = canvas.clientHeight;
+    canvas.width  = W * dpr;
+    canvas.height = H * dpr;
+    ctx.scale(dpr, dpr);
+  }
+
+  // ── Particle systems ───────────────────────────────────────────
+  const particles = [];
+  function spawnParticle(x, y, color, vx, vy, life, r) {
+    particles.push({ x, y, color, vx, vy, life, maxLife: life, r: r || 3 });
+  }
+  function updateParticles() {
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.x += p.vx; p.y += p.vy;
+      p.vy += 0.04;
+      p.life--;
+      if (p.life <= 0) { particles.splice(i, 1); continue; }
+      const alpha = p.life / p.maxLife;
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r * alpha, 0, Math.PI*2);
+      ctx.fillStyle = p.color;
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  // ── Drawing helpers ─────────────────────────────────────────────
+  function drawCell(x, y, r, color, glowColor, glowStrength) {
+    // Glow
+    const grd = ctx.createRadialGradient(x, y, r*0.3, x, y, r + glowStrength);
+    grd.addColorStop(0, color);
+    grd.addColorStop(0.6, color + 'aa');
+    grd.addColorStop(1, glowColor + '00');
+    ctx.beginPath();
+    ctx.arc(x, y, r + glowStrength, 0, Math.PI*2);
+    ctx.fillStyle = grd;
+    ctx.fill();
+    // Body
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI*2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    // Sheen
+    const sheen = ctx.createRadialGradient(x - r*0.3, y - r*0.3, 0, x, y, r);
+    sheen.addColorStop(0, 'rgba(255,255,255,0.25)');
+    sheen.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI*2);
+    ctx.fillStyle = sheen;
+    ctx.fill();
+  }
+
+  function drawNucleus(x, y, r) {
+    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+    g.addColorStop(0, '#8b2635');
+    g.addColorStop(1, '#5a1520');
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI*2);
+    ctx.fillStyle = g;
+    ctx.fill();
+  }
+
+  // CAR-T receptors (hook shapes)
+  function drawCARReceptors(x, y, r, count, angle, glowIntensity) {
+    for (let i = 0; i < count; i++) {
+      const a = angle + (i / count) * Math.PI * 2;
+      const rx = x + Math.cos(a) * r;
+      const ry = y + Math.sin(a) * r;
+      const ex = x + Math.cos(a) * (r + 22);
+      const ey = y + Math.sin(a) * (r + 22);
+
+      // Hook shaft
+      ctx.save();
+      ctx.strokeStyle = `rgba(220,80,80,${0.7 + glowIntensity*0.3})`;
+      ctx.lineWidth = 2.5;
+      ctx.shadowColor = '#ff4444';
+      ctx.shadowBlur = 6 + glowIntensity * 8;
+      ctx.beginPath();
+      ctx.moveTo(rx, ry);
+      ctx.lineTo(ex, ey);
+      ctx.stroke();
+
+      // Hook end (C-shape)
+      ctx.strokeStyle = `rgba(255,100,100,${0.8 + glowIntensity*0.2})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(ex, ey, 5, a - Math.PI*0.6, a + Math.PI*0.6);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  // Tumour surface spikes
+  function drawTumourSpikes(x, y, r, count, t) {
+    for (let i = 0; i < count; i++) {
+      const a = (i / count) * Math.PI * 2 + t * 0.2;
+      const sx = x + Math.cos(a) * r;
+      const sy = y + Math.sin(a) * r;
+      const ex = x + Math.cos(a) * (r + 14 + Math.sin(t*2 + i)*3);
+      const ey = y + Math.sin(a) * (r + 14 + Math.sin(t*2 + i)*3);
+      ctx.save();
+      ctx.strokeStyle = 'rgba(180,80,120,0.6)';
+      ctx.lineWidth = 2;
+      ctx.shadowColor = '#c04080';
+      ctx.shadowBlur = 4;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.lineTo(ex, ey);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  // Connection beam
+  function drawBeam(x1, y1, x2, y2, alpha, pulseFrac) {
+    const mx = (x1+x2)/2, my = (y1+y2)/2;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+
+    // Core beam
+    const grd = ctx.createLinearGradient(x1, y1, x2, y2);
+    grd.addColorStop(0, '#79c0ff');
+    grd.addColorStop(0.5, '#ffffff');
+    grd.addColorStop(1, '#ff6b6b');
+    ctx.strokeStyle = grd;
+    ctx.lineWidth = 3 + pulseFrac * 4;
+    ctx.shadowColor = '#79c0ff';
+    ctx.shadowBlur = 15 + pulseFrac * 20;
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+
+    // Pulse dot traveling along beam
+    const pt = (pulseFrac % 1);
+    const px = x1 + (x2-x1)*pt;
+    const py = y1 + (y2-y1)*pt;
+    ctx.beginPath();
+    ctx.arc(px, py, 5, 0, Math.PI*2);
+    ctx.fillStyle = '#ffffff';
+    ctx.shadowBlur = 20;
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  // Floating background particles (space dust)
+  const stars = Array.from({length:120}, () => ({
+    x: Math.random() * 1600,
+    y: Math.random() * 900,
+    r: Math.random() * 1.5 + 0.3,
+    alpha: Math.random() * 0.5 + 0.1,
+    speed: Math.random() * 0.3 + 0.1
+  }));
+
+  function drawStars() {
+    stars.forEach(s => {
+      s.x -= s.speed * 0.5;
+      if (s.x < 0) s.x = W;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y * (H/900), s.r, 0, Math.PI*2);
+      ctx.fillStyle = `rgba(200,220,255,${s.alpha})`;
+      ctx.fill();
+    });
+  }
+
+  // Apoptotic fragments
+  const fragments = [];
+  let fragmentsSpawned = false;
+
+  function spawnFragments(cx, cy, r) {
+    if (fragmentsSpawned) return;
+    fragmentsSpawned = true;
+    const count = 14;
+    for (let i = 0; i < count; i++) {
+      const a = (i/count)*Math.PI*2;
+      const speed = 1.5 + Math.random()*2.5;
+      const fr = r * (0.2 + Math.random()*0.35);
+      fragments.push({
+        x: cx + Math.cos(a)*r*0.5,
+        y: cy + Math.sin(a)*r*0.5,
+        vx: Math.cos(a)*speed,
+        vy: Math.sin(a)*speed - 0.5,
+        r: fr,
+        alpha: 1,
+        color: i % 3 === 0 ? '#c05060' : i % 3 === 1 ? '#8b3545' : '#d07080',
+        rot: Math.random()*Math.PI*2,
+        rotSpeed: (Math.random()-0.5)*0.08
+      });
+    }
+  }
+
+  function drawFragments(alpha) {
+    fragments.forEach(f => {
+      f.x += f.vx * 0.6;
+      f.y += f.vy * 0.6;
+      f.vy += 0.02;
+      f.rot += f.rotSpeed;
+      f.alpha = Math.max(0, f.alpha - 0.004);
+
+      ctx.save();
+      ctx.globalAlpha = f.alpha * alpha;
+      ctx.translate(f.x, f.y);
+      ctx.rotate(f.rot);
+      const g = ctx.createRadialGradient(0, 0, 0, 0, 0, f.r);
+      g.addColorStop(0, f.color);
+      g.addColorStop(1, f.color + '44');
+      ctx.beginPath();
+      ctx.arc(0, 0, f.r, 0, Math.PI*2);
+      ctx.fillStyle = g;
+      ctx.fill();
+      ctx.restore();
+    });
+  }
+
+  // ── Main render ────────────────────────────────────────────────
+  let lastPhase = -1;
+  let lastPulse = 0;
+
+  function render() {
+    const rect = section.getBoundingClientRect();
+    const scrollable = section.offsetHeight - window.innerHeight;
+    const scrolled = Math.max(0, -rect.top);
+    const prog = Math.min(1, Math.max(0, scrolled / scrollable));
+
+    // Phase
+    const phase = Math.min(3, Math.floor(prog * 4));
+    const phaseT = (prog * 4) % 1; // 0→1 within current phase
+
+    // Update UI labels
+    if (phase !== lastPhase) {
+      lastPhase = phase;
+      phaseLabel.textContent = phases[phase].label;
+      captionTitle.textContent = phases[phase].title;
+      captionSub.textContent = phases[phase].sub;
+      caption.classList.add('visible');
+      dots.forEach((d,i) => d.classList.toggle('active', i===phase));
+    }
+
+    // Sizes
+    const cartR = Math.min(W, H) * 0.11;
+    const tumR  = Math.min(W, H) * 0.13;
+
+    // Positions
+    // Phase 0: CAR-T enters from left, tumour is right
+    // Phase 1: CAR-T moves toward tumour
+    // Phase 2: they touch / connect
+    // Phase 3: tumour fragments
+    const cx = W * 0.5;
+    const cy = H * 0.5;
+    const separation = cartR + tumR + 20;
+
+    let cartX, cartY, tumX, tumY;
+    let cartGlow = 0, tumGlow = 0, beamAlpha = 0, beamPulse = 0;
+    let showFragments = false;
+
+    if (phase === 0) {
+      // CAR-T floats in from left
+      const eased = easeOutCubic(phaseT);
+      cartX = W * (-0.15) + eased * (cx - separation - W * (-0.15));
+      cartY = cy + Math.sin(t * 1.5) * 12;
+      tumX  = cx + separation;
+      tumY  = cy + Math.sin(t * 0.8 + 1) * 8;
+      cartGlow = 0.3 + eased * 0.4;
+      tumGlow = 0.2;
+    } else if (phase === 1) {
+      // CAR-T approaches
+      const eased = easeInOutCubic(phaseT);
+      const startX = cx - separation;
+      const endX   = cx - separation * 0.55;
+      cartX = startX + eased * (endX - startX);
+      cartY = cy + Math.sin(t * 1.5) * (12 * (1 - phaseT * 0.5));
+      tumX  = cx + separation * 0.55;
+      tumY  = cy + Math.sin(t * 0.8 + 1) * 8;
+      cartGlow = 0.7 + Math.sin(t*3)*0.15;
+      tumGlow = 0.4 + phaseT * 0.3;
+      beamAlpha = phaseT * 0.3;
+      beamPulse = t * 0.5;
+    } else if (phase === 2) {
+      // Connected — touching
+      const eased = easeInOutCubic(phaseT);
+      const startX = cx - separation * 0.55;
+      const endX   = cx - (cartR + tumR + 4);
+      cartX = startX + eased * (endX - startX);
+      cartY = cy;
+      tumX  = cx + (cartR + tumR + 4) * 0.5 + phaseT * 10;
+      tumY  = cy;
+      cartGlow = 1;
+      tumGlow = 0.7 + Math.sin(t*4)*0.3;
+      beamAlpha = 0.3 + phaseT * 0.7;
+      beamPulse = t * 1.5;
+
+      // Emit energy particles
+      if (Math.random() < 0.3) {
+        const a = Math.random()*Math.PI*2;
+        spawnParticle(
+          (cartX + tumX)/2 + Math.cos(a)*10,
+          cy + Math.sin(a)*10,
+          Math.random() < 0.5 ? '#79c0ff' : '#ff8888',
+          (Math.random()-0.5)*3, (Math.random()-0.5)*3, 40, 2
+        );
+      }
+    } else {
+      // Phase 3: apoptosis
+      cartX = cx - (cartR + tumR + 4);
+      cartY = cy;
+      tumX  = cx + (cartR + tumR + 4) * 0.5;
+      tumY  = cy;
+      cartGlow = 0.8;
+      beamAlpha = Math.max(0, 0.5 - phaseT * 2);
+      showFragments = true;
+      spawnFragments(tumX, tumY, tumR);
+
+      // Spawn extra particles during explosion start
+      if (phaseT < 0.3 && Math.random() < 0.4) {
+        const a = Math.random()*Math.PI*2;
+        const speed = 1 + Math.random()*4;
+        spawnParticle(
+          tumX + Math.cos(a)*tumR*0.8,
+          tumY + Math.sin(a)*tumR*0.8,
+          '#ff6060', Math.cos(a)*speed, Math.sin(a)*speed - 1.5,
+          60 + Math.random()*30, 3 + Math.random()*4
+        );
+      }
+    }
+
+    // ── Draw ───────────────────────────────────────────────────
+    ctx.clearRect(0, 0, W, H);
+
+    // BG gradient
+    const bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(W,H));
+    bg.addColorStop(0, '#111828');
+    bg.addColorStop(1, '#070d18');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+
+    drawStars();
+
+    // Glow ambient under cells
+    if (phase < 3) {
+      const ambG = ctx.createRadialGradient(tumX, tumY, 0, tumX, tumY, tumR * 2.5);
+      ambG.addColorStop(0, `rgba(150,60,90,${0.08 * tumGlow})`);
+      ambG.addColorStop(1, 'transparent');
+      ctx.fillStyle = ambG;
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    // Beam
+    if (beamAlpha > 0.01) {
+      drawBeam(cartX + cartR, cartY, tumX - tumR, tumY, beamAlpha, (Math.sin(beamPulse*3)+1)/2);
+    }
+
+    // CAR-T cell (blue-ish, larger due to glow)
+    drawCell(cartX, cartY, cartR, '#2a4a7a', '#79c0ff', cartGlow * cartR * 0.7);
+    drawNucleus(cartX, cartY, cartR * 0.38);
+    drawCARReceptors(cartX, cartY, cartR, 8, t * 0.4, cartGlow);
+
+    // Tumour cell — only if not fully fragmented
+    if (phase < 3 || phaseT < 0.15) {
+      const tumAlpha = phase === 3 ? Math.max(0, 1 - phaseT * 8) : 1;
+      ctx.save();
+      ctx.globalAlpha = tumAlpha;
+      drawCell(tumX, tumY, tumR, '#7a2535', '#ff6080', tumGlow * tumR * 0.6);
+      drawNucleus(tumX, tumY, tumR * 0.42);
+      drawTumourSpikes(tumX, tumY, tumR, 12, t);
+      ctx.restore();
+    }
+
+    // Fragments & particles
+    if (showFragments) drawFragments(1);
+    updateParticles();
+
+    t += 0.016;
+    raf = requestAnimationFrame(render);
+  }
+
+  // Easing
+  function easeOutCubic(x) { return 1 - Math.pow(1-x, 3); }
+  function easeInOutCubic(x) { return x < 0.5 ? 4*x*x*x : 1 - Math.pow(-2*x+2,3)/2; }
+
+  // Init
+  resize();
+  caption.classList.add('visible');
+  window.addEventListener('resize', resize);
+  render();
+
+  // Pause when off screen
+  const obs = new IntersectionObserver(entries => {
+    if (entries[0].isIntersecting) {
+      if (!raf) raf = requestAnimationFrame(render);
+    } else {
+      if (raf) { cancelAnimationFrame(raf); raf = null; }
+    }
+  }, { threshold: 0.05 });
+  obs.observe(section);
+})();
+</script>
+</body>
+</html>
