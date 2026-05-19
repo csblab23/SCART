@@ -10,7 +10,7 @@
 <link rel="stylesheet" href="docs/css/style.css">
 <style>
 /* ═══════════════════════════════════════════
-   NAVBAR — taller, SCART image logo only
+   NAVBAR
 ═══════════════════════════════════════════ */
 #navbar {
   height: 80px !important;
@@ -37,8 +37,18 @@
   display: block;
 }
 
+/* SCART wordmark — S black, CAR red, T black */
+.scart-wordmark {
+  font-family: Georgia, 'Instrument Serif', serif;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  line-height: 1;
+  color: #0d1526;
+}
+.scart-wordmark .car { color: #b41e28; }
+
 /* ═══════════════════════════════════════════
-   HERO — white bg, text left + canvas right
+   HERO — white bg, fully seamless
 ═══════════════════════════════════════════ */
 .hero {
   min-height: calc(100vh - 80px) !important;
@@ -57,6 +67,7 @@
   padding: 0 56px !important;
   width: 100% !important;
 }
+
 /* Light-theme overrides for hero text */
 .hero-badge {
   background: rgba(180,30,40,0.07) !important;
@@ -69,23 +80,31 @@
 .hero-sub { color: #4a5568 !important; }
 .hero-institution { color: #8896a8 !important; }
 
-/* ── Right: animation panel ── */
+/* Hero SCART logo above heading */
+.hero-scart-logo {
+  font-size: 42px;
+  margin-bottom: 18px;
+  display: block;
+}
+
+/* ── Right: animation panel — NO box, NO background ── */
 .hero-anim-panel {
   position: relative;
   width: 100%;
   aspect-ratio: 1 / 1;
   max-width: 520px;
   margin: 0 auto;
-  background: #fafbfc;
-  border-radius: 20px;
-  overflow: hidden;
-  box-shadow: 0 4px 32px rgba(0,0,0,0.07), 0 1px 6px rgba(0,0,0,0.04);
-  border: 1px solid rgba(0,0,0,0.05);
+  /* No background, no border, no shadow — seamless with page */
+  background: transparent;
+  border-radius: 0;
+  overflow: visible;
 }
 #heroCanvas { width: 100%; height: 100%; display: block; }
+
+/* Phase pill stays but floats freely */
 .hero-phase-pill {
   position: absolute;
-  top: 14px; left: 50%;
+  top: 6px; left: 50%;
   transform: translateX(-50%);
   font-family: 'JetBrains Mono', monospace;
   font-size: 10px;
@@ -102,7 +121,7 @@
 }
 .hero-anim-caption {
   position: absolute;
-  bottom: 14px; left: 0; right: 0;
+  bottom: 4px; left: 0; right: 0;
   text-align: center;
   pointer-events: none;
   z-index: 10;
@@ -128,10 +147,10 @@
 ═══════════════════════════════════════ -->
 <nav id="navbar">
   <div class="nav-inner">
-    <!-- LEFT: SCART image logo -->
+    <!-- LEFT: SCART image logo with fallback wordmark -->
     <a href="index.html" class="nav-logo" style="line-height:0;text-decoration:none;flex-shrink:0;">
       <img src="SCART/external/scart_logo.png" alt="SCART" class="nav-logo-img-scart"
-           onerror="this.outerHTML='<span style=\'font-family:Georgia,serif;font-size:28px;font-weight:700;letter-spacing:-0.5px;color:#111;\'>S<span style=\'color:#b41e28;\'>CAR</span>T</span>'">
+           onerror="this.outerHTML='<span class=\'scart-wordmark\' style=\'font-size:28px;\'>S<span class=\'car\'>CAR</span>T</span>'">
     </a>
 
     <!-- CENTER: links -->
@@ -165,6 +184,9 @@
 
     <!-- LEFT: text -->
     <div class="hero-content">
+      <!-- SCART wordmark above badge -->
+      <div class="scart-wordmark hero-scart-logo">S<span class="car">CAR</span>T</div>
+
       <div class="hero-badge">
         <div class="hero-badge-dot"></div>
         Open Source · MIT License
@@ -183,12 +205,12 @@
       </div>
     </div>
 
-    <!-- RIGHT: animation -->
+    <!-- RIGHT: animation — no box -->
     <div class="hero-anim-panel">
       <canvas id="heroCanvas"></canvas>
-      <div class="hero-phase-pill" id="heroPhasePill">CAR-T Recognition</div>
+      <div class="hero-phase-pill" id="heroPhasePill">Scanning for target</div>
       <div class="hero-anim-caption">
-        <p id="heroCaption">Engineered CAR-T cell scans for tumour-specific surface antigens</p>
+        <p id="heroCaption">CAR-T cell hunts for tumour-specific surface antigens</p>
       </div>
     </div>
 
@@ -201,7 +223,7 @@
 <div class="stats-row">
   <div class="stats-inner">
     <div class="stat-item"><div class="stat-value">3,568</div><div class="stat-label">CSPA surfaceome genes</div></div>
-    <div class="stat-item"><div class="stat-value">54</div><div class="stat-label">HPA healthy tissue types</div></div>
+    <div class="stat-item"><div class="stat-value">36</div><div class="stat-label">HPA healthy tissue types</div></div>
     <div class="stat-item"><div class="stat-value">5</div><div class="stat-label">Pipeline modules</div></div>
     <div class="stat-item"><div class="stat-value">3</div><div class="stat-label">Logic gate types</div></div>
   </div>
@@ -253,7 +275,7 @@
       <div class="feature-card"><div class="feature-icon">📥</div><h3>GEO Integration</h3><p>Fetch any scRNA-seq dataset directly from NCBI GEO with automatic tumour/normal sample classification.</p></div>
       <div class="feature-card"><div class="feature-icon">🗳️</div><h3>Consensus Annotation</h3><p>PopV runs 8 independent cell-type classification methods and reports a majority-vote prediction per cell.</p></div>
       <div class="feature-card"><div class="feature-icon">🔍</div><h3>Dual Malignancy Calling</h3><p>Intersection of scMalignantFinder and SCEVAN provides high-confidence malignant cell identification.</p></div>
-      <div class="feature-card"><div class="feature-icon">🛡️</div><h3>Safety Scoring</h3><p>Off-tumour safety evaluated against 54 healthy tissue types from the Human Protein Atlas.</p></div>
+      <div class="feature-card"><div class="feature-icon">🛡️</div><h3>Safety Scoring</h3><p>Off-tumour safety evaluated against 36 healthy tissue types from the Human Protein Atlas.</p></div>
       <div class="feature-card"><div class="feature-icon">🧪</div><h3>Surfaceome Filtering</h3><p>DE candidates are automatically filtered against the Cell Surface Protein Atlas (3,568 genes).</p></div>
       <div class="feature-card"><div class="feature-icon">⚙️</div><h3>HPC Ready</h3><p>Full SLURM / SBATCH support with per-module job scripts and dependency chaining guidance.</p></div>
     </div>
@@ -270,7 +292,7 @@
     <p class="section-desc">All reference databases are either bundled or auto-downloaded at runtime. No manual setup required.</p>
     <div class="db-grid">
       <div class="db-card"><div class="db-icon">🧫</div><div><h4>CSPA — Cell Surface Protein Atlas</h4><p>Curated atlas of human cell surface proteins used for surfaceome DE filtering in Module 3.</p><div class="db-meta">3,568 genes · Module 3</div><br><a href="http://wlab.ethz.ch/cspa/" target="_blank" class="db-link">cspa.ethz.ch →</a></div></div>
-      <div class="db-card"><div class="db-icon">🫀</div><div><h4>HPA — Human Protein Atlas</h4><p>54-tissue healthy expression reference for off-tumour safety scoring in Modules 4a and 4b.</p><div class="db-meta">54 tissue types · Module 4</div><br><a href="https://www.proteinatlas.org/" target="_blank" class="db-link">proteinatlas.org →</a></div></div>
+      <div class="db-card"><div class="db-icon">🫀</div><div><h4>HPA — Human Protein Atlas</h4><p>36-tissue healthy expression reference for off-tumour safety scoring in Modules 4a and 4b.</p><div class="db-meta">36 tissue types · Module 4</div><br><a href="https://www.proteinatlas.org/" target="_blank" class="db-link">proteinatlas.org →</a></div></div>
       <div class="db-card"><div class="db-icon">🧠</div><div><h4>Tabula Sapiens</h4><p>Multi-organ single-cell atlas used as the cell-type annotation reference in Module 2 (PopV).</p><div class="db-meta">30+ tissue types · Module 2</div><br><a href="https://tabula-sapiens-portal.ds.czbiohub.org/" target="_blank" class="db-link">tabula-sapiens →</a></div></div>
       <div class="db-card"><div class="db-icon">🗂️</div><div><h4>PopV — Consensus Annotation</h4><p>Multi-method consensus framework running 8 classifiers with majority-vote cell-type predictions.</p><div class="db-meta">8 methods · Module 2</div><br><a href="https://github.com/YosefLab/PopV" target="_blank" class="db-link">github.com/YosefLab/PopV →</a></div></div>
     </div>
@@ -301,7 +323,7 @@
 </div>
 
 <!-- ═══════════════════════════════════════
-     FOOTER
+     FOOTER — S(black)CAR(red)T(black)
 ═══════════════════════════════════════ -->
 <footer>
   <div class="footer-inner">
@@ -325,43 +347,47 @@
     </div>
   </div>
   <div class="footer-bottom">
-    <span>© 2025 SCART · CSIR-IGIB · MIT License</span>
+    <span>© 2025 S<span style="color:#ff7070;">CAR</span>T · CSIR-IGIB · MIT License</span>
     <a href="https://github.com/csblab23/SCART" target="_blank">GitHub</a>
   </div>
 </footer>
 
 <script src="docs/js/main.js"></script>
 
-<!-- ═══════════════════════════════════════════════════════════════════
-     CAR-T ANIMATION — hero right panel
-     Visual style matches the uploaded logo image exactly:
-       CAR-T : large grey-white fuzzy ball + red C-hook receptors
-       Cancer: pink-red blob + short dark spikes + dark nucleus
-       Arrow : black →  between cells
-       Phase 4: cancer fragments into irregular apoptotic blobs
+<!-- ═══════════════════════════════════════════════════════════════
+     CAR-T ANIMATION v2
+     Phases:
+       0 — SCAN: CAR-T slides in from far left, cancer fixed at right centre
+       1 — TARGET: CAR-T spots cancer, targeting reticle appears & pulses
+       2 — APPROACH: CAR-T rapidly moves toward cancer cell
+       3 — BIND: CAR-T receptors lock onto cancer surface, flash of attachment
+       4 — APOPTOSIS: cancer cell fragments, both cells fade out, loop resets
 ═══════════════════════════════════════════════════════════════════ -->
 <script>
 (function () {
-  const canvas  = document.getElementById('heroCanvas');
-  const ctx     = canvas.getContext('2d');
-  const pill    = document.getElementById('heroPhasePill');
-  const capEl   = document.getElementById('heroCaption');
+  const canvas = document.getElementById('heroCanvas');
+  const ctx    = canvas.getContext('2d');
+  const pill   = document.getElementById('heroPhasePill');
+  const capEl  = document.getElementById('heroCaption');
 
   const PHASES = [
-    { label:'CAR-T Recognition',  cap:'Engineered CAR-T cell scans for tumour-specific surface antigens' },
-    { label:'Antigen Binding',    cap:'CAR receptor locks onto the cancer cell surface protein' },
-    { label:'Immune Synapse',     cap:'Cytotoxic signals are transmitted — cancer cell is doomed' },
-    { label:'Apoptosis Induced',  cap:'Cancer cell fragments into apoptotic bodies — mission complete' },
+    { label: 'Scanning for target',    cap: 'CAR-T cell hunts for tumour-specific surface antigens' },
+    { label: 'Target acquired',        cap: 'Tumour antigen detected — attack protocol initiated' },
+    { label: 'Approaching target',     cap: 'CAR-T cell moves in for receptor engagement' },
+    { label: 'Antigen binding',        cap: 'CAR receptors lock onto the cancer cell surface' },
+    { label: 'Apoptosis induced',      cap: 'Cancer cell fragments — mission complete' },
   ];
-  const PHASE_FRAMES = 220;
+
+  // Phase durations in frames
+  const DURATIONS = [200, 110, 90, 130, 160];
 
   let W, H, dpr;
-  let tick = 0, t = 0;
+  let t = 0;
   let phase = 0, pTick = 0;
   let fragments = [], fragsBuilt = false;
   let particles = [];
+  let bindFlash = 0;
 
-  /* ── Resize ─────────────────────────────────────────── */
   function resize() {
     const el = canvas.parentElement;
     dpr = window.devicePixelRatio || 1;
@@ -372,339 +398,347 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
-  /* ── Easing ─────────────────────────────────────────── */
-  const easeOut    = x => 1 - Math.pow(1 - x, 3);
-  const easeInOut  = x => x < .5 ? 4*x*x*x : 1 - Math.pow(-2*x+2,3)/2;
+  const easeOut   = x => 1 - Math.pow(1-x, 3);
+  const easeInOut = x => x < .5 ? 4*x*x*x : 1 - Math.pow(-2*x+2,3)/2;
+  const clamp     = (v,a,b) => Math.max(a, Math.min(b, v));
 
-  /* ── Particles ──────────────────────────────────────── */
+  /* ── Particles ── */
   function addParticle(x, y, col, vx, vy, life, r) {
     particles.push({ x, y, col, vx, vy, life, ml: life, r });
   }
-  function drawParticles() {
-    for (let i = particles.length - 1; i >= 0; i--) {
+  function updateParticles() {
+    for (let i = particles.length-1; i >= 0; i--) {
       const p = particles[i];
-      p.x += p.vx; p.y += p.vy; p.vy += 0.05; p.life--;
-      if (p.life <= 0) { particles.splice(i, 1); continue; }
+      p.x += p.vx; p.y += p.vy; p.vy += .045; p.life--;
+      if (p.life <= 0) { particles.splice(i,1); continue; }
       const a = p.life / p.ml;
       ctx.save();
-      ctx.globalAlpha = a * 0.9;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.r * a, 0, Math.PI*2);
-      ctx.fillStyle = p.col;
-      ctx.fill();
+      ctx.globalAlpha = a * 0.85;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r * a, 0, Math.PI*2);
+      ctx.fillStyle = p.col; ctx.fill();
       ctx.restore();
     }
   }
 
-  /* ── CAR-T cell ─────────────────────────────────────── */
-  /* Grey/white fuzzy sphere + red C-hook receptors — matches logo */
-  function drawCARTCell(cx, cy, r, glow) {
-    // Soft outer halo
-    const halo = ctx.createRadialGradient(cx, cy, r * .6, cx, cy, r * 1.55);
-    halo.addColorStop(0, 'rgba(170,185,198,0.22)');
-    halo.addColorStop(1, 'rgba(170,185,198,0)');
-    ctx.beginPath(); ctx.arc(cx, cy, r * 1.55, 0, Math.PI*2);
+  /* ── CAR-T cell ── */
+  function drawCARTCell(cx, cy, r, glow, alpha) {
+    if (alpha <= 0) return;
+    ctx.save(); ctx.globalAlpha = alpha;
+
+    // Soft halo
+    const halo = ctx.createRadialGradient(cx,cy,r*.5, cx,cy,r*1.6);
+    halo.addColorStop(0, 'rgba(155,175,195,0.18)');
+    halo.addColorStop(1, 'rgba(155,175,195,0)');
+    ctx.beginPath(); ctx.arc(cx,cy,r*1.6,0,Math.PI*2);
     ctx.fillStyle = halo; ctx.fill();
 
-    // Bumpy body outline path
-    const BUMPS = 28;
+    // Bumpy body
+    const BUMPS = 26;
     ctx.beginPath();
-    for (let i = 0; i <= BUMPS * 2; i++) {
-      const a = (i / (BUMPS * 2)) * Math.PI * 2;
-      const bump = (i % 2 === 0)
-        ? r + Math.sin(i * 2.1 + t * .55) * 5 + 7
-        : r - 3;
-      const x = cx + Math.cos(a) * bump;
-      const y = cy + Math.sin(a) * bump;
-      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    for (let i = 0; i <= BUMPS*2; i++) {
+      const a = (i/(BUMPS*2))*Math.PI*2;
+      const b = (i%2===0) ? r + Math.sin(i*2.1+t*.5)*4+6 : r-3;
+      const x = cx + Math.cos(a)*b, y = cy + Math.sin(a)*b;
+      i===0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y);
     }
     ctx.closePath();
-    const body = ctx.createRadialGradient(cx - r*.22, cy - r*.22, 0, cx, cy, r * 1.1);
-    body.addColorStop(0,   '#edf1f5');
-    body.addColorStop(.45, '#cdd5de');
-    body.addColorStop(1,   '#a8b5c2');
+    const body = ctx.createRadialGradient(cx-r*.2,cy-r*.2,0, cx,cy,r*1.1);
+    body.addColorStop(0, '#edf1f5');
+    body.addColorStop(.5, '#cdd5de');
+    body.addColorStop(1, '#a8b5c2');
     ctx.fillStyle = body; ctx.fill();
-    ctx.strokeStyle = 'rgba(130,148,165,.35)';
-    ctx.lineWidth = 1; ctx.stroke();
+    ctx.strokeStyle = 'rgba(120,140,160,.3)'; ctx.lineWidth = 1; ctx.stroke();
 
-    // Internal organelles / granules
-    [[-0.12,0.06,.17],[ 0.18,-0.09,.12],[-0.22,-0.14,.10],
-     [ 0.06, 0.22,.14],[ 0.25, 0.16,.09],[-0.28, 0.09,.08]
-    ].forEach(([dx,dy,s])=>{
-      ctx.beginPath();
-      ctx.arc(cx+dx*r, cy+dy*r, s*r, 0, Math.PI*2);
-      ctx.fillStyle = 'rgba(95,115,132,.3)';
-      ctx.fill();
+    // Organelles
+    [[-0.12,.06,.17],[.18,-.09,.12],[-.22,-.14,.10],[.06,.22,.14],[.25,.16,.09]].forEach(([dx,dy,s])=>{
+      ctx.beginPath(); ctx.arc(cx+dx*r, cy+dy*r, s*r, 0, Math.PI*2);
+      ctx.fillStyle = 'rgba(90,110,130,.28)'; ctx.fill();
     });
 
-    // Red C-hook receptors
+    // Red C-hook receptors — rotate toward cancer (right) when attacking
     const HOOKS = 7;
     for (let i = 0; i < HOOKS; i++) {
-      const a = (i / HOOKS) * Math.PI * 2 + t * .28;
-      const sx = cx + Math.cos(a) * (r + 2);
-      const sy = cy + Math.sin(a) * (r + 2);
-      const ex = cx + Math.cos(a) * (r + 20 + Math.sin(t + i * 1.3) * 2.5);
-      const ey = cy + Math.sin(a) * (r + 20 + Math.sin(t + i * 1.3) * 2.5);
+      const baseAngle = (i/HOOKS)*Math.PI*2 + t*.25;
+      const glowAmt   = glow;
+      const sx = cx + Math.cos(baseAngle)*(r+2);
+      const sy = cy + Math.sin(baseAngle)*(r+2);
+      const ex = cx + Math.cos(baseAngle)*(r + 19 + Math.sin(t+i*1.3)*2);
+      const ey = cy + Math.sin(baseAngle)*(r + 19 + Math.sin(t+i*1.3)*2);
       ctx.save();
-      ctx.strokeStyle = '#c41e28';
-      ctx.lineWidth = 2.6;
-      ctx.lineCap = 'round';
-      ctx.shadowColor = '#c41e28';
-      ctx.shadowBlur = 4 + glow * 8;
-      // Shaft
-      ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
-      // C-arc at tip
-      ctx.lineWidth = 2.2;
-      ctx.beginPath();
-      ctx.arc(ex, ey, 5.5, a + Math.PI * .5, a + Math.PI * 1.5);
-      ctx.stroke();
-      ctx.restore();
+      ctx.strokeStyle = '#c41e28'; ctx.lineWidth = 2.5; ctx.lineCap = 'round';
+      ctx.shadowColor = '#c41e28'; ctx.shadowBlur = 3 + glowAmt*10;
+      ctx.beginPath(); ctx.moveTo(sx,sy); ctx.lineTo(ex,ey); ctx.stroke();
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(ex,ey,5,baseAngle+Math.PI*.5,baseAngle+Math.PI*1.5);
+      ctx.stroke(); ctx.restore();
     }
+    ctx.restore();
   }
 
-  /* ── Cancer cell ─────────────────────────────────────── */
-  /* Pink-red irregular blob + dark short spikes + dark nucleus */
-  function drawCancerCell(cx, cy, r, pulse) {
-    // Halo
-    const halo = ctx.createRadialGradient(cx, cy, r*.35, cx, cy, r*1.55);
-    halo.addColorStop(0, 'rgba(198,100,120,.14)');
-    halo.addColorStop(1, 'rgba(198,100,120,0)');
-    ctx.beginPath(); ctx.arc(cx, cy, r*1.55, 0, Math.PI*2);
-    ctx.fillStyle = halo; ctx.fill();
+  /* ── Cancer cell ── */
+  function drawCancerCell(cx, cy, r, pulse, alpha) {
+    if (alpha <= 0) return;
+    ctx.save(); ctx.globalAlpha = alpha;
 
-    // Irregular blob body
+    // Halo
+    const halo = ctx.createRadialGradient(cx,cy,r*.35, cx,cy,r*1.5);
+    halo.addColorStop(0, 'rgba(190,90,110,.16)');
+    halo.addColorStop(1, 'rgba(190,90,110,0)');
+    ctx.beginPath(); ctx.arc(cx,cy,r*1.5,0,Math.PI*2); ctx.fillStyle=halo; ctx.fill();
+
+    // Body
     const PTS = 22;
     ctx.beginPath();
     for (let i = 0; i <= PTS; i++) {
-      const a  = (i / PTS) * Math.PI * 2;
-      const br = r + Math.sin(i * 1.8 + t * .42) * 5.5 + pulse * 5;
-      const x  = cx + Math.cos(a) * br;
-      const y  = cy + Math.sin(a) * br;
-      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      const a = (i/PTS)*Math.PI*2;
+      const br = r + Math.sin(i*1.8+t*.4)*5 + pulse*4;
+      const x = cx+Math.cos(a)*br, y = cy+Math.sin(a)*br;
+      i===0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y);
     }
     ctx.closePath();
-    const body = ctx.createRadialGradient(cx - r*.15, cy - r*.15, 0, cx, cy, r * 1.1);
-    body.addColorStop(0,   '#eda0aa');
-    body.addColorStop(.5,  '#c86878');
-    body.addColorStop(1,   '#9e4555');
+    const body = ctx.createRadialGradient(cx-r*.15,cy-r*.15,0, cx,cy,r*1.1);
+    body.addColorStop(0, '#eda0aa'); body.addColorStop(.5,'#c86878'); body.addColorStop(1,'#9e4555');
     ctx.fillStyle = body; ctx.fill();
-    ctx.strokeStyle = 'rgba(135,50,65,.28)'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.strokeStyle = 'rgba(130,48,62,.25)'; ctx.lineWidth = 1; ctx.stroke();
 
-    // Short dark spikes
+    // Spikes
     const SPIKES = 11;
     for (let i = 0; i < SPIKES; i++) {
-      const a  = (i / SPIKES) * Math.PI * 2 + .25;
-      const s  = r - 2;
-      const e  = r + 13 + Math.sin(t * 1.1 + i) * 3;
-      ctx.save();
-      ctx.strokeStyle = '#7a2535';
-      ctx.lineWidth = 2.6; ctx.lineCap = 'round';
+      const a = (i/SPIKES)*Math.PI*2+.25;
+      ctx.save(); ctx.strokeStyle='#7a2535'; ctx.lineWidth=2.5; ctx.lineCap='round';
       ctx.beginPath();
-      ctx.moveTo(cx + Math.cos(a)*s, cy + Math.sin(a)*s);
-      ctx.lineTo(cx + Math.cos(a)*e, cy + Math.sin(a)*e);
+      ctx.moveTo(cx+Math.cos(a)*(r-2), cy+Math.sin(a)*(r-2));
+      ctx.lineTo(cx+Math.cos(a)*(r+12+Math.sin(t+i)*2.5), cy+Math.sin(a)*(r+12+Math.sin(t+i)*2.5));
       ctx.stroke(); ctx.restore();
     }
 
-    // Dark nucleus
-    const nuc = ctx.createRadialGradient(cx-r*.08,cy-r*.08,0, cx,cy, r*.46);
-    nuc.addColorStop(0, '#7a2030');
-    nuc.addColorStop(1, '#4a1020');
-    ctx.beginPath(); ctx.arc(cx, cy, r*.43, 0, Math.PI*2);
-    ctx.fillStyle = nuc; ctx.fill();
-    // Nucleolus
-    ctx.beginPath(); ctx.arc(cx - r*.1, cy - r*.08, r*.11, 0, Math.PI*2);
-    ctx.fillStyle = 'rgba(90,15,25,.6)'; ctx.fill();
-  }
+    // Nucleus
+    const nuc = ctx.createRadialGradient(cx-r*.08,cy-r*.08,0, cx,cy,r*.46);
+    nuc.addColorStop(0,'#7a2030'); nuc.addColorStop(1,'#4a1020');
+    ctx.beginPath(); ctx.arc(cx,cy,r*.43,0,Math.PI*2); ctx.fillStyle=nuc; ctx.fill();
+    ctx.beginPath(); ctx.arc(cx-r*.1,cy-r*.08,r*.11,0,Math.PI*2);
+    ctx.fillStyle='rgba(88,14,24,.55)'; ctx.fill();
 
-  /* ── Arrow ──────────────────────────────────────────── */
-  function drawArrow(x1, y1, x2, y2, alpha) {
-    if (alpha <= 0) return;
-    ctx.save(); ctx.globalAlpha = alpha;
-    ctx.strokeStyle = '#444'; ctx.lineWidth = 2.2; ctx.lineCap = 'round';
-    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2 - 11, y2); ctx.stroke();
-    ctx.fillStyle = '#444';
-    ctx.beginPath(); ctx.moveTo(x2,y2); ctx.lineTo(x2-13,y2-5.5); ctx.lineTo(x2-13,y2+5.5); ctx.closePath(); ctx.fill();
     ctx.restore();
   }
 
-  /* ── Beam ───────────────────────────────────────────── */
-  function drawBeam(x1, y1, x2, y2, alpha) {
+  /* ── Targeting reticle ── */
+  function drawReticle(cx, cy, r, progress, alpha) {
     if (alpha <= 0) return;
     ctx.save(); ctx.globalAlpha = alpha;
-    const g = ctx.createLinearGradient(x1,y1,x2,y2);
-    g.addColorStop(0,   '#c41e28');
-    g.addColorStop(.5,  'rgba(220,80,100,.65)');
-    g.addColorStop(1,   '#c41e28');
-    ctx.strokeStyle = g; ctx.lineWidth = 3.5;
-    ctx.shadowColor = '#c41e28'; ctx.shadowBlur = 12;
-    ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
-    // Travelling pulse dot
-    const pt = (t * .9) % 1;
-    const px = x1 + (x2-x1)*pt, py = y1 + (y2-y1)*pt;
-    ctx.beginPath(); ctx.arc(px,py,4.5,0,Math.PI*2);
-    ctx.fillStyle = '#fff'; ctx.shadowBlur = 18; ctx.fill();
+    const s  = r*1.8 + (1-progress)*r*.5;
+    const rot = t * 1.2;
+
+    // Outer ring
+    ctx.beginPath(); ctx.arc(cx,cy,s,0,Math.PI*2);
+    ctx.strokeStyle='#c41e28'; ctx.lineWidth=1.8;
+    ctx.setLineDash([s*.35, s*.15]); ctx.lineDashOffset = -rot*s;
+    ctx.stroke(); ctx.setLineDash([]);
+
+    // Inner ring — pulsing
+    const inner = s*.5 + Math.sin(t*4)*.06*s;
+    ctx.beginPath(); ctx.arc(cx,cy,inner,0,Math.PI*2);
+    ctx.strokeStyle='rgba(196,30,40,.55)'; ctx.lineWidth=1.2; ctx.stroke();
+
+    // Crosshair lines
+    const lineLen = s*.38;
+    ctx.strokeStyle='#c41e28'; ctx.lineWidth=1.6;
+    [0, Math.PI*.5, Math.PI, Math.PI*1.5].forEach(a => {
+      const gap = inner+3;
+      ctx.beginPath();
+      ctx.moveTo(cx+Math.cos(a)*gap,    cy+Math.sin(a)*gap);
+      ctx.lineTo(cx+Math.cos(a)*(gap+lineLen), cy+Math.sin(a)*(gap+lineLen));
+      ctx.stroke();
+    });
+
+    // Centre dot + plus
+    ctx.beginPath(); ctx.arc(cx,cy,4,0,Math.PI*2);
+    ctx.fillStyle='#c41e28'; ctx.fill();
+    ctx.strokeStyle='#c41e28'; ctx.lineWidth=1.4;
+    [[-1,0],[1,0],[0,-1],[0,1]].forEach(([dx,dy])=>{
+      ctx.beginPath();
+      ctx.moveTo(cx+dx*6, cy+dy*6);
+      ctx.lineTo(cx+dx*10,cy+dy*10);
+      ctx.stroke();
+    });
+
     ctx.restore();
   }
 
-  /* ── Build apoptotic fragments ──────────────────────── */
+  /* ── Binding arcs (tentacles connecting cells) ── */
+  function drawBindingArcs(x1, y1, r1, x2, y2, r2, alpha) {
+    if (alpha <= 0) return;
+    ctx.save(); ctx.globalAlpha = alpha;
+    const N = 5;
+    for (let i = 0; i < N; i++) {
+      const frac = (i+.5)/N;
+      const a1   = (frac - .25)*Math.PI*2;
+      const a2   = (frac + .25)*Math.PI*2;
+      const sx   = x1 + Math.cos(a1)*(r1+2);
+      const sy   = y1 + Math.sin(a1)*(r1+2);
+      const ex   = x2 + Math.cos(a2)*(r2+2);
+      const ey   = y2 + Math.sin(a2)*(r2+2);
+      const mx   = (sx+ex)*.5;
+      const my   = (sy+ey)*.5 + Math.sin(t*3+i)*5;
+      ctx.beginPath(); ctx.moveTo(sx,sy); ctx.quadraticCurveTo(mx,my,ex,ey);
+      ctx.strokeStyle='#c41e28'; ctx.lineWidth=2.2; ctx.lineCap='round';
+      ctx.shadowColor='#c41e28'; ctx.shadowBlur=6;
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  /* ── Build apoptotic fragments ── */
   function buildFragments(ox, oy, r) {
     fragments = [];
-    const N = 13;
+    const N = 14;
     for (let i = 0; i < N; i++) {
-      const a     = (i / N) * Math.PI * 2 + Math.random() * .35;
-      const speed = .6 + Math.random() * 1.5;
-      const fr    = r * (.18 + Math.random() * .3);
-      const cols  = [['#eda0aa','#c86878'],['#c86878','#9e4555'],['#d4909a','#b05060']];
-      const [c1,c2] = cols[i % 3];
+      const a  = (i/N)*Math.PI*2 + Math.random()*.4;
+      const spd = .55 + Math.random()*1.6;
+      const fr = r*(.17+Math.random()*.28);
+      const palettes = [['#eda0aa','#c86878'],['#c86878','#9e4555'],['#d4909a','#b05060']];
+      const [c1,c2] = palettes[i%3];
       fragments.push({
-        sx: ox + Math.cos(a)*r*.35, sy: oy + Math.sin(a)*r*.35,
-        vx: Math.cos(a)*speed,       vy: Math.sin(a)*speed - .28,
-        r: fr, c1, c2,
-        rot: Math.random()*Math.PI*2,
-        rotV: (Math.random()-.5)*.07,
+        sx:ox+Math.cos(a)*r*.25, sy:oy+Math.sin(a)*r*.25,
+        vx:Math.cos(a)*spd,      vy:Math.sin(a)*spd - .22,
+        r:fr, c1, c2,
+        rot:Math.random()*Math.PI*2,
+        rotV:(Math.random()-.5)*.065,
         hasNuc: i < 4,
       });
     }
   }
 
   function drawFragments(pf) {
-    const spread = Math.min(1, pf / .55);
-    const fade   = pf > .55 ? 1 - (pf-.55)/.45 : 1;
+    const spread = Math.min(1, pf/.5);
+    const fade   = pf > .5 ? 1-(pf-.5)/.5 : 1;
     fragments.forEach(f => {
-      const ex = f.sx + f.vx * spread * 62;
-      const ey = f.sy + f.vy * spread * 62;
+      const ex = f.sx + f.vx*spread*70;
+      const ey = f.sy + f.vy*spread*70;
       ctx.save();
       ctx.globalAlpha = fade;
-      ctx.translate(ex, ey);
-      ctx.rotate(f.rot + spread * f.rotV * 70);
-      // Irregular blob
+      ctx.translate(ex,ey);
+      ctx.rotate(f.rot + spread*f.rotV*80);
       ctx.beginPath();
       for (let i = 0; i <= 10; i++) {
-        const a  = (i / 10) * Math.PI * 2;
-        const br = f.r * (.7 + Math.sin(i*1.9)*.3);
-        i===0 ? ctx.moveTo(Math.cos(a)*br, Math.sin(a)*br)
-              : ctx.lineTo(Math.cos(a)*br, Math.sin(a)*br);
+        const a  = (i/10)*Math.PI*2;
+        const br = f.r*(.68+Math.sin(i*1.9)*.32);
+        i===0 ? ctx.moveTo(Math.cos(a)*br,Math.sin(a)*br) : ctx.lineTo(Math.cos(a)*br,Math.sin(a)*br);
       }
       ctx.closePath();
-      const g = ctx.createRadialGradient(0,0,0, 0,0, f.r);
-      g.addColorStop(0, f.c1); g.addColorStop(1, f.c2);
-      ctx.fillStyle = g; ctx.fill();
+      const g = ctx.createRadialGradient(0,0,0,0,0,f.r);
+      g.addColorStop(0,f.c1); g.addColorStop(1,f.c2);
+      ctx.fillStyle=g; ctx.fill();
       if (f.hasNuc) {
-        ctx.beginPath(); ctx.arc(0,0,f.r*.38,0,Math.PI*2);
-        ctx.fillStyle = 'rgba(95,20,35,.7)'; ctx.fill();
+        ctx.beginPath(); ctx.arc(0,0,f.r*.36,0,Math.PI*2);
+        ctx.fillStyle='rgba(90,18,32,.65)'; ctx.fill();
       }
       ctx.restore();
     });
   }
 
-  /* ── Main draw loop ─────────────────────────────────── */
+  /* ── Main draw ── */
   function draw() {
     requestAnimationFrame(draw);
 
-    // Advance phase timer
     pTick++;
-    if (pTick > PHASE_FRAMES) {
+    const dur = DURATIONS[phase];
+    if (pTick > dur) {
       pTick = 0;
-      phase = (phase + 1) % 4;
+      phase = (phase+1) % 5;
       pill.textContent = PHASES[phase].label;
       capEl.textContent = PHASES[phase].cap;
-      if (phase === 3) { fragsBuilt = false; particles = []; }
+      if (phase === 0) { fragsBuilt = false; particles = []; bindFlash = 0; }
+      if (phase === 4) fragsBuilt = false;
     }
-    const pf = pTick / PHASE_FRAMES; // 0→1 within phase
+    const pf = pTick / dur; // 0→1
 
-    ctx.clearRect(0, 0, W, H);
+    ctx.clearRect(0,0,W,H);
+    // No background fill — transparent (page white shows through)
+    // No dot grid
 
-    // White background
-    ctx.fillStyle = '#fafbfc';
-    ctx.fillRect(0, 0, W, H);
+    const cx  = W*.5;
+    const cy  = H*.5;
+    const cartR = Math.min(W,H)*.185;
+    const tumR  = Math.min(W,H)*.165;
 
-    // Subtle dot grid bg
-    ctx.save(); ctx.globalAlpha = .04;
-    for (let x = 14; x < W; x += 28)
-      for (let y = 14; y < H; y += 28) {
-        ctx.beginPath(); ctx.arc(x, y, 1.5, 0, Math.PI*2);
-        ctx.fillStyle = '#b41e28'; ctx.fill();
-      }
-    ctx.restore();
+    // Cancer cell is always fixed at right side
+    const tumX = cx + cartR + tumR + 28;
+    const tumY = cy;
 
-    // Layout
-    const cx    = W * .5;
-    const cy    = H * .5;
-    const cartR = Math.min(W, H) * .185;
-    const tumR  = Math.min(W, H) * .165;
-    const touch = cartR + tumR + 4;
+    // CAR-T positions per phase
+    let cartX, cartY;
+    let reticleAlpha = 0, reticleProgress = 0;
+    let bindAlpha    = 0;
+    let cartAlpha    = 1, tumAlpha = 1;
+    let showFrag     = false;
+    let glowAmt      = 0.3;
+    let pulse        = 0;
 
-    let cartX, cartY, tumX, tumY;
-    let beamAlpha = 0, arrowAlpha = 0, glow = 0;
-    let showTumour = true, showFrag = false;
-
-    /* Phase 0: CAR-T glides in from left */
     if (phase === 0) {
-      const e  = easeOut(pf);
-      cartX    = W * -.15 + e * (cx - touch*.92 - W * -.15);
-      cartY    = cy + Math.sin(t * 1.2) * 11;
-      tumX     = cx + touch * .92;
-      tumY     = cy + Math.sin(t * .75 + 1) * 8;
-      glow     = .3 + e * .4;
+      // Scan: cart glides in from far left, passes through, settles at left area
+      const startX = -cartR*2;
+      const endX   = cx - cartR - tumR - 90;
+      cartX = startX + easeOut(pf) * (endX - startX);
+      cartY = cy + Math.sin(t*1.1)*14;
+      glowAmt = 0.3;
 
-    /* Phase 1: approach + arrow */
     } else if (phase === 1) {
-      const e  = easeInOut(pf);
-      cartX    = cx - touch*.92 + e*(touch*.92 - touch*.5);
-      cartY    = cy + Math.sin(t * 1.2) * (11*(1-pf*.75));
-      tumX     = cx + touch * .5;
-      tumY     = cy + Math.sin(t * .75 + 1) * 6;
-      glow     = .65 + Math.sin(t*2.8)*.12;
-      arrowAlpha = Math.min(1, pf*4) * (1 - Math.max(0, pf-.72)/.28);
+      // Target acquired: cart pauses, reticle animates over cancer
+      cartX = cx - cartR - tumR - 90;
+      cartY = cy + Math.sin(t*1.1)*8*(1-pf*.6);
+      reticleAlpha   = clamp(pf*4, 0, 1);
+      reticleProgress = pf;
+      glowAmt = .5 + Math.sin(t*3)*.1;
 
-    /* Phase 2: contact + beam */
     } else if (phase === 2) {
-      const e  = easeInOut(pf);
-      cartX    = cx - touch*.5 + e*(touch*.5 - touch);
-      cartY    = cy;
-      tumX     = cx + touch;
-      tumY     = cy;
-      beamAlpha = .35 + e * .65;
-      glow     = 1;
-      if (Math.random() < .22) {
-        const con = { x: (cartX+cartR + tumX-tumR)*.5, y: cy };
-        addParticle(con.x+(Math.random()-.5)*8, con.y+(Math.random()-.5)*8,
+      // Approach: cart moves rapidly toward cancer
+      const startX = cx - cartR - tumR - 90;
+      const endX   = tumX - tumR - cartR - 6;
+      cartX = startX + easeInOut(pf)*(endX - startX);
+      cartY = cy + Math.sin(t*1.1)*6*(1-pf);
+      reticleAlpha = Math.max(0, 1 - pf*3);
+      glowAmt = .7;
+
+    } else if (phase === 3) {
+      // Bind: cart at contact, binding arcs
+      cartX = tumX - tumR - cartR - 6;
+      cartY = cy;
+      bindAlpha = clamp(pf*3, 0, 1);
+      glowAmt = 1;
+      pulse = Math.sin(t*5)*.5+.5;
+      if (pf > .15 && Math.random() < .14) {
+        const con = { x:(cartX+cartR+tumX-tumR)*.5, y:cy };
+        addParticle(con.x+(Math.random()-.5)*10, con.y+(Math.random()-.5)*10,
           Math.random()<.5?'#c41e28':'#ff9999',
-          (Math.random()-.5)*2.2,(Math.random()-.5)*2.2, 28, 2.4);
+          (Math.random()-.5)*2,(Math.random()-.5)*2, 25, 2.2);
       }
 
-    /* Phase 3: apoptosis */
     } else {
-      cartX    = cx - touch;
-      cartY    = cy;
-      tumX     = cx + touch;
-      tumY     = cy;
-      glow     = .55;
-      beamAlpha = Math.max(0, .35 - pf*3.5);
-      showTumour = pf < .1;
-      showFrag   = true;
-      if (!fragsBuilt) { buildFragments(tumX, tumY, tumR); fragsBuilt = true; }
-      if (pf < .22 && Math.random() < .32) {
-        const a = Math.random()*Math.PI*2, sp = 1.3+Math.random()*2.8;
-        addParticle(tumX+Math.cos(a)*tumR*.7, tumY+Math.sin(a)*tumR*.7,
-          Math.random()<.5?'#c86878':'#eda0aa', Math.cos(a)*sp, Math.sin(a)*sp-.7, 48, 3+Math.random()*3);
+      // Apoptosis: cancer explodes, both fade
+      cartX = tumX - tumR - cartR - 6;
+      cartY = cy;
+      if (!fragsBuilt) { buildFragments(tumX,tumY,tumR); fragsBuilt=true; }
+      showFrag = true;
+      tumAlpha = Math.max(0, 1 - pf*8);
+      cartAlpha = Math.max(0, 1 - pf*2.5);
+      glowAmt = .5*(1-pf);
+      if (pf < .25 && Math.random() < .3) {
+        const a = Math.random()*Math.PI*2, sp=1.5+Math.random()*2.5;
+        addParticle(tumX+Math.cos(a)*tumR*.6, tumY+Math.sin(a)*tumR*.6,
+          Math.random()<.5?'#c86878':'#eda0aa', Math.cos(a)*sp, Math.sin(a)*sp-.6, 45, 3+Math.random()*3);
       }
     }
 
-    // Draw order: beam → cells → fragments → particles
-    drawBeam(cartX + cartR, cartY, tumX - tumR, tumY, beamAlpha);
-    drawArrow(cartX + cartR + 10, cartY, tumX - tumR - 10, tumY, arrowAlpha);
-    drawCARTCell(cartX, cartY, cartR, glow);
-
-    if (showTumour) {
-      const pulse = phase >= 2 ? (Math.sin(t*5)*.5+.5) : 0;
-      drawCancerCell(tumX, tumY, tumR, pulse);
-    }
+    // Draw order: reticle → binding → cart → cancer → frags → particles
+    drawReticle(tumX, tumY, tumR, reticleProgress, reticleAlpha);
+    drawBindingArcs(cartX, cartY, cartR, tumX, tumY, tumR, bindAlpha);
+    drawCARTCell(cartX, cartY, cartR, glowAmt, cartAlpha);
+    drawCancerCell(tumX, tumY, tumR, pulse, tumAlpha);
     if (showFrag) drawFragments(pf);
-    drawParticles();
+    updateParticles();
 
-    t    += .018;
-    tick++;
+    t += .018;
   }
 
   resize();
