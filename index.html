@@ -61,10 +61,10 @@
   display: flex !important;
   flex-direction: column !important;
   align-items: flex-start !important;
-  max-width: 600px !important;
+  max-width: 560px !important;
   margin: 0 !important;
-  padding: 0 56px !important;
-  width: 50% !important;
+  padding: 0 0 0 72px !important;
+  width: 48% !important;
   position: relative;
   z-index: 2;
 }
@@ -81,23 +81,23 @@
 .hero-sub { color: #4a5568 !important; }
 .hero-institution { color: #8896a8 !important; }
 
-/* Hero SCART logo above heading — larger */
+/* Hero SCART logo above heading — largest element */
 .hero-scart-logo {
-  font-size: 64px;
+  font-size: 78px;
   margin-bottom: 14px;
   display: block;
-  letter-spacing: -1px;
+  letter-spacing: -2px;
 }
 
-/* Slightly smaller hero text */
-.hero h1 { font-size: clamp(28px, 4vw, 46px) !important; line-height: 1.15 !important; }
-.hero-sub { font-size: 14px !important; }
-.hero-badge { font-size: 11px !important; }
+/* Larger hero text — SCART still biggest */
+.hero h1 { font-size: clamp(32px, 4.5vw, 54px) !important; line-height: 1.13 !important; }
+.hero-sub { font-size: 16px !important; }
+.hero-badge { font-size: 12px !important; }
 
 /* ── Animation: full-width absolute overlay on the hero section ── */
 .hero {
   position: relative !important;
-  overflow: hidden !important;
+  overflow: visible !important;
 }
 .hero-anim-panel {
   position: absolute !important;
@@ -106,9 +106,9 @@
   height: 100% !important;
   max-width: none !important;
   margin: 0 !important;
-  background: transparent !important;
+  background: #ffffff !important;
   border-radius: 0 !important;
-  overflow: visible !important;
+  overflow: hidden !important;
   pointer-events: none;
   z-index: 0;
 }
@@ -118,6 +118,7 @@
   width: 100% !important;
   height: 100% !important;
   display: block;
+  background: #ffffff;
 }
 
 /* Text column sits above canvas */
@@ -418,7 +419,7 @@
   const BIND_HOOK = 2;
 
   function resize() {
-    const hero = canvas.closest('.hero') || canvas.parentElement.closest('section') || canvas.parentElement;
+    const hero = canvas.closest('section') || canvas.parentElement.parentElement;
     dpr = window.devicePixelRatio || 1;
     W   = hero.clientWidth;
     H   = hero.clientHeight;
@@ -669,6 +670,8 @@
     const pf = pTick / dur;
 
     ctx.clearRect(0,0,W,H);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0,0,W,H);
 
     // Geometry: cancer always at right-centre of the hero
     const cy   = H * .5;
