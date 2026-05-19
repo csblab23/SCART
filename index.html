@@ -58,14 +58,15 @@
   align-items: center !important;
 }
 .hero-inner {
-  display: grid !important;
-  grid-template-columns: 1fr 1fr !important;
-  gap: 48px !important;
-  align-items: center !important;
-  max-width: 1280px !important;
-  margin: 0 auto !important;
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: flex-start !important;
+  max-width: 600px !important;
+  margin: 0 !important;
   padding: 0 56px !important;
-  width: 100% !important;
+  width: 50% !important;
+  position: relative;
+  z-index: 2;
 }
 
 /* Light-theme overrides for hero text */
@@ -80,32 +81,56 @@
 .hero-sub { color: #4a5568 !important; }
 .hero-institution { color: #8896a8 !important; }
 
-/* Hero SCART logo above heading */
+/* Hero SCART logo above heading — larger */
 .hero-scart-logo {
-  font-size: 42px;
-  margin-bottom: 18px;
+  font-size: 64px;
+  margin-bottom: 14px;
+  display: block;
+  letter-spacing: -1px;
+}
+
+/* Slightly smaller hero text */
+.hero h1 { font-size: clamp(28px, 4vw, 46px) !important; line-height: 1.15 !important; }
+.hero-sub { font-size: 14px !important; }
+.hero-badge { font-size: 11px !important; }
+
+/* ── Animation: full-width absolute overlay on the hero section ── */
+.hero {
+  position: relative !important;
+  overflow: hidden !important;
+}
+.hero-anim-panel {
+  position: absolute !important;
+  top: 0; left: 0; right: 0; bottom: 0;
+  width: 100% !important;
+  height: 100% !important;
+  max-width: none !important;
+  margin: 0 !important;
+  background: transparent !important;
+  border-radius: 0 !important;
+  overflow: visible !important;
+  pointer-events: none;
+  z-index: 0;
+}
+#heroCanvas {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100% !important;
+  height: 100% !important;
   display: block;
 }
 
-/* ── Right: animation panel — NO box, NO background ── */
-.hero-anim-panel {
+/* Text column sits above canvas */
+.hero-content {
   position: relative;
-  width: 100%;
-  aspect-ratio: 1 / 1;
-  max-width: 520px;
-  margin: 0 auto;
-  /* No background, no border, no shadow — seamless with page */
-  background: transparent;
-  border-radius: 0;
-  overflow: visible;
+  z-index: 2;
 }
-#heroCanvas { width: 100%; height: 100%; display: block; }
 
-/* Phase pill stays but floats freely */
+/* Phase pill and caption — fixed to bottom-right of hero */
 .hero-phase-pill {
   position: absolute;
-  top: 6px; left: 50%;
-  transform: translateX(-50%);
+  top: 18px; right: 36px;
+  transform: none;
   font-family: 'JetBrains Mono', monospace;
   font-size: 10px;
   letter-spacing: 0.1em;
@@ -121,8 +146,8 @@
 }
 .hero-anim-caption {
   position: absolute;
-  bottom: 4px; left: 0; right: 0;
-  text-align: center;
+  bottom: 18px; right: 36px;
+  text-align: right;
   pointer-events: none;
   z-index: 10;
 }
@@ -136,7 +161,8 @@
 
 @media (max-width: 900px) {
   .hero-inner { grid-template-columns: 1fr !important; padding: 0 24px !important; }
-  .hero-anim-panel { max-width: 360px; }
+  .hero-phase-pill { right: 16px; }
+  .hero-anim-caption { right: 16px; }
 }
 </style>
 </head>
@@ -205,15 +231,15 @@
       </div>
     </div>
 
-    <!-- RIGHT: animation — no box -->
-    <div class="hero-anim-panel">
-      <canvas id="heroCanvas"></canvas>
-      <div class="hero-phase-pill" id="heroPhasePill">Scanning for target</div>
-      <div class="hero-anim-caption">
-        <p id="heroCaption">CAR-T cell hunts for tumour-specific surface antigens</p>
-      </div>
-    </div>
+  </div>
 
+  <!-- Full-width canvas overlay spans entire hero behind and beside text -->
+  <div class="hero-anim-panel">
+    <canvas id="heroCanvas"></canvas>
+  </div>
+  <div class="hero-phase-pill" id="heroPhasePill">Scanning for target</div>
+  <div class="hero-anim-caption">
+    <p id="heroCaption">CAR-T cell hunts for tumour-specific surface antigens</p>
   </div>
 </section>
 
@@ -355,13 +381,15 @@
 <script src="docs/js/main.js"></script>
 
 <!-- ═══════════════════════════════════════════════════════════════
-     CAR-T ANIMATION v2
+     CAR-T ANIMATION v3
+     Canvas is full-hero-width overlay. Cancer fixed at right-centre.
+     CAR-T enters from absolute left edge (x = -radius).
      Phases:
-       0 — SCAN: CAR-T slides in from far left, cancer fixed at right centre
-       1 — TARGET: CAR-T spots cancer, targeting reticle appears & pulses
-       2 — APPROACH: CAR-T rapidly moves toward cancer cell
-       3 — BIND: CAR-T receptors lock onto cancer surface, flash of attachment
-       4 — APOPTOSIS: cancer cell fragments, both cells fade out, loop resets
+       0 — SCAN:    CAR-T glides from left edge, CARs revolving
+       1 — TARGET:  Reticle pulses over cancer, CAR-T pauses
+       2 — APPROACH: CAR-T charges toward cancer, CARs still revolving
+       3 — BIND:    CARs stop revolving; one CAR arm extends & locks onto one spike
+       4 — APOPTOSIS: cancer fragments, both fade, loop
 ═══════════════════════════════════════════════════════════════════ -->
 <script>
 (function () {
@@ -371,28 +399,29 @@
   const capEl  = document.getElementById('heroCaption');
 
   const PHASES = [
-    { label: 'Scanning for target',    cap: 'CAR-T cell hunts for tumour-specific surface antigens' },
-    { label: 'Target acquired',        cap: 'Tumour antigen detected — attack protocol initiated' },
-    { label: 'Approaching target',     cap: 'CAR-T cell moves in for receptor engagement' },
-    { label: 'Antigen binding',        cap: 'CAR receptors lock onto the cancer cell surface' },
-    { label: 'Apoptosis induced',      cap: 'Cancer cell fragments — mission complete' },
+    { label: 'Scanning for target',  cap: 'CAR-T cell hunts for tumour-specific surface antigens' },
+    { label: 'Target acquired',      cap: 'Tumour antigen detected — attack protocol initiated' },
+    { label: 'Approaching target',   cap: 'CAR-T cell moves in for receptor engagement' },
+    { label: 'Antigen binding',      cap: 'CAR receptor locks onto the cancer cell antigen' },
+    { label: 'Apoptosis induced',    cap: 'Cancer cell fragments — mission complete' },
   ];
-
-  // Phase durations in frames
-  const DURATIONS = [200, 110, 90, 130, 160];
+  const DURATIONS = [210, 120, 95, 150, 170];
 
   let W, H, dpr;
   let t = 0;
   let phase = 0, pTick = 0;
   let fragments = [], fragsBuilt = false;
   let particles = [];
-  let bindFlash = 0;
+  // Frozen angle snapshot for when CARs stop revolving
+  let frozenCarAngle = 0;
+  // Which hook index is the "binding" hook (toward cancer)
+  const BIND_HOOK = 2;
 
   function resize() {
-    const el = canvas.parentElement;
+    const hero = canvas.closest('.hero') || canvas.parentElement.closest('section') || canvas.parentElement;
     dpr = window.devicePixelRatio || 1;
-    W = el.clientWidth;
-    H = el.clientHeight;
+    W   = hero.clientWidth;
+    H   = hero.clientHeight;
     canvas.width  = W * dpr;
     canvas.height = H * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -401,6 +430,7 @@
   const easeOut   = x => 1 - Math.pow(1-x, 3);
   const easeInOut = x => x < .5 ? 4*x*x*x : 1 - Math.pow(-2*x+2,3)/2;
   const clamp     = (v,a,b) => Math.max(a, Math.min(b, v));
+  const lerp      = (a,b,t) => a + (b-a)*t;
 
   /* ── Particles ── */
   function addParticle(x, y, col, vx, vy, life, r) {
@@ -409,28 +439,31 @@
   function updateParticles() {
     for (let i = particles.length-1; i >= 0; i--) {
       const p = particles[i];
-      p.x += p.vx; p.y += p.vy; p.vy += .045; p.life--;
+      p.x += p.vx; p.y += p.vy; p.vy += .04; p.life--;
       if (p.life <= 0) { particles.splice(i,1); continue; }
-      const a = p.life / p.ml;
       ctx.save();
-      ctx.globalAlpha = a * 0.85;
-      ctx.beginPath(); ctx.arc(p.x, p.y, p.r * a, 0, Math.PI*2);
+      ctx.globalAlpha = (p.life/p.ml)*0.85;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r*(p.life/p.ml), 0, Math.PI*2);
       ctx.fillStyle = p.col; ctx.fill();
       ctx.restore();
     }
   }
 
-  /* ── CAR-T cell ── */
-  function drawCARTCell(cx, cy, r, glow, alpha) {
+  /* ── CAR-T cell ──
+     carAngle: base rotation of the revolving CARs
+     revolving: true = CARs orbit, false = CARs frozen
+     bindProgress: 0→1, one hook extends toward cancer
+     bindTargetX/Y: tip of the cancer spike to lock onto
+  */
+  function drawCARTCell(cx, cy, r, glowAmt, alpha, carAngle, revolving, bindProgress, bindTargetX, bindTargetY) {
     if (alpha <= 0) return;
     ctx.save(); ctx.globalAlpha = alpha;
 
     // Soft halo
     const halo = ctx.createRadialGradient(cx,cy,r*.5, cx,cy,r*1.6);
-    halo.addColorStop(0, 'rgba(155,175,195,0.18)');
+    halo.addColorStop(0, 'rgba(155,175,195,0.15)');
     halo.addColorStop(1, 'rgba(155,175,195,0)');
-    ctx.beginPath(); ctx.arc(cx,cy,r*1.6,0,Math.PI*2);
-    ctx.fillStyle = halo; ctx.fill();
+    ctx.beginPath(); ctx.arc(cx,cy,r*1.6,0,Math.PI*2); ctx.fillStyle=halo; ctx.fill();
 
     // Bumpy body
     const BUMPS = 26;
@@ -438,52 +471,84 @@
     for (let i = 0; i <= BUMPS*2; i++) {
       const a = (i/(BUMPS*2))*Math.PI*2;
       const b = (i%2===0) ? r + Math.sin(i*2.1+t*.5)*4+6 : r-3;
-      const x = cx + Math.cos(a)*b, y = cy + Math.sin(a)*b;
-      i===0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y);
+      i===0 ? ctx.moveTo(cx+Math.cos(a)*b, cy+Math.sin(a)*b)
+            : ctx.lineTo(cx+Math.cos(a)*b, cy+Math.sin(a)*b);
     }
     ctx.closePath();
     const body = ctx.createRadialGradient(cx-r*.2,cy-r*.2,0, cx,cy,r*1.1);
-    body.addColorStop(0, '#edf1f5');
-    body.addColorStop(.5, '#cdd5de');
-    body.addColorStop(1, '#a8b5c2');
+    body.addColorStop(0, '#edf1f5'); body.addColorStop(.5,'#cdd5de'); body.addColorStop(1,'#a8b5c2');
     ctx.fillStyle = body; ctx.fill();
-    ctx.strokeStyle = 'rgba(120,140,160,.3)'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.strokeStyle = 'rgba(120,140,160,.28)'; ctx.lineWidth = 1; ctx.stroke();
 
     // Organelles
     [[-0.12,.06,.17],[.18,-.09,.12],[-.22,-.14,.10],[.06,.22,.14],[.25,.16,.09]].forEach(([dx,dy,s])=>{
       ctx.beginPath(); ctx.arc(cx+dx*r, cy+dy*r, s*r, 0, Math.PI*2);
-      ctx.fillStyle = 'rgba(90,110,130,.28)'; ctx.fill();
+      ctx.fillStyle = 'rgba(88,108,128,.26)'; ctx.fill();
     });
 
-    // Red C-hook receptors — rotate toward cancer (right) when attacking
+    // C-hook receptors
     const HOOKS = 7;
     for (let i = 0; i < HOOKS; i++) {
-      const baseAngle = (i/HOOKS)*Math.PI*2 + t*.25;
-      const glowAmt   = glow;
-      const sx = cx + Math.cos(baseAngle)*(r+2);
-      const sy = cy + Math.sin(baseAngle)*(r+2);
-      const ex = cx + Math.cos(baseAngle)*(r + 19 + Math.sin(t+i*1.3)*2);
-      const ey = cy + Math.sin(baseAngle)*(r + 19 + Math.sin(t+i*1.3)*2);
-      ctx.save();
-      ctx.strokeStyle = '#c41e28'; ctx.lineWidth = 2.5; ctx.lineCap = 'round';
-      ctx.shadowColor = '#c41e28'; ctx.shadowBlur = 3 + glowAmt*10;
-      ctx.beginPath(); ctx.moveTo(sx,sy); ctx.lineTo(ex,ey); ctx.stroke();
-      ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.arc(ex,ey,5,baseAngle+Math.PI*.5,baseAngle+Math.PI*1.5);
-      ctx.stroke(); ctx.restore();
+      const baseA = (i/HOOKS)*Math.PI*2 + carAngle;
+
+      if (!revolving && i === BIND_HOOK && bindProgress > 0 && bindTargetX !== null) {
+        // This hook extends toward the cancer spike tip
+        const sx = cx + Math.cos(baseA)*(r+2);
+        const sy = cy + Math.sin(baseA)*(r+2);
+        // Tip lerps toward the cancer antigen tip
+        const tx = lerp(cx + Math.cos(baseA)*(r+24), bindTargetX, easeOut(bindProgress));
+        const ty = lerp(cy + Math.sin(baseA)*(r+24), bindTargetY, easeOut(bindProgress));
+        ctx.save();
+        ctx.strokeStyle = '#c41e28'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+        ctx.shadowColor = '#c41e28'; ctx.shadowBlur = 8 + bindProgress*12;
+        ctx.beginPath(); ctx.moveTo(sx,sy); ctx.lineTo(tx,ty); ctx.stroke();
+        // C-arc tip — locks visually
+        const hookA = Math.atan2(ty-sy, tx-sx);
+        ctx.lineWidth = 2.5;
+        ctx.beginPath(); ctx.arc(tx,ty,6, hookA+Math.PI*.5, hookA+Math.PI*1.5);
+        ctx.stroke();
+        // Lock flash when fully bound
+        if (bindProgress > .9) {
+          ctx.globalAlpha = (bindProgress-.9)/.1 * .5;
+          ctx.beginPath(); ctx.arc(tx,ty,10,0,Math.PI*2);
+          ctx.fillStyle = '#c41e28'; ctx.fill();
+        }
+        ctx.restore();
+      } else {
+        // Normal orbiting hook
+        const wobble = revolving ? Math.sin(t+i*1.3)*2 : 0;
+        const sx = cx + Math.cos(baseA)*(r+2);
+        const sy = cy + Math.sin(baseA)*(r+2);
+        const ex = cx + Math.cos(baseA)*(r + 20 + wobble);
+        const ey = cy + Math.sin(baseA)*(r + 20 + wobble);
+        ctx.save();
+        ctx.strokeStyle = '#c41e28'; ctx.lineWidth = 2.4; ctx.lineCap = 'round';
+        ctx.shadowColor = '#c41e28'; ctx.shadowBlur = 3 + glowAmt*7;
+        ctx.beginPath(); ctx.moveTo(sx,sy); ctx.lineTo(ex,ey); ctx.stroke();
+        ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(ex,ey,5, baseA+Math.PI*.5, baseA+Math.PI*1.5);
+        ctx.stroke();
+        ctx.restore();
+      }
     }
     ctx.restore();
   }
 
   /* ── Cancer cell ── */
+  // Returns the tip position of spike index `targetSpike` so the CAR can lock onto it
+  function getCancerSpikeTip(cx, cy, r, spikeIdx, totalSpikes) {
+    const a = (spikeIdx/totalSpikes)*Math.PI*2 + .25;
+    const e = r + 16;
+    return { x: cx + Math.cos(a)*e, y: cy + Math.sin(a)*e };
+  }
+
   function drawCancerCell(cx, cy, r, pulse, alpha) {
     if (alpha <= 0) return;
     ctx.save(); ctx.globalAlpha = alpha;
 
     // Halo
-    const halo = ctx.createRadialGradient(cx,cy,r*.35, cx,cy,r*1.5);
-    halo.addColorStop(0, 'rgba(190,90,110,.16)');
-    halo.addColorStop(1, 'rgba(190,90,110,0)');
+    const halo = ctx.createRadialGradient(cx,cy,r*.3, cx,cy,r*1.5);
+    halo.addColorStop(0,'rgba(190,90,110,.14)'); halo.addColorStop(1,'rgba(190,90,110,0)');
     ctx.beginPath(); ctx.arc(cx,cy,r*1.5,0,Math.PI*2); ctx.fillStyle=halo; ctx.fill();
 
     // Body
@@ -491,24 +556,25 @@
     ctx.beginPath();
     for (let i = 0; i <= PTS; i++) {
       const a = (i/PTS)*Math.PI*2;
-      const br = r + Math.sin(i*1.8+t*.4)*5 + pulse*4;
-      const x = cx+Math.cos(a)*br, y = cy+Math.sin(a)*br;
-      i===0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y);
+      const br = r + Math.sin(i*1.8+t*.38)*5 + pulse*4;
+      i===0 ? ctx.moveTo(cx+Math.cos(a)*br, cy+Math.sin(a)*br)
+            : ctx.lineTo(cx+Math.cos(a)*br, cy+Math.sin(a)*br);
     }
     ctx.closePath();
-    const body = ctx.createRadialGradient(cx-r*.15,cy-r*.15,0, cx,cy,r*1.1);
-    body.addColorStop(0, '#eda0aa'); body.addColorStop(.5,'#c86878'); body.addColorStop(1,'#9e4555');
-    ctx.fillStyle = body; ctx.fill();
-    ctx.strokeStyle = 'rgba(130,48,62,.25)'; ctx.lineWidth = 1; ctx.stroke();
+    const body = ctx.createRadialGradient(cx-r*.14,cy-r*.14,0, cx,cy,r*1.1);
+    body.addColorStop(0,'#eda0aa'); body.addColorStop(.5,'#c86878'); body.addColorStop(1,'#9e4555');
+    ctx.fillStyle=body; ctx.fill();
+    ctx.strokeStyle='rgba(130,48,62,.22)'; ctx.lineWidth=1; ctx.stroke();
 
     // Spikes
     const SPIKES = 11;
     for (let i = 0; i < SPIKES; i++) {
       const a = (i/SPIKES)*Math.PI*2+.25;
+      const end = r + 15 + Math.sin(t+i)*2.5;
       ctx.save(); ctx.strokeStyle='#7a2535'; ctx.lineWidth=2.5; ctx.lineCap='round';
       ctx.beginPath();
       ctx.moveTo(cx+Math.cos(a)*(r-2), cy+Math.sin(a)*(r-2));
-      ctx.lineTo(cx+Math.cos(a)*(r+12+Math.sin(t+i)*2.5), cy+Math.sin(a)*(r+12+Math.sin(t+i)*2.5));
+      ctx.lineTo(cx+Math.cos(a)*end,    cy+Math.sin(a)*end);
       ctx.stroke(); ctx.restore();
     }
 
@@ -517,7 +583,7 @@
     nuc.addColorStop(0,'#7a2030'); nuc.addColorStop(1,'#4a1020');
     ctx.beginPath(); ctx.arc(cx,cy,r*.43,0,Math.PI*2); ctx.fillStyle=nuc; ctx.fill();
     ctx.beginPath(); ctx.arc(cx-r*.1,cy-r*.08,r*.11,0,Math.PI*2);
-    ctx.fillStyle='rgba(88,14,24,.55)'; ctx.fill();
+    ctx.fillStyle='rgba(88,14,24,.52)'; ctx.fill();
 
     ctx.restore();
   }
@@ -526,118 +592,65 @@
   function drawReticle(cx, cy, r, progress, alpha) {
     if (alpha <= 0) return;
     ctx.save(); ctx.globalAlpha = alpha;
-    const s  = r*1.8 + (1-progress)*r*.5;
-    const rot = t * 1.2;
-
-    // Outer ring
+    const s   = r*1.85 + (1-progress)*r*.5;
+    const rot = t*1.3;
     ctx.beginPath(); ctx.arc(cx,cy,s,0,Math.PI*2);
-    ctx.strokeStyle='#c41e28'; ctx.lineWidth=1.8;
-    ctx.setLineDash([s*.35, s*.15]); ctx.lineDashOffset = -rot*s;
+    ctx.strokeStyle='#c41e28'; ctx.lineWidth=1.7;
+    ctx.setLineDash([s*.34,s*.14]); ctx.lineDashOffset=-rot*s;
     ctx.stroke(); ctx.setLineDash([]);
-
-    // Inner ring — pulsing
-    const inner = s*.5 + Math.sin(t*4)*.06*s;
+    const inner = s*.5 + Math.sin(t*4)*.055*s;
     ctx.beginPath(); ctx.arc(cx,cy,inner,0,Math.PI*2);
-    ctx.strokeStyle='rgba(196,30,40,.55)'; ctx.lineWidth=1.2; ctx.stroke();
-
-    // Crosshair lines
-    const lineLen = s*.38;
-    ctx.strokeStyle='#c41e28'; ctx.lineWidth=1.6;
+    ctx.strokeStyle='rgba(196,30,40,.5)'; ctx.lineWidth=1.1; ctx.stroke();
+    const ll = s*.36;
+    ctx.strokeStyle='#c41e28'; ctx.lineWidth=1.5;
     [0, Math.PI*.5, Math.PI, Math.PI*1.5].forEach(a => {
-      const gap = inner+3;
+      const g = inner+3;
       ctx.beginPath();
-      ctx.moveTo(cx+Math.cos(a)*gap,    cy+Math.sin(a)*gap);
-      ctx.lineTo(cx+Math.cos(a)*(gap+lineLen), cy+Math.sin(a)*(gap+lineLen));
+      ctx.moveTo(cx+Math.cos(a)*g,     cy+Math.sin(a)*g);
+      ctx.lineTo(cx+Math.cos(a)*(g+ll),cy+Math.sin(a)*(g+ll));
       ctx.stroke();
     });
-
-    // Centre dot + plus
-    ctx.beginPath(); ctx.arc(cx,cy,4,0,Math.PI*2);
-    ctx.fillStyle='#c41e28'; ctx.fill();
-    ctx.strokeStyle='#c41e28'; ctx.lineWidth=1.4;
-    [[-1,0],[1,0],[0,-1],[0,1]].forEach(([dx,dy])=>{
-      ctx.beginPath();
-      ctx.moveTo(cx+dx*6, cy+dy*6);
-      ctx.lineTo(cx+dx*10,cy+dy*10);
-      ctx.stroke();
-    });
-
+    ctx.beginPath(); ctx.arc(cx,cy,4,0,Math.PI*2); ctx.fillStyle='#c41e28'; ctx.fill();
     ctx.restore();
   }
 
-  /* ── Binding arcs (tentacles connecting cells) ── */
-  function drawBindingArcs(x1, y1, r1, x2, y2, r2, alpha) {
-    if (alpha <= 0) return;
-    ctx.save(); ctx.globalAlpha = alpha;
-    const N = 5;
-    for (let i = 0; i < N; i++) {
-      const frac = (i+.5)/N;
-      const a1   = (frac - .25)*Math.PI*2;
-      const a2   = (frac + .25)*Math.PI*2;
-      const sx   = x1 + Math.cos(a1)*(r1+2);
-      const sy   = y1 + Math.sin(a1)*(r1+2);
-      const ex   = x2 + Math.cos(a2)*(r2+2);
-      const ey   = y2 + Math.sin(a2)*(r2+2);
-      const mx   = (sx+ex)*.5;
-      const my   = (sy+ey)*.5 + Math.sin(t*3+i)*5;
-      ctx.beginPath(); ctx.moveTo(sx,sy); ctx.quadraticCurveTo(mx,my,ex,ey);
-      ctx.strokeStyle='#c41e28'; ctx.lineWidth=2.2; ctx.lineCap='round';
-      ctx.shadowColor='#c41e28'; ctx.shadowBlur=6;
-      ctx.stroke();
-    }
-    ctx.restore();
-  }
-
-  /* ── Build apoptotic fragments ── */
+  /* ── Fragments ── */
   function buildFragments(ox, oy, r) {
     fragments = [];
     const N = 14;
     for (let i = 0; i < N; i++) {
-      const a  = (i/N)*Math.PI*2 + Math.random()*.4;
+      const a   = (i/N)*Math.PI*2 + Math.random()*.4;
       const spd = .55 + Math.random()*1.6;
-      const fr = r*(.17+Math.random()*.28);
-      const palettes = [['#eda0aa','#c86878'],['#c86878','#9e4555'],['#d4909a','#b05060']];
-      const [c1,c2] = palettes[i%3];
-      fragments.push({
-        sx:ox+Math.cos(a)*r*.25, sy:oy+Math.sin(a)*r*.25,
-        vx:Math.cos(a)*spd,      vy:Math.sin(a)*spd - .22,
-        r:fr, c1, c2,
-        rot:Math.random()*Math.PI*2,
-        rotV:(Math.random()-.5)*.065,
-        hasNuc: i < 4,
-      });
+      const fr  = r*(.17+Math.random()*.28);
+      const pal = [['#eda0aa','#c86878'],['#c86878','#9e4555'],['#d4909a','#b05060']];
+      const [c1,c2] = pal[i%3];
+      fragments.push({ sx:ox+Math.cos(a)*r*.22, sy:oy+Math.sin(a)*r*.22,
+        vx:Math.cos(a)*spd, vy:Math.sin(a)*spd-.2,
+        r:fr, c1, c2, rot:Math.random()*Math.PI*2, rotV:(Math.random()-.5)*.06, hasNuc:i<4 });
     }
   }
-
   function drawFragments(pf) {
     const spread = Math.min(1, pf/.5);
     const fade   = pf > .5 ? 1-(pf-.5)/.5 : 1;
     fragments.forEach(f => {
-      const ex = f.sx + f.vx*spread*70;
-      const ey = f.sy + f.vy*spread*70;
-      ctx.save();
-      ctx.globalAlpha = fade;
-      ctx.translate(ex,ey);
-      ctx.rotate(f.rot + spread*f.rotV*80);
+      const ex = f.sx + f.vx*spread*72, ey = f.sy + f.vy*spread*72;
+      ctx.save(); ctx.globalAlpha = fade;
+      ctx.translate(ex,ey); ctx.rotate(f.rot + spread*f.rotV*80);
       ctx.beginPath();
       for (let i = 0; i <= 10; i++) {
-        const a  = (i/10)*Math.PI*2;
-        const br = f.r*(.68+Math.sin(i*1.9)*.32);
+        const a = (i/10)*Math.PI*2, br = f.r*(.68+Math.sin(i*1.9)*.32);
         i===0 ? ctx.moveTo(Math.cos(a)*br,Math.sin(a)*br) : ctx.lineTo(Math.cos(a)*br,Math.sin(a)*br);
       }
       ctx.closePath();
       const g = ctx.createRadialGradient(0,0,0,0,0,f.r);
       g.addColorStop(0,f.c1); g.addColorStop(1,f.c2);
       ctx.fillStyle=g; ctx.fill();
-      if (f.hasNuc) {
-        ctx.beginPath(); ctx.arc(0,0,f.r*.36,0,Math.PI*2);
-        ctx.fillStyle='rgba(90,18,32,.65)'; ctx.fill();
-      }
+      if (f.hasNuc) { ctx.beginPath(); ctx.arc(0,0,f.r*.36,0,Math.PI*2); ctx.fillStyle='rgba(90,18,32,.6)'; ctx.fill(); }
       ctx.restore();
     });
   }
 
-  /* ── Main draw ── */
+  /* ── Main loop ── */
   function draw() {
     requestAnimationFrame(draw);
 
@@ -645,95 +658,101 @@
     const dur = DURATIONS[phase];
     if (pTick > dur) {
       pTick = 0;
+      const prev = phase;
       phase = (phase+1) % 5;
-      pill.textContent = PHASES[phase].label;
+      pill.textContent  = PHASES[phase].label;
       capEl.textContent = PHASES[phase].cap;
-      if (phase === 0) { fragsBuilt = false; particles = []; bindFlash = 0; }
-      if (phase === 4) fragsBuilt = false;
+      if (phase === 0)    { fragsBuilt = false; particles = []; }
+      if (phase === 3)    { frozenCarAngle = (DURATIONS[2]/DURATIONS[2]) * Math.PI*2 * .25 + t*.22; }
+      if (phase === 4)    { fragsBuilt = false; }
     }
-    const pf = pTick / dur; // 0→1
+    const pf = pTick / dur;
 
     ctx.clearRect(0,0,W,H);
-    // No background fill — transparent (page white shows through)
-    // No dot grid
 
-    const cx  = W*.5;
-    const cy  = H*.5;
-    const cartR = Math.min(W,H)*.185;
-    const tumR  = Math.min(W,H)*.165;
+    // Geometry: cancer always at right-centre of the hero
+    const cy   = H * .5;
+    const cartR = Math.min(W, H) * .13;
+    const tumR  = Math.min(W, H) * .115;
+    const tumX  = W - tumR - Math.min(W,H)*.08;
+    const tumY  = cy;
 
-    // Cancer cell is always fixed at right side
-    const tumX = cx + cartR + tumR + 28;
-    const tumY = cy;
+    // Spike the binding hook aims at (spike index 0 — leftmost-ish, toward cart)
+    const SPIKE_TARGET = 0;
+    const TOTAL_SPIKES = 11;
+    const spikeTip = getCancerSpikeTip(tumX, tumY, tumR, SPIKE_TARGET, TOTAL_SPIKES);
 
-    // CAR-T positions per phase
-    let cartX, cartY;
+    let cartX = 0, cartY = cy;
+    let carAngle    = t * .28;      // revolving
+    let revolving   = true;
+    let bindProgress = 0;
+    let bindTargetX  = null, bindTargetY = null;
     let reticleAlpha = 0, reticleProgress = 0;
-    let bindAlpha    = 0;
-    let cartAlpha    = 1, tumAlpha = 1;
-    let showFrag     = false;
-    let glowAmt      = 0.3;
-    let pulse        = 0;
+    let cartAlpha = 1, tumAlpha = 1;
+    let showFrag  = false;
+    let glowAmt   = 0.3;
+    let pulse     = 0;
 
     if (phase === 0) {
-      // Scan: cart glides in from far left, passes through, settles at left area
-      const startX = -cartR*2;
-      const endX   = cx - cartR - tumR - 90;
-      cartX = startX + easeOut(pf) * (endX - startX);
-      cartY = cy + Math.sin(t*1.1)*14;
-      glowAmt = 0.3;
+      // Enter from absolute left edge (-cartR) → stop ~40% across screen
+      const endX = W * .28;
+      cartX = lerp(-cartR * 1.2, endX, easeOut(pf));
+      cartY = cy + Math.sin(t*1.1)*12;
+      glowAmt = .3;
 
     } else if (phase === 1) {
-      // Target acquired: cart pauses, reticle animates over cancer
-      cartX = cx - cartR - tumR - 90;
-      cartY = cy + Math.sin(t*1.1)*8*(1-pf*.6);
-      reticleAlpha   = clamp(pf*4, 0, 1);
+      cartX = W * .28;
+      cartY = cy + Math.sin(t*1.1)*7*(1-pf*.7);
+      reticleAlpha    = clamp(pf*4, 0, 1);
       reticleProgress = pf;
       glowAmt = .5 + Math.sin(t*3)*.1;
 
     } else if (phase === 2) {
-      // Approach: cart moves rapidly toward cancer
-      const startX = cx - cartR - tumR - 90;
-      const endX   = tumX - tumR - cartR - 6;
-      cartX = startX + easeInOut(pf)*(endX - startX);
+      const startX = W * .28;
+      const endX   = tumX - tumR - cartR - 8;
+      cartX = lerp(startX, endX, easeInOut(pf));
       cartY = cy + Math.sin(t*1.1)*6*(1-pf);
-      reticleAlpha = Math.max(0, 1 - pf*3);
+      reticleAlpha = Math.max(0, 1 - pf*3.5);
       glowAmt = .7;
 
     } else if (phase === 3) {
-      // Bind: cart at contact, binding arcs
-      cartX = tumX - tumR - cartR - 6;
+      cartX = tumX - tumR - cartR - 8;
       cartY = cy;
-      bindAlpha = clamp(pf*3, 0, 1);
+      revolving   = false;
+      carAngle    = frozenCarAngle; // locked
+      bindProgress = clamp(pf * 1.4, 0, 1);
+      bindTargetX  = spikeTip.x;
+      bindTargetY  = spikeTip.y;
       glowAmt = 1;
-      pulse = Math.sin(t*5)*.5+.5;
-      if (pf > .15 && Math.random() < .14) {
-        const con = { x:(cartX+cartR+tumX-tumR)*.5, y:cy };
-        addParticle(con.x+(Math.random()-.5)*10, con.y+(Math.random()-.5)*10,
+      pulse = (Math.sin(t*5)*.5+.5) * clamp(pf*3,0,1);
+      if (pf > .4 && Math.random() < .12) {
+        addParticle(spikeTip.x+(Math.random()-.5)*8, spikeTip.y+(Math.random()-.5)*8,
           Math.random()<.5?'#c41e28':'#ff9999',
-          (Math.random()-.5)*2,(Math.random()-.5)*2, 25, 2.2);
+          (Math.random()-.5)*1.8,(Math.random()-.5)*1.8-0.5, 22, 2);
       }
 
     } else {
-      // Apoptosis: cancer explodes, both fade
-      cartX = tumX - tumR - cartR - 6;
+      // Apoptosis
+      cartX = tumX - tumR - cartR - 8;
       cartY = cy;
-      if (!fragsBuilt) { buildFragments(tumX,tumY,tumR); fragsBuilt=true; }
-      showFrag = true;
-      tumAlpha = Math.max(0, 1 - pf*8);
-      cartAlpha = Math.max(0, 1 - pf*2.5);
+      revolving    = false;
+      carAngle     = frozenCarAngle;
+      bindProgress = 0;
       glowAmt = .5*(1-pf);
-      if (pf < .25 && Math.random() < .3) {
-        const a = Math.random()*Math.PI*2, sp=1.5+Math.random()*2.5;
-        addParticle(tumX+Math.cos(a)*tumR*.6, tumY+Math.sin(a)*tumR*.6,
-          Math.random()<.5?'#c86878':'#eda0aa', Math.cos(a)*sp, Math.sin(a)*sp-.6, 45, 3+Math.random()*3);
+      if (!fragsBuilt) { buildFragments(tumX,tumY,tumR); fragsBuilt=true; }
+      showFrag  = true;
+      tumAlpha  = Math.max(0, 1 - pf*7);
+      cartAlpha = Math.max(0, 1 - pf*2.8);
+      if (pf < .22 && Math.random() < .28) {
+        const a = Math.random()*Math.PI*2, sp=1.4+Math.random()*2.4;
+        addParticle(tumX+Math.cos(a)*tumR*.55, tumY+Math.sin(a)*tumR*.55,
+          Math.random()<.5?'#c86878':'#eda0aa', Math.cos(a)*sp, Math.sin(a)*sp-.55, 42, 2.8+Math.random()*2.8);
       }
     }
 
-    // Draw order: reticle → binding → cart → cancer → frags → particles
+    // Draw
     drawReticle(tumX, tumY, tumR, reticleProgress, reticleAlpha);
-    drawBindingArcs(cartX, cartY, cartR, tumX, tumY, tumR, bindAlpha);
-    drawCARTCell(cartX, cartY, cartR, glowAmt, cartAlpha);
+    drawCARTCell(cartX, cartY, cartR, glowAmt, cartAlpha, carAngle, revolving, bindProgress, bindTargetX, bindTargetY);
     drawCancerCell(tumX, tumY, tumR, pulse, tumAlpha);
     if (showFrag) drawFragments(pf);
     updateParticles();
@@ -742,9 +761,10 @@
   }
 
   resize();
-  window.addEventListener('resize', resize);
+  window.addEventListener('resize', () => { resize(); });
   draw();
 })();
 </script>
+
 </body>
 </html>
