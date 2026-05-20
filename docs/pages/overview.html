@@ -8,27 +8,55 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600;9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="../css/style.css">
+<style>
+.nav-logo-text { display: none !important; }
+.nav-logo-img-scart {
+  height: 62px;
+  width: auto;
+  object-fit: contain;
+  display: block;
+}
+.nav-logo-img-igib {
+  height: 80px;
+  width: auto;
+  object-fit: contain;
+  display: block;
+}
+.scart-wordmark {
+  font-family: Georgia, 'Instrument Serif', serif;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  line-height: 1;
+  color: #0d1526;
+}
+.scart-wordmark .car { color: #b41e28; }
+</style>
 </head>
 <body>
 
 <nav id="navbar">
   <div class="nav-inner">
-    <a href="../index.html" class="nav-logo">
-      <img src="../../external/igib_logo.jpeg" alt="CSIR-IGIB" class="nav-logo-img" onerror="this.style.display='none'">
-      <span class="nav-logo-text">SC<span>ART</span></span>
+    <a href="../index.html" class="nav-logo" style="line-height:0;text-decoration:none;flex-shrink:0;">
+      <img src="../../SCART/external/scart_logo.png" alt="SCART" class="nav-logo-img-scart"
+           onerror="this.outerHTML='<span class=\'scart-wordmark\' style=\'font-size:32px;\'>S<span class=\'car\'>CAR</span>T</span>'">
     </a>
-    <ul class="nav-links">
+
+    <ul class="nav-links" style="margin:0 auto;">
       <li><a href="../index.html">Home</a></li>
       <li><a href="overview.html" class="active">Overview</a></li>
       <li><a href="install.html">Installation</a></li>
       <li><a href="tutorial.html">Tutorial</a></li>
       <li><a href="authors.html">Authors</a></li>
     </ul>
-    <div class="nav-spacer"></div>
-    <a href="https://github.com/csblab23/SCART" class="nav-github" target="_blank">
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
-      GitHub
-    </a>
+
+    <div style="display:flex;align-items:center;gap:16px;flex-shrink:0;">
+      <a href="https://github.com/csblab23/SCART" class="nav-github" target="_blank">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        GitHub
+      </a>
+      <img src="../../SCART/external/igib_logo.jpeg" alt="CSIR-IGIB" class="nav-logo-img-igib"
+           onerror="this.style.display='none'">
+    </div>
   </div>
 </nav>
 
@@ -76,7 +104,16 @@
       <table>
         <thead><tr><th>Module</th><th>Input</th><th>Output</th><th>Key tool</th></tr></thead>
         <tbody>
-          <tr><td><strong>1 — GEO Fetcher</strong></td><td>GEO accession ID / h5ad</td><td><code>*_tumor.h5ad</code></td><td>GEOparse, Scrublet</td></tr>
+          <tr>
+            <td><strong>1 — GEO Fetcher</strong></td>
+            <td>GEO accession ID / h5ad</td>
+            <td>
+              <code>GSE*_tumor.h5ad</code> — single GEO run<br>
+              <code>combined_tumor.h5ad</code> — multiple inputs<br>
+              <code>input_tumor.h5ad</code> — user h5ad input
+            </td>
+            <td>GEOparse, Scrublet</td>
+          </tr>
           <tr><td><strong>2 — Cell Annotation</strong></td><td>Module 1 output</td><td><code>final_popv_annotated.h5ad</code></td><td>PopV</td></tr>
           <tr><td><strong>3 — Malignant ID</strong></td><td>Module 2 output</td><td><code>final_tumor.h5ad</code></td><td>scMalignantFinder, SCEVAN</td></tr>
           <tr><td><strong>4a — Single Gene</strong></td><td>Module 3 output</td><td><code>single_gene_results.csv</code></td><td>HPA reference</td></tr>
@@ -86,13 +123,13 @@
     </div>
 
     <h2 id="databases">Reference Databases</h2>
-    <p>SCART integrates four curated databases. All are either bundled or auto-downloaded during the pipeline run.</p>
+    <p>SCART integrates four curated databases. The HPA reference is automatically downloaded during the pipeline run; all other reference files must be provided manually by the user.</p>
     <div class="table-wrap">
       <table>
         <thead><tr><th>Database</th><th>Size</th><th>Usage</th><th>Link</th></tr></thead>
         <tbody>
           <tr><td><strong>CSPA</strong> — Cell Surface Protein Atlas</td><td>3,568 genes</td><td>Surfaceome DE filtering (Module 3)</td><td><a href="http://wlab.ethz.ch/cspa/" target="_blank">cspa →</a></td></tr>
-          <tr><td><strong>HPA</strong> — Human Protein Atlas</td><td>54 tissue types</td><td>Off-tumour safety scoring (Module 4)</td><td><a href="https://www.proteinatlas.org/" target="_blank">proteinatlas.org →</a></td></tr>
+          <tr><td><strong>HPA</strong> — Human Protein Atlas</td><td>36 tissue types</td><td>Off-tumour safety scoring (Module 4)</td><td><a href="https://www.proteinatlas.org/" target="_blank">proteinatlas.org →</a></td></tr>
           <tr><td><strong>Tabula Sapiens</strong></td><td>30+ cancer types</td><td>PopV annotation reference (Module 2)</td><td><a href="https://tabula-sapiens-portal.ds.czbiohub.org/" target="_blank">tabula-sapiens →</a></td></tr>
           <tr><td><strong>PopV</strong> — multi-method consensus</td><td>8 methods</td><td>Cell-type annotation (Module 2)</td><td><a href="https://github.com/YosefLab/PopV" target="_blank">GitHub →</a></td></tr>
         </tbody>
@@ -109,8 +146,8 @@
       <pre><span class="kw">from</span> SCART.geo_fetcher <span class="kw">import</span> <span class="fn">SampleAnnotator</span>
 
 annotator = <span class="fn">SampleAnnotator</span>(
-    <span class="str">"GSE131907"</span>,
-    cancer_type=<span class="str">"lung_cancer"</span>,
+    <span class="str">"*"</span>,
+    cancer_type=<span class="str">"*"</span>,
     min_genes=<span class="num">200</span>,
     max_mt=<span class="num">40</span>
 )
@@ -122,7 +159,7 @@ normal, tumor, unspecified, info, path, ct, results = annotator.<span class="fn"
       <table>
         <thead><tr><th>Parameter</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
         <tbody>
-          <tr><td><code>*inputs</code></td><td>str</td><td>—</td><td>One or more GEO accession IDs (e.g. <code>"GSE131907"</code>) or paths to <code>.h5ad</code> files</td></tr>
+          <tr><td><code>*inputs</code></td><td>str</td><td>—</td><td>One or more GEO accession IDs (e.g. <code>"GSE*"</code>) or paths to <code>.h5ad</code> files</td></tr>
           <tr><td><code>cancer_type</code></td><td>str</td><td><strong>required</strong></td><td>Cancer type label. Tabula Sapiens key for auto reference recommendation, or free-text string.</td></tr>
           <tr><td><code>min_genes</code></td><td>int or None</td><td><code>None</code></td><td>Minimum genes per cell for QC. <code>None</code> = QC skipped</td></tr>
           <tr><td><code>max_mt</code></td><td>float or None</td><td><code>None</code></td><td>Maximum mitochondrial % per cell</td></tr>
@@ -150,9 +187,8 @@ normal, tumor, unspecified, info, path, ct, results = annotator.<span class="fn"
       <pre><span class="kw">from</span> SCART <span class="kw">import</span> popv_annotation
 
 adata = popv_annotation.<span class="fn">auto_run_popv</span>(
-    input_type     = <span class="str">"raw"</span>,
     nsamples       = <span class="num">300</span>,
-    user_reference = <span class="str">"/path/to/Lung_TSP1_30_version2d_10X_smartseq_scvi.h5ad"</span>
+    user_reference = <span class="str">"/path/to/tissue_reference.h5ad"</span>
 )</pre>
     </div>
 
@@ -161,7 +197,6 @@ adata = popv_annotation.<span class="fn">auto_run_popv</span>(
       <table>
         <thead><tr><th>Parameter</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
         <tbody>
-          <tr><td><code>input_type</code></td><td>str</td><td><code>"raw"</code></td><td><code>"raw"</code> for raw counts; <code>"log1p"</code> for pre-normalised data (runs CellTypist only)</td></tr>
           <tr><td><code>nsamples</code></td><td>int</td><td><code>300</code></td><td>Cells sampled per cell-type label during reference subsampling</td></tr>
           <tr><td><code>output_dir</code></td><td>str</td><td><code>"popv_results"</code></td><td>Directory where <code>final_popv_annotated.h5ad</code> is saved</td></tr>
           <tr><td><code>user_reference</code></td><td>str or None</td><td><code>None</code></td><td>Path to Tabula Sapiens tissue h5ad. If <code>None</code>, auto-downloaded from Figshare</td></tr>
@@ -279,26 +314,13 @@ df_hof, df_all = two_gene_combination.<span class="fn">run</span>(
       </table>
     </div>
 
-    <h3>Hardware recommendations</h3>
-    <div class="code-wrap">
-      <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
-      <pre><span class="c"># Laptop (quick test)</span>
-two_gene_combination.<span class="fn">run</span>(pop_size=<span class="num">200</span>, Gmax=<span class="num">20</span>, patience=<span class="num">10</span>, n_cpus=<span class="num">4</span>, n_runs=<span class="num">2</span>)
-
-<span class="c"># Standard workstation</span>
-two_gene_combination.<span class="fn">run</span>(pop_size=<span class="num">1000</span>, Gmax=<span class="num">100</span>, patience=<span class="num">50</span>, n_cpus=<span class="num">8</span>, n_runs=<span class="num">10</span>)
-
-<span class="c"># HPC node</span>
-two_gene_combination.<span class="fn">run</span>(pop_size=<span class="num">2000</span>, Gmax=<span class="num">200</span>, patience=<span class="num">100</span>, n_cpus=<span class="num">40</span>, n_runs=<span class="num">10</span>)</pre>
-    </div>
-
     <!-- ── OUTPUTS ─────────────────────────────────────────────────── -->
     <h2 id="outputs">Output Files</h2>
     <div class="table-wrap">
       <table>
         <thead><tr><th>Module</th><th>File</th><th>Contents</th></tr></thead>
         <tbody>
-          <tr><td>1</td><td><code>GSE*_tumor.h5ad</code> / <code>combined_tumor.h5ad</code></td><td>Raw tumour counts, cancer type, QC params, annotation flags</td></tr>
+          <tr><td>1</td><td><code>GSE*_tumor.h5ad</code> / <code>combined_tumor.h5ad</code> / <code>input_tumor.h5ad</code></td><td>Raw tumour counts, cancer type, QC params, annotation flags</td></tr>
           <tr><td>2</td><td><code>popv_results/final_popv_annotated.h5ad</code></td><td>Cell-type labels, raw counts layer</td></tr>
           <tr><td>3</td><td><code>preprocessing_results/final_tumor.h5ad</code></td><td>Malignant cells, binarised expression, DEG results</td></tr>
           <tr><td>4a</td><td><code>single_gene_results.csv</code></td><td>Columns: gene, efficacy, safety</td></tr>
@@ -342,8 +364,8 @@ two_gene_combination.<span class="fn">run</span>(pop_size=<span class="num">2000
     <div class="code-wrap">
       <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
       <pre>annotator = <span class="fn">SampleAnnotator</span>(
-    <span class="str">"my_data.h5ad"</span>,
-    cancer_type=<span class="str">"ovary_cancer"</span>,
+    <span class="str">"/path/to/*.h5ad"</span>,
+    cancer_type=<span class="str">"*"</span>,
     manual_annotation_col=<span class="str">"cell_type"</span>,  <span class="c"># your obs column</span>
     min_genes=<span class="num">200</span>,
     max_mt=<span class="num">40</span>,
@@ -388,5 +410,6 @@ two_gene_combination.<span class="fn">run</span>(pop_size=<span class="num">2000
 </footer>
 
 <script src="../js/main.js"></script>
+<!-- GitHub Pages path: https://raw.githubusercontent.com/csblab23/SCART/main/docs/pages/overview.html -->
 </body>
 </html>
