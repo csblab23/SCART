@@ -1,168 +1,89 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Authors — SCART</title>
+<section class="team-section">
+  <div class="container">
 
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600;9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <!-- Header -->
+    <div class="team-header">
+      <span class="badge">TEAM</span>
+      <h2>Authors</h2>
+      <p>
+        SCART is developed at the Computational and Systems Biology
+        Lab (CSBLab), CSIR–IGIB, New Delhi, India.
+      </p>
+    </div>
 
-<link rel="stylesheet" href="../css/style.css">
-
-<!-- ONLY ADDITION -->
-<style>
-  .authors-grid {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 24px;
-  }
-</style>
-</head>
-
-<body>
-
-<nav id="navbar">
-  <div class="nav-inner">
-    <a href="../../index.html" class="nav-logo">
-      <img src="../../SCART/external/igib_logo.jpeg" alt="CSIR-IGIB" class="nav-logo-img" onerror="this.style.display='none'">
-      <span class="nav-logo-text">SC<span>ART</span></span>
-    </a>
-
-    <ul class="nav-links">
-      <li><a href="../../index.html">Home</a></li>
-      <li><a href="overview.html">Overview</a></li>
-      <li><a href="install.html">Installation</a></li>
-      <li><a href="tutorial.html">Tutorial</a></li>
-      <li><a href="authors.html" class="active">Authors</a></li>
-    </ul>
-
-    <div class="nav-spacer"></div>
-
-    <a href="https://github.com/csblab23/SCART" class="nav-github" target="_blank">
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-        <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
-      </svg>
-      GitHub
-    </a>
-  </div>
-</nav>
-
-<div class="page-header">
-  <div class="page-header-inner">
-    <div class="page-header-tag">Team</div>
-    <h1>Authors</h1>
-    <p>SCART is developed at the Computational and Systems Biology Lab (CSBLab), CSIR-IGIB, New Delhi, India.</p>
-  </div>
-</div>
-
-<div class="content-layout" style="grid-template-columns: 1fr; max-width: 900px;">
-  <div class="content-body" style="padding-top: 48px;">
-
-    <div class="authors-grid">
+    <!-- Authors Grid -->
+    <div class="team-grid">
 
       <!-- Author 1 -->
-      <div class="author-card">
-        <div class="author-photo">
-          <img src="SCART/external/sherry_bhalla.JPG" alt="Sherry Bhalla">
+      <div class="team-card">
+        <div class="team-img">
+          <img src="images/sherry.jpg" alt="Sherry Bhalla"
+               onerror="this.src='images/default.png';">
         </div>
-        <div class="author-info">
-          <h3>Sherry Bhalla, PhD</h3>
-          <div class="author-role">Scientist C</div>
-          <div class="author-affil">CSIR-IGIB, New Delhi, India</div>
+        <div class="team-info">
+          <h4>Sherry Bhalla, PhD</h4>
+          <span>Scientist C</span>
+          <p>CSIR–IGIB, New Delhi, India</p>
         </div>
       </div>
 
       <!-- Author 2 -->
-      <div class="author-card">
-        <div class="author-photo">
-          <div class="author-photo-placeholder">👩‍🔬</div>
+      <div class="team-card">
+        <div class="team-img">
+          <img src="images/vinaya.jpg" alt="Vinaya Shinde"
+               onerror="this.src='images/default.png';">
         </div>
-        <div class="author-info">
-          <h3>Vinaya Shinde</h3>
-          <div class="author-role">Project Associate II</div>
-          <div class="author-affil">CSIR-IGIB, New Delhi, India</div>
+        <div class="team-info">
+          <h4>Vinaya Shinde</h4>
+          <span>Project Associate II</span>
+          <p>CSIR–IGIB, New Delhi, India</p>
         </div>
       </div>
 
       <!-- Author 3 -->
-      <div class="author-card">
-        <div class="author-photo">
-          <img src="SCART/external/anas.JPG" alt="Anas A S">
+      <div class="team-card">
+        <div class="team-img">
+          <img src="images/anas.jpg" alt="Anas A S"
+               onerror="this.src='images/default.png';">
         </div>
-        <div class="author-info">
-          <h3>Anas A S</h3>
-          <div class="author-role">Project Associate I</div>
-          <div class="author-affil">CSIR-IGIB, New Delhi, India</div>
+        <div class="team-info">
+          <h4>Anas A S</h4>
+          <span>Project Associate I</span>
+          <p>CSIR–IGIB, New Delhi, India</p>
         </div>
       </div>
 
       <!-- Author 4 -->
-      <div class="author-card">
-        <div class="author-photo">
-          <div class="author-photo-placeholder">👨‍🔬</div>
+      <div class="team-card">
+        <div class="team-img">
+          <img src="images/deepika.jpg" alt="Deepika Yadav"
+               onerror="this.src='images/default.png';">
         </div>
-        <div class="author-info">
-          <h3>Deepika Yadav</h3>
-          <div class="author-role">PhD Student</div>
-          <div class="author-affil">CSIR-IGIB, New Delhi, India</div>
+        <div class="team-info">
+          <h4>Deepika Yadav</h4>
+          <span>PhD Student</span>
+          <p>CSIR–IGIB, New Delhi, India</p>
         </div>
       </div>
 
     </div>
 
-    <!-- Lab card -->
-    <div class="lab-card">
-      <div class="lab-icon">🏛️</div>
-      <div>
-        <h3>Computational and Systems Biology Lab (CSBLab) — CSIR-IGIB</h3>
-        <p>The Council of Scientific and Industrial Research — Institute of Genomics and Integrative Biology (CSIR-IGIB) is a premier genomics institute under the Government of India, located in New Delhi. Our lab focuses on computational approaches to understand disease biology and develop therapeutic strategies.</p>
-        <br>
-        <a href="https://www.igib.res.in" target="_blank" class="db-link">www.igib.res.in →</a>
-        &nbsp;&nbsp;
-        <a href="https://github.com/csblab23/SCART" target="_blank" class="db-link">GitHub: csblab23/SCART →</a>
+    <!-- Restored Section (DO NOT REMOVE) -->
+    <div class="lab-section">
+      <div class="lab-card">
+        <div class="lab-icon">🏛️</div>
+        <div class="lab-info">
+          <h3>
+            Computational and Systems Biology Lab (CSBLab) — CSIR–IGIB
+          </h3>
+          <p>
+            The Council of Scientific and Industrial Research — Institute of
+            Genomics and Integrative Biology (CSIR–IGIB) is a premier genomics
+            institute under the Government of India, located in New Delhi.
+          </p>
+        </div>
       </div>
     </div>
 
-    <div class="callout callout-info" style="margin-top: 32px;">
-      <span class="callout-icon">📸</span>
-      <div>Author photos can be added by placing image files in the <code>SCART/external/</code> directory and updating the <code>&lt;img&gt;</code> tags in this file.</div>
-    </div>
-
   </div>
-</div>
-
-<footer>
-  <div class="footer-inner">
-    <div class="footer-brand">
-      <a href="../../index.html" class="nav-logo" style="margin-bottom:10px;">
-        <span class="nav-logo-text" style="color:white;">SC<span style="color:#79c0ff;">ART</span></span>
-      </a>
-      <p>End-to-end CAR-T target discovery from single-cell RNA-seq data. Developed at CSIR-IGIB, New Delhi, India.</p>
-    </div>
-
-    <div class="footer-col">
-      <h5>Documentation</h5>
-      <a href="overview.html">Overview</a>
-      <a href="install.html">Installation</a>
-      <a href="tutorial.html">Tutorial</a>
-    </div>
-
-    <div class="footer-col">
-      <h5>Links</h5>
-      <a href="https://github.com/csblab23/SCART" target="_blank">GitHub</a>
-      <a href="https://www.igib.res.in" target="_blank">CSIR-IGIB</a>
-      <a href="authors.html">Authors</a>
-    </div>
-  </div>
-
-  <div class="footer-bottom">
-    <span>© 2025 SCART · CSIR-IGIB · MIT License</span>
-    <a href="https://github.com/csblab23/SCART" target="_blank">GitHub</a>
-  </div>
-</footer>
-
-<script src="../js/main.js"></script>
-</body>
-</html>
+</section>
