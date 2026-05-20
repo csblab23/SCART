@@ -126,7 +126,7 @@ normal, tumor, unspecified, info, path, ct, results = annotator.<span class="fn"
           <tr><td><code>cancer_type</code></td><td>str</td><td><strong>required</strong></td><td>Cancer type label. Tabula Sapiens key for auto reference recommendation, or free-text string.</td></tr>
           <tr><td><code>min_genes</code></td><td>int or None</td><td><code>None</code></td><td>Minimum genes per cell for QC. <code>None</code> = QC skipped</td></tr>
           <tr><td><code>max_mt</code></td><td>float or None</td><td><code>None</code></td><td>Maximum mitochondrial % per cell</td></tr>
-          <tr><td><code>manual_annotation_col</code></td><td>str or None</td><td><code>None</code></td><td>obs column name with your own cell-type labels. When set, Module 2 (PopV) is skipped.</td></tr>
+          <tr><td><code>manual_annotation_col</code></td><td>str or None</td><td><code>None</code></td><td>obs column name with your own cell-type labels (When providing own h5ad file). When set, Module 2 (PopV) is skipped.</td></tr>
           <tr><td><code>exclude_gsm_ids</code></td><td>list or None</td><td><code>None</code></td><td>List of GSM IDs to exclude (e.g. engineered CAR-T products)</td></tr>
         </tbody>
       </table>
