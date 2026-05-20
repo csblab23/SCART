@@ -235,14 +235,46 @@ print(VALID_CANCER_TYPES)</pre>
     <h2 id="hpc">HPC / Cluster Notes</h2>
     <p>When running SCART on an HPC cluster (SLURM, PBS, etc.), install the conda environment in your home or project directory and load the appropriate modules before activating.</p>
 
+    <h3>Running Python Scripts on the Cluster</h3>
+    <p>New to running Python scripts from the command line? The <a href="https://realpython.com/run-python-scripts/" target="_blank">Real Python guide — How to Run Your Python Scripts and Code</a> covers all the essentials: using the <code>python</code> command, running modules with <code>-m</code>, and working interactively with the REPL. The most common pattern on a cluster is:</p>
+
     <div class="code-wrap">
       <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
-      <pre><span class="c"># Example HPC setup (SLURM)</span>
+      <pre><span class="c"># Basic usage — run a Python script from the command line</span>
+python my_script.py
+
+<span class="c"># Redirect output to a file for later review</span>
+python my_script.py > output.txt</pre>
+    </div>
+
+    <h3>Submitting Jobs with SLURM</h3>
+    <p>For large GEO downloads or compute-intensive modules, submit your work as a SLURM batch job rather than running it interactively. The <a href="https://www.arch.jhu.edu/short-tutorial-how-to-create-a-slurm-script/" target="_blank">JHU ARCH tutorial — How to Create a Slurm Script</a> walks through all the key directives. A minimal script for running a SCART module looks like this:</p>
+
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre>#!/bin/bash
+#SBATCH --job-name=scart_job          <span class="c"># Job name</span>
+#SBATCH --output=output.txt           <span class="c"># Standard output file</span>
+#SBATCH --error=error.txt             <span class="c"># Standard error file</span>
+#SBATCH --partition=partition_name    <span class="c"># Partition or queue name</span>
+#SBATCH --nodes=1                     <span class="c"># Number of nodes</span>
+#SBATCH --ntasks-per-node=1           <span class="c"># Number of tasks per node</span>
+#SBATCH --cpus-per-task=4             <span class="c"># CPU cores per task</span>
+#SBATCH --time=4:00:00                <span class="c"># Maximum runtime (HH:MM:SS)</span>
+#SBATCH --mail-type=END               <span class="c"># Email on job completion</span>
+#SBATCH --mail-user=your@email.com    <span class="c"># Your email address</span>
+
 module load conda/latest
 conda activate scart_env
 
-<span class="c"># For large GEO downloads, run on a compute node</span>
-<span class="c"># See the Tutorial SBATCH section for full scripts</span></pre>
+python my_scart_script.py</pre>
+    </div>
+
+    <p>Save the script (e.g. <code>run_scart.slurm</code>) and submit it with:</p>
+
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre>sbatch run_scart.slurm</pre>
     </div>
 
     <p>See the <a href="tutorial.html#sbatch">SBATCH Guide</a> in the tutorial for ready-to-use SLURM submission scripts for each module.</p>
