@@ -92,6 +92,7 @@
       <li class="sidebar-group">Platform Notes</li>
       <li><a href="#windows">Windows</a></li>
       <li><a href="#hpc">HPC / Cluster</a></li>
+      <li><a href="#jupyter-notebook">Jupyter Notebook</a></li>
     </ul>
   </aside>
 
@@ -277,7 +278,140 @@ python my_scart_script.py</pre>
       <pre>sbatch run_scart.slurm</pre>
     </div>
 
-   
+    <p>See the <a href="tutorial.html#sbatch">SBATCH Guide</a> in the tutorial for ready-to-use SLURM submission scripts for each module.</p>
+
+    <!-- JUPYTER NOTEBOOK -->
+    <h2 id="jupyter-notebook">Jupyter Notebook</h2>
+    <p>The simplest way to explore SCART interactively is in a Jupyter notebook. You can run the entire pipeline in a single cell, or split each module into its own cell to inspect intermediate outputs as you go — both approaches work equally well.</p>
+
+    <div class="callout callout-tip">
+      <span class="callout-icon">💡</span>
+      <div>Make sure you have completed <a href="#jupyter">Step 4 (Jupyter Setup)</a> and selected the <strong>Python (scart_env)</strong> kernel before running the cells below.</div>
+    </div>
+
+    <h3>Option A — Run the full pipeline in one cell</h3>
+    <p>Paste all modules into a single cell and execute at once. Useful for automated runs or re-running a saved notebook end-to-end.</p>
+
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre><span class="c"># ── Full SCART pipeline — single cell ──────────────────────────────────────</span>
+
+<span class="kw">import</span> SCART
+<span class="kw">from</span> SCART.geo_fetcher <span class="kw">import</span> SampleAnnotator
+
+annotator = SampleAnnotator(<span class="str">"GSE158937"</span>, cancer_type=<span class="str">"ovary_cancer"</span>, min_genes=200, max_mt=40)
+normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = annotator.run()
+
+<span class="kw">from</span> SCART <span class="kw">import</span> popv_annotation
+adata = popv_annotation.auto_run_popv(
+    nsamples=300,
+    user_reference=<span class="str">"/path/to/Ovary_TSP1_30_version2d_10X_smartseq_scvi_Nov262024.h5ad"</span>,
+)
+
+<span class="kw">from</span> SCART <span class="kw">import</span> preprocessing
+adata_preprocessed = preprocessing.run_preprocessing_pipeline(
+    adata              = <span class="kw">None</span>,
+    log2fc_threshold   = 2.0,
+    pval_adj_threshold = 0.05,
+    reference_h5ad     = <span class="str">"/path/to/Ovary_TSP1_30_version2d_10X_smartseq_scvi_Nov262024.h5ad"</span>,
+    malignant_strategy = <span class="str">"intersection"</span>,
+    scevan_ref_max_cells = 100,
+    scevan_sample_name   = <span class="str">"SCEVAN_run"</span>,
+    scevan_organism      = <span class="str">"human"</span>,
+    scevan_par_cores     = 1,
+    scevan_subclones     = <span class="kw">False</span>,
+    scevan_batch_size    = 3000,
+)
+
+<span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> one_gene_combination
+df = one_gene_combination.run(
+    hpa_path         = <span class="str">"/path/to/HPA_updated.h5ad"</span>,
+    safety_threshold = 0.9,
+)
+
+<span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> two_gene_combination
+df_hof, df_all = two_gene_combination.run(
+    hpa_path         = <span class="str">"/path/to/HPA_updated.h5ad"</span>,
+    safety_threshold = 0.9,
+    pop_size         = 1000,
+    Gmax             = 100,
+    patience         = 50,
+    n_cpus           = 8,
+    n_runs           = 10,
+)</pre>
+    </div>
+
+    <h3>Option B — One module per cell (recommended for tracking outputs)</h3>
+    <p>Split each module into its own cell. This lets you inspect outputs at every stage, re-run individual steps, and debug more easily.</p>
+
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre><span class="c"># ── Cell 1 · Module 1 — GEO Fetcher ────────────────────────────────────────</span>
+<span class="kw">import</span> SCART
+<span class="kw">from</span> SCART.geo_fetcher <span class="kw">import</span> SampleAnnotator
+
+annotator = SampleAnnotator(<span class="str">"GSE158937"</span>, cancer_type=<span class="str">"ovary_cancer"</span>, min_genes=200, max_mt=40)
+normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = annotator.run()</pre>
+    </div>
+
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre><span class="c"># ── Cell 2 · Module 2 — Cell-type Annotation (PopV) ────────────────────────</span>
+<span class="kw">from</span> SCART <span class="kw">import</span> popv_annotation
+
+adata = popv_annotation.auto_run_popv(
+    nsamples=300,
+    user_reference=<span class="str">"/path/to/Ovary_TSP1_30_version2d_10X_smartseq_scvi_Nov262024.h5ad"</span>,
+)</pre>
+    </div>
+
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre><span class="c"># ── Cell 3 · Module 3 — Preprocessing &amp; Malignant Cell Identification ──────</span>
+<span class="kw">from</span> SCART <span class="kw">import</span> preprocessing
+
+adata_preprocessed = preprocessing.run_preprocessing_pipeline(
+    adata              = <span class="kw">None</span>,
+    log2fc_threshold   = 2.0,
+    pval_adj_threshold = 0.05,
+    reference_h5ad     = <span class="str">"/path/to/Ovary_TSP1_30_version2d_10X_smartseq_scvi_Nov262024.h5ad"</span>,
+    malignant_strategy = <span class="str">"intersection"</span>,
+    scevan_ref_max_cells = 100,
+    scevan_sample_name   = <span class="str">"SCEVAN_run"</span>,
+    scevan_organism      = <span class="str">"human"</span>,
+    scevan_par_cores     = 1,
+    scevan_subclones     = <span class="kw">False</span>,
+    scevan_batch_size    = 3000,
+)</pre>
+    </div>
+
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre><span class="c"># ── Cell 4 · Module 4 — Single-gene CAR-T Target Prediction ────────────────</span>
+<span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> one_gene_combination
+
+df = one_gene_combination.run(
+    hpa_path         = <span class="str">"/path/to/HPA_updated.h5ad"</span>,
+    safety_threshold = 0.9,
+)</pre>
+    </div>
+
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre><span class="c"># ── Cell 5 · Module 5 — Two-gene CAR-T Combination Prediction ──────────────</span>
+<span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> two_gene_combination
+
+df_hof, df_all = two_gene_combination.run(
+    hpa_path         = <span class="str">"/path/to/HPA_updated.h5ad"</span>,
+    safety_threshold = 0.9,
+    pop_size         = 1000,
+    Gmax             = 100,
+    patience         = 50,
+    n_cpus           = 8,
+    n_runs           = 10,
+)</pre>
+    </div>
+
   </div>
 </div>
 
