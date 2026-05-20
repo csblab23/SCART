@@ -11,13 +11,45 @@
 
 <link rel="stylesheet" href="../css/style.css">
 
-<!-- ONLY ADDITION -->
 <style>
-  .authors-grid {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 24px;
-  }
+.nav-logo-text { display: none !important; }
+#navbar {
+  height: 90px !important;
+  min-height: 90px !important;
+}
+#navbar .nav-inner {
+  height: 90px !important;
+  padding: 0 36px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+}
+.nav-logo-img-scart {
+  height: 62px;
+  width: auto;
+  object-fit: contain;
+  display: block;
+}
+.nav-logo-img-igib {
+  height: 80px;
+  width: auto;
+  object-fit: contain;
+  display: block;
+}
+.scart-wordmark {
+  font-family: Georgia, 'Instrument Serif', serif;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  line-height: 1;
+  color: #0d1526;
+}
+.scart-wordmark .car { color: #b41e28; }
+
+.authors-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 24px;
+}
 </style>
 </head>
 
@@ -25,12 +57,12 @@
 
 <nav id="navbar">
   <div class="nav-inner">
-    <a href="../../index.html" class="nav-logo">
-      <img src="../../SCART/external/igib_logo.jpeg" alt="CSIR-IGIB" class="nav-logo-img" onerror="this.style.display='none'">
-      <span class="nav-logo-text">SC<span>ART</span></span>
+    <a href="../../index.html" class="nav-logo" style="line-height:0;text-decoration:none;flex-shrink:0;">
+      <img src="../../SCART/external/scart_logo.png" alt="SCART" class="nav-logo-img-scart"
+           onerror="this.outerHTML='<span class=\'scart-wordmark\' style=\'font-size:32px;\'>S<span class=\'car\'>CAR</span>T</span>'">
     </a>
 
-    <ul class="nav-links">
+    <ul class="nav-links" style="margin:0 auto;">
       <li><a href="../../index.html">Home</a></li>
       <li><a href="overview.html">Overview</a></li>
       <li><a href="install.html">Installation</a></li>
@@ -38,14 +70,16 @@
       <li><a href="authors.html" class="active">Authors</a></li>
     </ul>
 
-    <div class="nav-spacer"></div>
-
-    <a href="https://github.com/csblab23/SCART" class="nav-github" target="_blank">
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-        <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
-      </svg>
-      GitHub
-    </a>
+    <div style="display:flex;align-items:center;gap:16px;flex-shrink:0;">
+      <a href="https://github.com/csblab23/SCART" class="nav-github" target="_blank">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+        </svg>
+        GitHub
+      </a>
+      <img src="../../SCART/external/igib_logo.jpeg" alt="CSIR-IGIB" class="nav-logo-img-igib"
+           onerror="this.style.display='none'">
+    </div>
   </div>
 </nav>
 
@@ -65,7 +99,7 @@
       <!-- Author 1 -->
       <div class="author-card">
         <div class="author-photo">
-          <img src="SCART/external/sherry_bhalla.JPG" alt="Sherry Bhalla">
+          <img src="../../SCART/external/sherry_bhalla.JPG" alt="Sherry Bhalla">
         </div>
         <div class="author-info">
           <h3>Sherry Bhalla, PhD</h3>
@@ -89,7 +123,7 @@
       <!-- Author 3 -->
       <div class="author-card">
         <div class="author-photo">
-          <img src="SCART/external/anas.JPG" alt="Anas A S">
+          <img src="../../SCART/external/anas.JPG" alt="Anas A S">
         </div>
         <div class="author-info">
           <h3>Anas A S</h3>
@@ -136,8 +170,8 @@
 <footer>
   <div class="footer-inner">
     <div class="footer-brand">
-      <a href="../../index.html" class="nav-logo" style="margin-bottom:10px;">
-        <span class="nav-logo-text" style="color:white;">SC<span style="color:#79c0ff;">ART</span></span>
+      <a href="../../index.html" style="margin-bottom:10px;display:inline-block;text-decoration:none;">
+        <span style="font-family:Georgia,serif;font-size:22px;font-weight:700;color:white;">S<span style="color:#ff7070;">CAR</span>T</span>
       </a>
       <p>End-to-end CAR-T target discovery from single-cell RNA-seq data. Developed at CSIR-IGIB, New Delhi, India.</p>
     </div>
@@ -158,11 +192,12 @@
   </div>
 
   <div class="footer-bottom">
-    <span>© 2025 SCART · CSIR-IGIB · MIT License</span>
+    <span>© 2025 S<span style="color:#ff7070;">CAR</span>T · CSIR-IGIB · MIT License</span>
     <a href="https://github.com/csblab23/SCART" target="_blank">GitHub</a>
   </div>
 </footer>
 
 <script src="../js/main.js"></script>
+<!-- GitHub Pages path: https://raw.githubusercontent.com/csblab23/SCART/main/docs/pages/authors.html -->
 </body>
 </html>
