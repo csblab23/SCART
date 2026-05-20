@@ -65,13 +65,9 @@
   <div class="content-body">
 
     <h2 id="overview">What is SCART?</h2>
-    <p>SCART (<strong>S</strong>ingle-<strong>C</strong>ell <strong>A</strong>utomated CAR-T target discovery) is an end-to-end computational pipeline for identifying tumour-specific surface protein targets for CAR-T cell therapy from single-cell RNA-seq data.</p>
+    <p>SCART (<strong>S</strong>ingle-<strong>C</strong>ell <strong>A</strong>utomated <strong>CAR-T</strong> target discovery) is an end-to-end computational pipeline for identifying tumour-specific surface protein targets for CAR-T cell therapy from single-cell RNA-seq data.</p>
     <p>CAR-T therapy requires surface antigens that are highly expressed on tumour cells and absent (or minimally expressed) on healthy tissues. SCART automates this discovery by integrating GEO data retrieval, cell-type annotation, malignant cell identification, surfaceome differential expression, and logic-gate gene combination scoring into a single cohesive pipeline.</p>
 
-    <div class="callout callout-info">
-      <span class="callout-icon">ℹ️</span>
-      <div>SCART accepts raw GEO accession IDs <em>or</em> user-supplied h5ad files with raw counts. You can also resume from any module by providing preprocessed data.</div>
-    </div>
 
     <h2 id="architecture">Pipeline Architecture</h2>
     <p>The pipeline consists of five sequential modules. Each module writes an output h5ad or CSV that serves as input to the next. All intermediate outputs are saved so you can resume from any step.</p>
