@@ -826,340 +826,363 @@ two_gene_combination.run(pop_size=<span class="num">2000</span>, Gmax=<span clas
     </div>
 
     <!-- ═══════════════════════════════════════════════════════════════════
-         JUPYTER NOTEBOOK
+         COMPLETE EXAMPLE SCRIPT
     ════════════════════════════════════════════════════════════════════════ -->
-    <h2 id="jupyter-nb">Running in Jupyter Notebook</h2>
-    <p>Jupyter Notebook is the easiest interactive way to run SCART — you can see outputs from each module before moving to the next step. Make sure you have completed <a href="install.html#jupyter">Step 4 of the Installation guide</a> and selected the <strong>Python (scart_env)</strong> kernel in your notebook.</p>
+    <h2 id="complete-script">Complete Example Script — All Scenarios &amp; Parameters Explained</h2>
+    <p>Below is a single, fully annotated script that covers every input scenario and explains every parameter you might want to change. Read through it top to bottom — each line that you are likely to edit is marked with a plain-English comment explaining what it does and what happens when you change it. Copy the version that matches your data, replace the highlighted paths and values, and run it.</p>
 
-    <div class="callout callout-tip">
-      <span class="callout-icon">💡</span>
-      <div>You can run the entire pipeline in a single cell, or split each module into its own cell to inspect intermediate outputs. One cell per module is strongly recommended — it lets you re-run a single step without restarting from scratch.</div>
+    <div class="callout callout-info">
+      <span class="callout-icon">ℹ️</span>
+      <div><strong>How to use this script</strong> — You can paste it into a <strong>Jupyter notebook</strong> (one module per cell is easiest for inspecting results), save it as a <strong>.py file and run with <code>python my_script.py</code></strong>, or embed it in an <strong>HPC/SLURM batch script</strong>. The Python code itself is identical in all three cases. See the <a href="install.html#jupyter-notebook">Installation page</a> for Jupyter and HPC/SLURM setup details.</div>
     </div>
 
-    <h3>Option A — Full pipeline in one cell</h3>
+    <!-- ── STEP 1 ── -->
+    <h3 style="margin-top:32px;">Step 1 — Choose your input (pick one of three scenarios)</h3>
+    <p>The only thing that changes between scenarios is how you construct the <code>SampleAnnotator</code> call. Everything from Module 2 onwards is identical regardless of which scenario you use.</p>
 
     <div class="code-wrap">
-      <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
-      <pre><span class="c"># ── Full SCART pipeline — paste into a single Jupyter cell ─────────────────</span>
-<span class="kw">import</span> SCART
+      <div class="code-header"><span class="code-lang">python — Module 1 · Data Input</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre><span class="kw">import</span> SCART
 <span class="kw">from</span> SCART.geo_fetcher <span class="kw">import</span> SampleAnnotator
 
-annotator = SampleAnnotator(<span class="str">"GSE158937"</span>, cancer_type=<span class="str">"ovary_cancer"</span>, min_genes=<span class="num">200</span>, max_mt=<span class="num">40</span>)
+<span class="c"># ════════════════════════════════════════════════════════════════════════════
+#  SCENARIO ① — One GEO accession ID
+#  Use this when your data comes from a public GEO dataset.
+#  SCART downloads and processes everything automatically.
+# ════════════════════════════════════════════════════════════════════════════</span>
+
+annotator = SampleAnnotator(
+    <span class="str">"GSE158937"</span>,          <span class="c"># ← CHANGE: your GEO accession ID (format: GSExxxxxx)</span>
+                           <span class="c">#   Find IDs at: ncbi.nlm.nih.gov/geo</span>
+
+    cancer_type=<span class="str">"ovary_cancer"</span>,  <span class="c"># ← CHANGE: use a key from the Cancer Type table above</span>
+                                   <span class="c">#   This tells SCART which Tabula Sapiens reference</span>
+                                   <span class="c">#   file to recommend after the run</span>
+
+    min_genes=<span class="num">200</span>,         <span class="c"># ← OPTIONAL quality filter: cells with fewer than this</span>
+                           <span class="c">#   many detected genes are removed before analysis.</span>
+                           <span class="c">#   Typical range: 100–500. Remove this line entirely</span>
+                           <span class="c">#   to skip the filter (not recommended).</span>
+
+    max_mt=<span class="num">40</span>,             <span class="c"># ← OPTIONAL quality filter: cells where more than this</span>
+                           <span class="c">#   percentage of reads come from mitochondrial genes are</span>
+                           <span class="c">#   removed — high mitochondrial content usually means</span>
+                           <span class="c">#   a dying or damaged cell. Typical range: 20–50.</span>
+                           <span class="c">#   Remove this line entirely to skip the filter.</span>
+)
+
+<span class="c"># ════════════════════════════════════════════════════════════════════════════
+#  SCENARIO ② — Multiple GEO datasets merged into one analysis
+#  Use this when you want to combine data from several GEO studies.
+#  All datasets must be from the same cancer type.
+#  Output will be saved as combined_tumor.h5ad
+# ════════════════════════════════════════════════════════════════════════════
+
+# annotator = SampleAnnotator(
+#     "GSE184880",          # ← first GEO ID
+#     "GSE173682",          # ← second GEO ID (add more as needed)
+#     cancer_type="lung_cancer",
+#     min_genes=200,
+#     max_mt=40,
+# )
+
+<span class="c"># ════════════════════════════════════════════════════════════════════════════
+#  SCENARIO ② VARIANT — Exclude specific samples from a GEO dataset
+#  Use this when a dataset contains samples you do not want — for example,
+#  a CAR-T therapy study may include engineered CAR-T cell products alongside
+#  patient tumour samples. Run without exclude_gsm_ids first to see the full
+#  sample list printed by SCART, then re-run adding the IDs to drop.
+# ════════════════════════════════════════════════════════════════════════════
+
+# annotator = SampleAnnotator(
+#     "GSE224550",
+#     cancer_type="blood_cancer",
+#     min_genes=200,
+#     max_mt=40,
+#     exclude_gsm_ids=[
+#         "GSM7025839", "GSM7025840",   # ← CHANGE: GSM IDs to exclude
+#         "GSM7025847", "GSM7025848",
+#     ],
+# )
+
+<span class="c"># ════════════════════════════════════════════════════════════════════════════
+#  SCENARIO ③ — Your own h5ad file(s)
+#  Use this when you already have processed scRNA-seq data as an h5ad file.
+#  The file MUST contain raw (unnormalised) integer counts.
+#  Output will be saved as input_tumor.h5ad
+# ════════════════════════════════════════════════════════════════════════════
+
+# annotator = SampleAnnotator(
+#     "/path/to/my_data.h5ad",    # ← CHANGE: path to your h5ad file
+#     cancer_type="ovary_cancer",
+#     min_genes=200,
+#     max_mt=40,
+# )
+
+<span class="c"># ════════════════════════════════════════════════════════════════════════════
+#  SCENARIO ③ VARIANT — h5ad with your own cell-type labels (skip PopV)
+#  Use this when your h5ad already has reliable cell-type annotations from
+#  Seurat, CellTypist, or another tool. Setting manual_annotation_col means
+#  Module 2 (PopV) is skipped entirely — go straight to Module 3 after run().
+#
+#  IMPORTANT: epithelial cell labels in your column MUST contain the phrase
+#  "epithelial cell" (case-insensitive) for Module 3 to find them.
+#  Valid:   "glandular epithelial cell", "ovarian surface epithelial cell"
+#  Invalid: "Epithelial", "epithelial_cells", "cancer cell"
+# ════════════════════════════════════════════════════════════════════════════
+
+# annotator = SampleAnnotator(
+#     "/path/to/my_annotated_data.h5ad",
+#     cancer_type="ovary_cancer",
+#     min_genes=200,
+#     max_mt=40,
+#     manual_annotation_col="cell_type",  # ← CHANGE: name of the obs column
+#                                         #   that holds your cell-type labels
+# )
+
+<span class="c"># ════════════════════════════════════════════════════════════════════════════
+#  SCENARIO ④ — GEO ID + h5ad mixed (combined into one analysis)
+# ════════════════════════════════════════════════════════════════════════════
+
+# annotator = SampleAnnotator(
+#     "GSE158937",                        # ← GEO ID downloaded automatically
+#     "/path/to/extra_data.h5ad",         # ← your own local file
+#     cancer_type="ovary_cancer",
+#     min_genes=200,
+#     max_mt=40,
+# )
+
+<span class="c"># ── Run Module 1 (same call for every scenario above) ────────────────────</span>
 normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = annotator.run()
 
-<span class="kw">from</span> SCART <span class="kw">import</span> popv_annotation
-adata = popv_annotation.auto_run_popv(
-    nsamples=<span class="num">300</span>,
-    user_reference=<span class="str">"/path/to/Ovary_TSP1_30_version2d_10X_smartseq_scvi_Nov262024.h5ad"</span>,
-)
-
-<span class="kw">from</span> SCART <span class="kw">import</span> preprocessing
-adata_preprocessed = preprocessing.run_preprocessing_pipeline(
-    reference_h5ad     = <span class="str">"/path/to/Ovary_TSP1_30_version2d_10X_smartseq_scvi_Nov262024.h5ad"</span>,
-    log2fc_threshold   = <span class="num">2.0</span>,
-    pval_adj_threshold = <span class="num">0.05</span>,
-    malignant_strategy = <span class="str">"intersection"</span>,
-    scevan_ref_max_cells = <span class="num">100</span>,
-    scevan_sample_name   = <span class="str">"SCEVAN_run"</span>,
-    scevan_organism      = <span class="str">"human"</span>,
-    scevan_par_cores     = <span class="num">1</span>,
-    scevan_subclones     = <span class="kw">False</span>,
-    scevan_batch_size    = <span class="num">3000</span>,
-)
-
-<span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> one_gene_combination
-df = one_gene_combination.run(hpa_path=<span class="str">"/path/to/HPA_updated.h5ad"</span>, safety_threshold=<span class="num">0.9</span>)
-
-<span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> two_gene_combination
-df_hof, df_all = two_gene_combination.run(
-    hpa_path=<span class="str">"/path/to/HPA_updated.h5ad"</span>, safety_threshold=<span class="num">0.9</span>,
-    pop_size=<span class="num">1000</span>, Gmax=<span class="num">100</span>, patience=<span class="num">50</span>, n_cpus=<span class="num">8</span>, n_runs=<span class="num">10</span>,
-)</pre>
+<span class="c"># After run() finishes, SCART prints a message like:
+#   "Recommended reference: Ovary_TSP1_30_version2d_10X_smartseq_scvi_Nov262024.h5ad"
+# Download that file from Figshare (link in the Reference Files section above)
+# before continuing to Module 2.</span>
+print(<span class="str">f"Tumour samples: {tumor}"</span>)
+print(<span class="str">f"Output file:    {query_h5ad}"</span>)</pre>
     </div>
 
-    <h3>Option B — One module per cell <span style="font-size:13px;font-weight:400;color:#718096;">(recommended — inspect output at every step)</span></h3>
+    <!-- ── STEP 2 ── -->
+    <h3 style="margin-top:36px;">Step 2 — Cell-type annotation</h3>
+    <p><em>Skip this step if you used <code>manual_annotation_col</code> in Step 1 — go directly to Step 3.</em></p>
 
     <div class="code-wrap">
-      <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
-      <pre><span class="c"># ── Cell 1 · Module 1 — GEO Fetch ──────────────────────────────────────────</span>
-<span class="kw">import</span> SCART
-<span class="kw">from</span> SCART.geo_fetcher <span class="kw">import</span> SampleAnnotator
-
-annotator = SampleAnnotator(<span class="str">"GSE158937"</span>, cancer_type=<span class="str">"ovary_cancer"</span>, min_genes=<span class="num">200</span>, max_mt=<span class="num">40</span>)
-normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = annotator.run()</pre>
-    </div>
-
-    <div class="code-wrap">
-      <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
-      <pre><span class="c"># ── Cell 2 · Module 2 — Cell-Type Annotation (PopV) ────────────────────────</span>
-<span class="kw">from</span> SCART <span class="kw">import</span> popv_annotation
+      <div class="code-header"><span class="code-lang">python — Module 2 · PopV Cell-Type Annotation</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre><span class="kw">from</span> SCART <span class="kw">import</span> popv_annotation
 
 adata = popv_annotation.auto_run_popv(
-    nsamples=<span class="num">300</span>,
+
+    nsamples=<span class="num">300</span>,          <span class="c"># ← How many cells per cell-type label are sampled from</span>
+                           <span class="c">#   the reference during annotation. 300 is a good balance</span>
+                           <span class="c">#   of speed and accuracy for most datasets.</span>
+                           <span class="c">#   Increase to 500+ if you have a large, diverse reference</span>
+                           <span class="c">#   and enough RAM (32 GB+). Decrease if you run out of memory.</span>
+
     user_reference=<span class="str">"/path/to/Ovary_TSP1_30_version2d_10X_smartseq_scvi_Nov262024.h5ad"</span>,
+                           <span class="c"># ← CHANGE: full path to the Tabula Sapiens reference file</span>
+                           <span class="c">#   you downloaded for your cancer type.</span>
+                           <span class="c">#   If you leave this as None, SCART attempts an automatic</span>
+                           <span class="c">#   download — this requires a good internet connection and</span>
+                           <span class="c">#   can be slow (~4 GB file). Supplying the path yourself</span>
+                           <span class="c">#   is always faster and more reliable.</span>
 )
-print(adata.obs[<span class="str">"popv_majority_vote_prediction"</span>].value_counts())</pre>
+
+<span class="c"># Inspect which cell types were found in your data</span>
+print(adata.obs[<span class="str">"popv_majority_vote_prediction"</span>].value_counts())
+<span class="c"># Output saved to: popv_results/final_popv_annotated.h5ad</span></pre>
     </div>
 
+    <!-- ── STEP 3 ── -->
+    <h3 style="margin-top:36px;">Step 3 — Malignant cell identification &amp; surfaceome analysis</h3>
+
     <div class="code-wrap">
-      <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
-      <pre><span class="c"># ── Cell 3 · Module 3 — Malignant Cell Identification ──────────────────────</span>
-<span class="kw">from</span> SCART <span class="kw">import</span> preprocessing
+      <div class="code-header"><span class="code-lang">python — Module 3 · Malignant Cell Identification</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre><span class="kw">from</span> SCART <span class="kw">import</span> preprocessing
 
 adata_preprocessed = preprocessing.run_preprocessing_pipeline(
-    reference_h5ad     = <span class="str">"/path/to/Ovary_TSP1_30_version2d_10X_smartseq_scvi_Nov262024.h5ad"</span>,
-    log2fc_threshold   = <span class="num">2.0</span>,
-    pval_adj_threshold = <span class="num">0.05</span>,
-    malignant_strategy = <span class="str">"intersection"</span>,
-    scevan_ref_max_cells = <span class="num">100</span>,
-    scevan_sample_name   = <span class="str">"SCEVAN_run"</span>,
-    scevan_organism      = <span class="str">"human"</span>,
-    scevan_par_cores     = <span class="num">1</span>,
-    scevan_subclones     = <span class="kw">False</span>,
-    scevan_batch_size    = <span class="num">3000</span>,
+
+    reference_h5ad=<span class="str">"/path/to/Ovary_TSP1_30_version2d_10X_smartseq_scvi_Nov262024.h5ad"</span>,
+                           <span class="c"># ← CHANGE: same Tabula Sapiens file used in Module 2.</span>
+                           <span class="c">#   This is used to build a healthy reference for SCEVAN,</span>
+                           <span class="c">#   which detects copy number variations to identify</span>
+                           <span class="c">#   malignant cells.</span>
+
+    malignant_strategy=<span class="str">"intersection"</span>,
+                           <span class="c"># ← RECOMMENDED: "intersection" means BOTH scMalignantFinder</span>
+                           <span class="c">#   AND SCEVAN must agree that a cell is malignant.</span>
+                           <span class="c">#   This gives the highest confidence results — fewer false</span>
+                           <span class="c">#   positives, better CAR-T targets downstream.</span>
+                           <span class="c">#</span>
+                           <span class="c">#   Alternatives (use only if you have a specific reason):</span>
+                           <span class="c">#   "scMalignant" — use scMalignantFinder only (no SCEVAN).</span>
+                           <span class="c">#     Use if you do not have a Tabula Sapiens reference or</span>
+                           <span class="c">#     want a faster run. Less specific than intersection.</span>
+                           <span class="c">#   "scevan"       — use SCEVAN only.</span>
+
+    log2fc_threshold=<span class="num">2.0</span>,  <span class="c"># ← Minimum fold-change a gene must show between malignant</span>
+                           <span class="c">#   and non-malignant cells to be called differentially</span>
+                           <span class="c">#   expressed (and thus a candidate CAR-T target).</span>
+                           <span class="c">#   log2FC of 2.0 means the gene is expressed ~4× higher</span>
+                           <span class="c">#   in tumour cells — a stringent, sensible default.</span>
+                           <span class="c">#   Increase (e.g. 3.0) for a shorter, higher-confidence</span>
+                           <span class="c">#   target list. Decrease (e.g. 0.5–1.0) if you are getting</span>
+                           <span class="c">#   very few candidates and want to cast a wider net.</span>
+
+    pval_adj_threshold=<span class="num">0.05</span>,
+                           <span class="c"># ← Maximum adjusted p-value for a gene to be included.</span>
+                           <span class="c">#   0.05 is the standard statistical significance cutoff</span>
+                           <span class="c">#   (5% false discovery rate). Only change this if you</span>
+                           <span class="c">#   have a specific statistical reason — 0.05 is almost</span>
+                           <span class="c">#   always appropriate.</span>
+
+    scevan_ref_max_cells=<span class="num">100</span>,
+                           <span class="c"># ← Maximum number of healthy reference cells given to</span>
+                           <span class="c">#   SCEVAN per run. 100 is a conservative, memory-safe</span>
+                           <span class="c">#   default that works on most machines.</span>
+                           <span class="c">#   Increase to 200–500 if you have 32+ GB RAM — a larger</span>
+                           <span class="c">#   reference gives SCEVAN a more stable baseline, which</span>
+                           <span class="c">#   can improve malignant cell detection accuracy.</span>
+                           <span class="c">#   Decrease if SCART runs out of memory.</span>
+
+    scevan_par_cores=<span class="num">1</span>,    <span class="c"># ← CPU cores used by SCEVAN. Set this to the number of</span>
+                           <span class="c">#   cores available on your machine to speed things up.</span>
+                           <span class="c">#   On a standard laptop: 4. On a workstation: 8–16.</span>
+                           <span class="c">#   On HPC: match to --cpus-per-task in your SLURM script.</span>
+
+    scevan_batch_size=<span class="num">3000</span>,
+                           <span class="c"># ← How many tumour cells are processed per SCEVAN batch.</span>
+                           <span class="c">#   3000 works for most machines with ≥16 GB RAM.</span>
+                           <span class="c">#   Decrease (e.g. 1000–1500) if you run out of memory.</span>
+                           <span class="c">#   Increase (e.g. 5000) if you have 64+ GB RAM and want</span>
+                           <span class="c">#   fewer, faster batches.</span>
+
+    scevan_organism=<span class="str">"human"</span>,
+                           <span class="c"># ← Set to "mouse" if your data is from mouse samples.</span>
+                           <span class="c">#   Leave as "human" for all human cancer data.</span>
+
+    scevan_sample_name=<span class="str">"SCEVAN_run"</span>,
+                           <span class="c"># ← A label used as a prefix for SCEVAN's output files.</span>
+                           <span class="c">#   You can change this to anything descriptive, e.g.</span>
+                           <span class="c">#   "GSE158937_ovary". It does not affect results.</span>
+
+    scevan_subclones=<span class="kw">False</span>,
+                           <span class="c"># ← Whether SCEVAN should try to detect tumour subclones</span>
+                           <span class="c">#   (genetically distinct sub-populations within the tumour).</span>
+                           <span class="c">#   False is faster and sufficient for CAR-T target discovery.</span>
+                           <span class="c">#   Set to True only if you specifically want subclone</span>
+                           <span class="c">#   information — it significantly increases run time.</span>
 )
-print(adata_preprocessed.uns[<span class="str">"filtered_deg"</span>].head(<span class="num">20</span>))</pre>
+
+<span class="c"># Inspect the top candidate surface genes from the analysis</span>
+print(adata_preprocessed.uns[<span class="str">"filtered_deg"</span>].head(<span class="num">20</span>))
+<span class="c"># Output saved to: preprocessing_results/final_tumor.h5ad</span></pre>
     </div>
 
-    <div class="code-wrap">
-      <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
-      <pre><span class="c"># ── Cell 4 · Module 4a — Single-Gene Scoring ───────────────────────────────</span>
-<span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> one_gene_combination
+    <!-- ── STEP 4a ── -->
+    <h3 style="margin-top:36px;">Step 4a — Single-gene CAR-T target scoring</h3>
 
-df = one_gene_combination.run(hpa_path=<span class="str">"/path/to/HPA_updated.h5ad"</span>, safety_threshold=<span class="num">0.9</span>)
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">python — Module 4a · Single-Gene Scoring</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre><span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> one_gene_combination
+
+df = one_gene_combination.run(
+
+    hpa_path=<span class="str">"/path/to/HPA_updated.h5ad"</span>,
+                           <span class="c"># ← CHANGE: path to the HPA_updated.h5ad file you downloaded</span>
+                           <span class="c">#   from the SCART GitHub repository. This is the Human</span>
+                           <span class="c">#   Protein Atlas healthy-tissue reference used to check</span>
+                           <span class="c">#   whether each candidate gene is expressed in normal</span>
+                           <span class="c">#   organs — a critical safety check for CAR-T therapy.</span>
+
+    safety_threshold=<span class="num">0.9</span>, <span class="c"># ← The minimum fraction of healthy cell types that must</span>
+                           <span class="c">#   NOT express this gene for it to be considered safe.</span>
+                           <span class="c">#   0.9 = the gene must be absent from at least 90% of</span>
+                           <span class="c">#   healthy tissues — the recommended default.</span>
+                           <span class="c">#</span>
+                           <span class="c">#   0.95 → very strict, fewer candidates, lower off-tumour</span>
+                           <span class="c">#          risk, good for clinical prioritisation</span>
+                           <span class="c">#   0.90 → standard, balanced (recommended)</span>
+                           <span class="c">#   0.80 → lenient, more candidates, higher off-tumour risk</span>
+                           <span class="c">#          use only for exploratory analysis</span>
+)
+
+<span class="c"># Filter to candidates meeting the safety threshold, ranked by tumour coverage</span>
 top = df[df[<span class="str">"Safety"</span>] &gt;= <span class="num">0.9</span>].sort_values(<span class="str">"Efficacy"</span>, ascending=<span class="kw">False</span>)
-print(top.head(<span class="num">20</span>))</pre>
+print(top.head(<span class="num">20</span>))
+<span class="c"># Output saved to: single_gene_results.csv</span></pre>
     </div>
 
+    <!-- ── STEP 4b ── -->
+    <h3 style="margin-top:36px;">Step 4b — Two-gene logic-gate CAR-T target scoring</h3>
+    <p>This module searches for optimal pairs of genes, tested with three logic gates: <code>A &amp; B</code> (target cells expressing both genes), <code>A | B</code> (expressing either), and <code>A &amp;! B</code> (expressing A but not B — useful for safety, since a healthy-tissue marker can be used as an exclusion signal). A genetic algorithm efficiently explores millions of possible pairs.</p>
+
     <div class="code-wrap">
-      <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
-      <pre><span class="c"># ── Cell 5 · Module 4b — Two-Gene Combination Scoring ──────────────────────</span>
-<span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> two_gene_combination
+      <div class="code-header"><span class="code-lang">python — Module 4b · Two-Gene Combination Scoring</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre><span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> two_gene_combination
 
 df_hof, df_all = two_gene_combination.run(
-    hpa_path=<span class="str">"/path/to/HPA_updated.h5ad"</span>, safety_threshold=<span class="num">0.9</span>,
-    pop_size=<span class="num">1000</span>, Gmax=<span class="num">100</span>, patience=<span class="num">50</span>, n_cpus=<span class="num">8</span>, n_runs=<span class="num">10</span>,
+
+    hpa_path=<span class="str">"/path/to/HPA_updated.h5ad"</span>,
+                           <span class="c"># ← CHANGE: same HPA file as Module 4a.</span>
+
+    safety_threshold=<span class="num">0.9</span>, <span class="c"># ← Same meaning as Module 4a. 0.9 is recommended.</span>
+
+    pop_size=<span class="num">1000</span>,         <span class="c"># ← Number of gene pairs in each "generation" of the</span>
+                           <span class="c">#   genetic algorithm. Think of it as the population size</span>
+                           <span class="c">#   in an evolutionary search — larger means the algorithm</span>
+                           <span class="c">#   explores more of the search space per generation.</span>
+                           <span class="c">#   200  → fast test run (laptop / first look)</span>
+                           <span class="c">#   1000 → standard run (recommended)</span>
+                           <span class="c">#   2000 → thorough run (HPC, large gene lists)</span>
+
+    Gmax=<span class="num">100</span>,              <span class="c"># ← Maximum number of generations the algorithm is allowed</span>
+                           <span class="c">#   to run. More generations = more optimisation time.</span>
+                           <span class="c">#   In practice the algorithm often stops early (see patience).</span>
+                           <span class="c">#   20  → quick test</span>
+                           <span class="c">#   100 → standard (recommended)</span>
+                           <span class="c">#   200 → thorough (HPC)</span>
+
+    patience=<span class="num">50</span>,           <span class="c"># ← Early stopping: if the best score has not improved for</span>
+                           <span class="c">#   this many consecutive generations, the algorithm stops.</span>
+                           <span class="c">#   This saves time when results have converged.</span>
+                           <span class="c">#   10  → stops quickly, may miss small improvements</span>
+                           <span class="c">#   50  → standard balance (recommended)</span>
+                           <span class="c">#   100 → keeps running longer, for thorough HPC runs</span>
+
+    n_cpus=<span class="num">8</span>,              <span class="c"># ← CPU cores for parallel fitness evaluation. This is the</span>
+                           <span class="c">#   single biggest speed lever for Module 4b.</span>
+                           <span class="c">#   Set to the number of cores your machine has:</span>
+                           <span class="c">#   4  → laptop</span>
+                           <span class="c">#   8  → standard workstation (recommended)</span>
+                           <span class="c">#   16–40 → HPC node</span>
+
+    n_runs=<span class="num">10</span>,             <span class="c"># ← Number of independent algorithm runs with different</span>
+                           <span class="c">#   random starting points. Because genetic algorithms have</span>
+                           <span class="c">#   a random component, running multiple times and combining</span>
+                           <span class="c">#   results gives more robust and reproducible output.</span>
+                           <span class="c">#   2   → quick test only</span>
+                           <span class="c">#   10  → standard, reliable (recommended)</span>
+                           <span class="c">#   10+ → diminishing returns beyond 10 for most datasets</span>
 )
-print(df_hof.head(<span class="num">20</span>))</pre>
-    </div>
 
-    <!-- ═══════════════════════════════════════════════════════════════════
-         HPC / CLUSTER
-    ════════════════════════════════════════════════════════════════════════ -->
-    <h2 id="hpc-run">Running on an HPC / Cluster</h2>
-    <p>For large datasets, SCART is best run on an HPC cluster (SLURM, PBS, etc.) as a batch job. This section covers everything you need to go from installation to a submitted job.</p>
+<span class="c"># View the best AND-gate pairs (both genes must be expressed on tumour cell)</span>
+and_pairs = df_hof[df_hof[<span class="str">"LogicGates"</span>] == <span class="str">"A &amp; B"</span>]
+print(<span class="str">"Top AND-gate pairs:"</span>); print(and_pairs.head(<span class="num">10</span>))
 
-    <h3>Resource recommendations per module</h3>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>Module</th><th>CPUs</th><th>RAM</th><th>Typical time</th><th>GPU</th></tr></thead>
-        <tbody>
-          <tr><td>Module 1 — GEO Fetch</td><td>2–4</td><td>16 GB</td><td>30 min – 2 h</td><td>No</td></tr>
-          <tr><td>Module 2 — PopV</td><td>4–8</td><td>32 GB</td><td>1–4 h</td><td>Optional (speeds scVI)</td></tr>
-          <tr><td>Module 3 — SCEVAN</td><td>4–8</td><td>32 GB</td><td>1–4 h</td><td>No</td></tr>
-          <tr><td>Module 4a — Single gene</td><td>2</td><td>8 GB</td><td>5–15 min</td><td>No</td></tr>
-          <tr><td>Module 4b — Two gene GA</td><td>8–40</td><td>32–64 GB</td><td>1–8 h</td><td>No</td></tr>
-        </tbody>
-      </table>
-    </div>
+<span class="c"># View the best NAND-gate pairs (tumour expresses A but NOT B —</span>
+<span class="c"># B acts as a "safety catch" to spare healthy cells that express B)</span>
+nand_pairs = df_hof[df_hof[<span class="str">"LogicGates"</span>] == <span class="str">"A &amp;! B"</span>]
+print(<span class="str">"Top NAND-gate pairs:"</span>); print(nand_pairs.head(<span class="num">10</span>))
 
-    <h3>Step 1 — Activate your environment on the cluster</h3>
-    <div class="code-wrap">
-      <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
-      <pre><span class="c"># Load conda module (exact command varies by cluster)</span>
-module load conda/latest
-conda activate scart_env
-
-<span class="c"># Verify the environment is active</span>
-python -c "import SCART; print(SCART.__version__)"</pre>
-    </div>
-
-    <h3>Step 2 — Running a Python script from the command line</h3>
-    <p>New to running Python on the command line? The basic usage is:</p>
-    <div class="code-wrap">
-      <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
-      <pre><span class="c"># Run a script and print output to the terminal</span>
-python my_scart_script.py
-
-<span class="c"># Run a script and save all output to a log file</span>
-python my_scart_script.py > output.log 2>&amp;1</pre>
-    </div>
-    <p>For a full guide on running Python scripts, see the <a href="https://realpython.com/run-python-scripts/" target="_blank">Real Python guide — How to Run Your Python Scripts and Code</a>.</p>
-
-    <h3>Step 3 — Writing and submitting a SLURM job script</h3>
-    <p>Rather than running scripts interactively (which would stop when you disconnect), submit them as SLURM batch jobs. The <a href="https://www.arch.jhu.edu/short-tutorial-how-to-create-a-slurm-script/" target="_blank">JHU ARCH tutorial — How to Create a Slurm Script</a> covers all the directives. A minimal example:</p>
-
-    <div class="code-wrap">
-      <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
-      <pre>#!/bin/bash
-#SBATCH --job-name=scart_job          <span class="c"># Job name</span>
-#SBATCH --output=output.txt           <span class="c"># Standard output file</span>
-#SBATCH --error=error.txt             <span class="c"># Standard error file</span>
-#SBATCH --partition=partition_name    <span class="c"># Partition or queue name (ask your sysadmin)</span>
-#SBATCH --nodes=1                     <span class="c"># Number of nodes</span>
-#SBATCH --ntasks-per-node=1           <span class="c"># Number of tasks per node</span>
-#SBATCH --cpus-per-task=8             <span class="c"># CPU cores per task</span>
-#SBATCH --mem=32G                     <span class="c"># Total RAM</span>
-#SBATCH --time=8:00:00                <span class="c"># Maximum runtime (HH:MM:SS)</span>
-#SBATCH --mail-type=END               <span class="c"># Email when job finishes</span>
-#SBATCH --mail-user=your@email.com    <span class="c"># Your email address</span>
-
-module load conda/latest
-conda activate scart_env
-
-python my_scart_script.py</pre>
-    </div>
-
-    <div class="code-wrap">
-      <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
-      <pre><span class="c"># Submit the job</span>
-sbatch run_scart.slurm
-
-<span class="c"># Check job status</span>
-squeue -u $USER
-
-<span class="c"># Watch live output</span>
-tail -f output.txt</pre>
-    </div>
-
-    <!-- ══════════════ FULL SBATCH SCRIPT ══════════════ -->
-    <h2 id="sbatch">Full SBATCH Script — Complete Pipeline</h2>
-    <p>Copy this script, save it as <code>scart_pipeline.sh</code>, edit the variables at the top, and submit with <code>sbatch scart_pipeline.sh</code>. It runs all five modules end-to-end as a single SLURM job.</p>
-
-    <div class="sbatch-box">
-      <div class="code-header">
-        <span class="code-lang">bash — scart_pipeline.sh</span>
-        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-      </div>
-      <pre>#!/bin/bash
-#SBATCH --job-name=scart_pipeline
-#SBATCH --output=logs/scart_%j.out
-#SBATCH --error=logs/scart_%j.err
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
-#SBATCH --time=12:00:00
-#SBATCH --partition=compute
-
-# ── Load conda and activate environment ──────────────────────────────────
-source ~/.bashrc
-conda activate scart_env
-
-# ── USER: edit these variables ───────────────────────────────────────────
-GEO_ID="GSE158937"
-CANCER_TYPE="ovary_cancer"
-REFERENCE="/path/to/Ovary_TSP1_30_version2d_10X_smartseq_scvi_Nov262024.h5ad"
-HPA_PATH="/path/to/HPA_updated.h5ad"
-WORKDIR="/path/to/my_analysis"
-MIN_GENES=200
-MAX_MT=40
-
-mkdir -p "$WORKDIR/logs"
-cd "$WORKDIR"
-
-echo "========================================"
-echo " SCART Pipeline — $(date)"
-echo " GEO: $GEO_ID  Cancer: $CANCER_TYPE"
-echo "========================================"
-
-# ── MODULE 1: GEO Fetch ───────────────────────────────────────────────────
-echo "[$(date +%T)] MODULE 1: GEO Fetch"
-python - &lt;&lt;EOF
-from SCART.geo_fetcher import SampleAnnotator
-annotator = SampleAnnotator(
-    "$GEO_ID",
-    cancer_type="$CANCER_TYPE",
-    min_genes=$MIN_GENES,
-    max_mt=$MAX_MT
-)
-normal, tumor, unspecified, info, path, ct, results = annotator.run()
-print(f"Tumour samples: {tumor}")
-print(f"Output h5ad: {path}")
-EOF
-
-# ── MODULE 2: PopV Annotation ─────────────────────────────────────────────
-echo "[$(date +%T)] MODULE 2: Cell-Type Annotation"
-python - &lt;&lt;EOF
-from SCART import popv_annotation
-adata = popv_annotation.auto_run_popv(
-    nsamples       = 300,
-    user_reference = "$REFERENCE"
-)
-print(adata.obs["popv_majority_vote_prediction"].value_counts().head(10))
-EOF
-
-# ── MODULE 3: Malignant ID + Surfaceome DE ────────────────────────────────
-echo "[$(date +%T)] MODULE 3: Malignant Cell Identification"
-python - &lt;&lt;EOF
-from SCART import preprocessing
-adata = preprocessing.run_preprocessing_pipeline(
-    reference_h5ad     = "$REFERENCE",
-    log2fc_threshold   = 2.0,
-    pval_adj_threshold = 0.05,
-    malignant_strategy = "intersection",
-    scevan_ref_max_cells = 100,
-    scevan_par_cores     = 8,
-    scevan_batch_size    = 3000,
-)
-print(adata.uns["filtered_deg"].head(20))
-EOF
-
-# ── MODULE 4a: Single-Gene Scoring ───────────────────────────────────────
-echo "[$(date +%T)] MODULE 4a: Single-Gene Scoring"
-python - &lt;&lt;EOF
-from SCART.gene_combination_predictor import one_gene_combination
-df = one_gene_combination.run(hpa_path="$HPA_PATH", safety_threshold=0.9)
-top = df[df["Safety"] >= 0.9].sort_values("Efficacy", ascending=False)
-print(top.head(20))
-top.to_csv("top_single_gene_targets.csv", index=False)
-EOF
-
-# ── MODULE 4b: Two-Gene Logic-Gate Scoring ────────────────────────────────
-echo "[$(date +%T)] MODULE 4b: Two-Gene GA Scoring"
-python - &lt;&lt;EOF
-from SCART.gene_combination_predictor import two_gene_combination
-df_hof, df_all = two_gene_combination.run(
-    hpa_path         = "$HPA_PATH",
-    safety_threshold = 0.9,
-    pop_size         = 1000,
-    Gmax             = 100,
-    patience         = 50,
-    n_cpus           = 16,
-    n_runs           = 10,
-)
-print("=== Hall of Fame (top 20) ===")
-print(df_hof.head(20).to_string())
-EOF
-
-echo "[$(date +%T)] SCART pipeline complete."
-echo "Results saved in: $WORKDIR"</pre>
-    </div>
-
-    <h3>Running modules as separate jobs (recommended for large datasets)</h3>
-    <p>For very large datasets, submit each module as a separate job with SLURM dependencies so they run in sequence automatically:</p>
-
-    <div class="code-wrap">
-      <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
-      <pre><span class="c"># Submit module 1 and capture its job ID</span>
-JOB1=$(sbatch --parsable scart_module1.sh)
-echo "Module 1 submitted: $JOB1"
-
-<span class="c"># Module 2 runs only after module 1 succeeds</span>
-JOB2=$(sbatch --parsable --dependency=afterok:$JOB1 scart_module2.sh)
-echo "Module 2 submitted: $JOB2"
-
-<span class="c"># Module 3 runs only after module 2 succeeds</span>
-JOB3=$(sbatch --parsable --dependency=afterok:$JOB2 scart_module3.sh)
-echo "Module 3 submitted: $JOB3"
-
-<span class="c"># Modules 4a and 4b can run in parallel — both depend only on module 3</span>
-sbatch --dependency=afterok:$JOB3 scart_module4a.sh
-sbatch --dependency=afterok:$JOB3 scart_module4b.sh</pre>
+<span class="c"># Outputs:
+#   two_gene_hof.csv      → Hall of Fame — best unique pairs (start here)
+#   two_gene_complete.csv → every pair evaluated across all runs</span></pre>
     </div>
 
     <div class="callout callout-tip">
       <span class="callout-icon">💡</span>
-      <div>To split into individual module scripts, extract each <code>python - &lt;&lt;EOF … EOF</code> block from the full pipeline script above into its own <code>scart_moduleN.sh</code> file with appropriate <code>#SBATCH</code> resource settings per the table above.</div>
+      <div>All output files are saved automatically in the current working directory. Run SCART from a dedicated project folder so all results stay organised together.</div>
     </div>
 
   </div><!-- /content-body -->
