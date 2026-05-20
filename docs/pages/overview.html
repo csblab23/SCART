@@ -10,6 +10,17 @@
 <link rel="stylesheet" href="../css/style.css">
 <style>
 .nav-logo-text { display: none !important; }
+#navbar {
+  height: 90px !important;
+  min-height: 90px !important;
+}
+#navbar .nav-inner {
+  height: 90px !important;
+  padding: 0 36px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+}
 .nav-logo-img-scart {
   height: 62px;
   width: auto;
@@ -36,13 +47,13 @@
 
 <nav id="navbar">
   <div class="nav-inner">
-    <a href="../index.html" class="nav-logo" style="line-height:0;text-decoration:none;flex-shrink:0;">
+    <a href="../../index.html" class="nav-logo" style="line-height:0;text-decoration:none;flex-shrink:0;">
       <img src="../../SCART/external/scart_logo.png" alt="SCART" class="nav-logo-img-scart"
            onerror="this.outerHTML='<span class=\'scart-wordmark\' style=\'font-size:32px;\'>S<span class=\'car\'>CAR</span>T</span>'">
     </a>
 
     <ul class="nav-links" style="margin:0 auto;">
-      <li><a href="../index.html">Home</a></li>
+      <li><a href="../../index.html">Home</a></li>
       <li><a href="overview.html" class="active">Overview</a></li>
       <li><a href="install.html">Installation</a></li>
       <li><a href="tutorial.html">Tutorial</a></li>
@@ -146,8 +157,8 @@
       <pre><span class="kw">from</span> SCART.geo_fetcher <span class="kw">import</span> <span class="fn">SampleAnnotator</span>
 
 annotator = <span class="fn">SampleAnnotator</span>(
-    <span class="str">"*"</span>,
-    cancer_type=<span class="str">"*"</span>,
+    <span class="str">"GSE*"</span>,
+    cancer_type=<span class="str">cancer_type</span>,
     min_genes=<span class="num">200</span>,
     max_mt=<span class="num">40</span>
 )
@@ -365,7 +376,7 @@ df_hof, df_all = two_gene_combination.<span class="fn">run</span>(
       <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
       <pre>annotator = <span class="fn">SampleAnnotator</span>(
     <span class="str">"/path/to/*.h5ad"</span>,
-    cancer_type=<span class="str">"*"</span>,
+    cancer_type=<span class="str">cancer_type</span>,
     manual_annotation_col=<span class="str">"cell_type"</span>,  <span class="c"># your obs column</span>
     min_genes=<span class="num">200</span>,
     max_mt=<span class="num">40</span>,
@@ -385,8 +396,8 @@ df_hof, df_all = two_gene_combination.<span class="fn">run</span>(
 <footer>
   <div class="footer-inner">
     <div class="footer-brand">
-      <a href="../index.html" class="nav-logo" style="margin-bottom:10px;">
-        <span class="nav-logo-text" style="color:white;">SC<span style="color:#79c0ff;">ART</span></span>
+      <a href="../../index.html" style="margin-bottom:10px;display:inline-block;text-decoration:none;">
+        <span style="font-family:Georgia,serif;font-size:22px;font-weight:700;color:white;">S<span style="color:#ff7070;">CAR</span>T</span>
       </a>
       <p>End-to-end CAR-T target discovery from single-cell RNA-seq data. Developed at CSIR-IGIB, New Delhi, India.</p>
     </div>
@@ -404,7 +415,7 @@ df_hof, df_all = two_gene_combination.<span class="fn">run</span>(
     </div>
   </div>
   <div class="footer-bottom">
-    <span>© 2025 SCART · CSIR-IGIB · MIT License</span>
+    <span>© 2025 S<span style="color:#ff7070;">CAR</span>T · CSIR-IGIB · MIT License</span>
     <a href="https://github.com/csblab23/SCART" target="_blank">GitHub</a>
   </div>
 </footer>
