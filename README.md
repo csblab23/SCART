@@ -77,10 +77,14 @@ conda install -c conda-forge -c bioconda \
   r-base r-devtools r-remotes r-ggplot2 r-data.table \
   r-igraph r-gdtools r-ragg r-dplyr \
   cairo freetype fontconfig harfbuzz fribidi \
-  libpng libtiff jpeg libwebp
+  libpng libtiff libjpeg-turbo libwebp \
+  --override-channels -c conda-forge -c bioconda -c defaults \
+  -y
 ```
 
 ```bash
+conda config --set channel_priority flexible
+
 conda install -c conda-forge -c bioconda \
   bioconductor-annotationdbi bioconductor-go.db \
   bioconductor-org.hs.eg.db bioconductor-biomart \
@@ -88,7 +92,8 @@ conda install -c conda-forge -c bioconda \
   bioconductor-rtracklayer \
   bioconductor-txdb.hsapiens.ucsc.hg19.knowngene \
   bioconductor-clusterprofiler bioconductor-enrichplot \
-  bioconductor-ggtree bioconductor-homo.sapiens
+  bioconductor-ggtree bioconductor-homo.sapiens \
+  -y
 ```
 
 Then inside R:
@@ -102,15 +107,6 @@ install_github("AntonioDeFalco/SCEVAN")
 library(SCEVAN)
 ```
 
-### 4. Set up Jupyter Notebook
-
-```bash
-pip install notebook ipykernel
-python -m ipykernel install --user --name=scart_env --display-name "Python (scart_env)"
-jupyter notebook
-```
-
----
 
 ## Quick Start
 
