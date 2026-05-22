@@ -1,83 +1,33 @@
 """
 popv_annotation.py
-Module 2 — PopV cell-type annotation  (popv == 0.4.2)
+Module 2 — PopV cell-type annotation
 
-Fixes applied (all changes marked with # FIX N comments):
-  1. Case-normalisation: predictions are title-cased before ontology lookup
-     so "b cell" → "B cell" matches the digraph node label.
-  2. Ontology path: resolves cl.obo (v0.4.2 format) from popv's own bundle
-     or a filesystem walk; cl_obo_folder passed to Process_Query.
-  3. Harmony batch fix: _batch_annotation guard added; falls back gracefully
-     when only one batch value is present.
-  4. Fallback prediction: derived from actually-present obs columns, not
-     from the successful_methods list (which could be misleading).
-  5. GEO download is re-used from the already-cached GSE dir so Module 1
-     does not re-download at annotation time.
-  6. Minor: bare excepts replaced with specific Exception catches; unused
-     obo_file argument removed from public API.
-  7. Query-cell extraction: after PopV annotation the combined
-     query+reference AnnData is filtered back to query cells only using
-     the '_dataset' column written by Process_Query.  Only the query
-     portion (original Module 1 shape) is saved to disk.
-  8. [NEW — revised] Full-gene raw count preservation via a dedicated
-     layer 'full_counts' rather than adata.raw.
+Analysis logic ported from PopV_GSE173682.ipynb reference notebook.
+Generalised as a reusable module for any GSE / cancer type.
 
-     WHY THE LAYER APPROACH (not adata.raw):
-       AnnData.raw = <AnnData> is not a public API.  The only supported
-       usage is `adata.raw = adata`, which freezes the CURRENT .X and
-       .var in-place.  After Process_Query trims .var to 4000 HVGs,
-       assigning a separate AnnData object to .raw either raises
-       AttributeError or is silently discarded on write/read — which is
-       exactly why Module 3 saw "adata.raw is None".
-
-       Using layers['full_counts'] is the h5ad-safe fix:
-         • Snapshot taken BEFORE Process_Query (full gene space, e.g. 36 k).
-         • Layers are indexed (cell × gene) so AnnData concatenation and
-           slicing in _extract_query_cells carry them automatically.
-         • adata.write() / sc.read_h5ad() round-trip layers with zero loss.
-         • Gene names saved to uns['full_counts_var_names'] (list of str).
-
-       Module 3 _build_fullgene_adata_for_scm() checks 'full_counts'
-       first, giving scMalignantFinder ≥90% model feature overlap instead
-       of the previous 19%.
-
-  RAW COUNTS REQUIREMENT (SCART design principle):
-    SCART requires raw (integer) counts throughout the pipeline.
-    Module 3 tools — scMalignantFinder and SCEVAN — both need raw counts
-    for correct normalisation and CNV inference.  log1p-normalised input
-    produces unreliable results in both tools.
-
-    This module therefore accepts ONLY raw counts.  The input_type='log1p'
-    option has been removed.  If your h5ad contains log-normalised data
-    rather than raw counts, you must supply the original raw count matrix
-    before running Module 2.
-
-    Raw counts must be present in one of:
-      • layers['counts']     — preferred; written by Module 1
-      • layers['raw_counts'] — accepted as fallback
-      • adata.X              — assumed raw if no layer present
-
-    The pipeline raises a ValueError immediately if the data appears to
-    be log-normalised (negative values, or mean < 2 with no negatives).
-
-  popv 0.4.2 API notes:
-    • Process_Query: no prediction_mode, no save_path_trained_models, no
-      hvg kwarg.  cl_obo_folder must point to the directory containing
-      cl.obo (not a JSON).
-    • annotate_data: simpler signature — annotate_data(adata, methods=[…])
-      with no methods_kwargs argument.
-    • Method name strings are UPPER_SNAKE (e.g. "KNN_BBKNN", "CELLTYPIST")
-      as registered in popv 0.4.2.
-    • .X must contain raw counts (integer or float32).
+Key notebook logic preserved:
+  1. OBO parsed with obonet (same as notebook) → proper name2id / id2name dicts
+  2. Reference obs columns prefixed with 'ref_' before Process_Query
+  3. ref_labels_key = 'ref_cell_ontology_class' (post-prefix)
+  4. query_batch_key auto-detected from obs (mirrors notebook's 'sample' key)
+  5. n_samples_per_label = max(min_celltype_size, 300)  — dynamic like notebook
+  6. Layer alignment: query gets placeholder layers to match reference structure
+  7. ref var index set to gene_symbol if available (notebook step)
+  8. obs_names / var_names made unique before Process_Query
+  9. Method list mirrors notebook: celltypist, knn_on_bbknn, knn_on_harmony,
+     knn_on_scanorama, onclass, rf, svm
+ 10. Query cells extracted by obs_names after annotation (notebook approach)
+ 11. Full-gene raw counts preserved via layers['full_counts'] + sidecar h5ad
+     for Module 3 (scMalignantFinder / SCEVAN)
 """
 
 import os
 import glob
 import logging
 import urllib.request
-import importlib.resources as pkg_resources
 
 import numpy as np
+import pandas as pd
 import anndata
 import scanpy as sc
 import scipy.sparse as sp
@@ -85,6 +35,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+import obonet
 import OnClass
 import sys
 sys.modules["onclass_utils"] = OnClass
@@ -92,52 +43,6 @@ sys.modules["onclass_utils"] = OnClass
 import popv
 from popv.preprocessing import Process_Query
 from popv.annotation import annotate_data
-
-# ---------------------------------------------------------------------------
-# FIX 9 — runtime method-name discovery
-# ---------------------------------------------------------------------------
-_METHOD_ALIASES = [
-    ["CELLTYPIST",    "celltypist",       "Celltypist",      "CELLTYPIST"],
-    ["KNN_BBKNN",     "knn_on_bbknn",     "knn_bbknn",       "Knn_Bbknn",     "KNN_BBKNN"],
-    ["KNN_SCANORAMA", "knn_on_scanorama", "knn_scanorama",   "Knn_Scanorama", "KNN_SCANORAMA"],
-    ["KNN_SCVI",      "knn_on_scvi",      "knn_scvi",        "Knn_Scvi",      "KNN_SCVI"],
-    ["KNN_HARMONY",   "knn_on_harmony",   "knn_harmony",     "Knn_Harmony",   "KNN_HARMONY"],
-    ["RANDOM_FOREST", "rf",               "random_forest",   "Random_Forest", "RANDOM_FOREST"],
-    ["SVM",           "svm",              "support_vector_machine", "Support_Vector"],
-    ["ONCLASS",       "onclass",          "OnClass",         "ONCLASS"],
-    ["SCANVI",        "scanvi",           "scanvi_popv",     "Scanvi_Popv",   "SCANVI_POPV"],
-]
-
-_HARMONY_ALIASES = {"KNN_HARMONY", "knn_on_harmony", "knn_harmony", "Knn_Harmony"}
-_ONCLASS_ALIASES = {"ONCLASS", "onclass", "OnClass"}
-
-
-def _discover_popv_methods() -> dict:
-    try:
-        import popv.algorithms as _alg
-    except ImportError:
-        logger.warning("Could not import popv.algorithms — using first alias as fallback.")
-        return {row[0]: row[1] for row in _METHOD_ALIASES}
-
-    found = {}
-    for row in _METHOD_ALIASES:
-        canonical = row[0]
-        for name in row[1:]:
-            if hasattr(_alg, name):
-                found[canonical] = name
-                break
-
-    if found:
-        logger.info(
-            f"popv.algorithms discovery: {len(found)} methods available — "
-            + ", ".join(f"{k}→{v}" for k, v in found.items())
-        )
-    else:
-        found = {row[0]: row[1] for row in _METHOD_ALIASES}
-        logger.warning("popv.algorithms discovery found nothing — using first aliases.")
-
-    return found
-
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -150,272 +55,44 @@ REFERENCE_BASE_PATH = "popv_reference"
 os.makedirs(REFERENCE_BASE_PATH, exist_ok=True)
 
 FIGSHARE_ARTICLE_ID = "27921984"
-TABULA_DOI_LINK = "https://doi.org/10.6084/m9.figshare.27921984"
+TABULA_DOI_LINK     = "https://doi.org/10.6084/m9.figshare.27921984"
 
 # ---------------------------------------------------------------------------
-# Locate the most recent tumor h5ad written by Module 1
+# 1. OBO parsing — notebook uses obonet directly
 # ---------------------------------------------------------------------------
 
-def get_latest_tumor_h5ad(data_dir="GSE_data"):
-    search_paths = [os.getcwd(), data_dir]
-    patterns = ["*_tumor.h5ad", "combined_tumor.h5ad", "input_tumor.h5ad"]
-
-    files = []
-    for path in search_paths:
-        for pattern in patterns:
-            files.extend(glob.glob(os.path.join(path, pattern)))
-
-    if not files:
-        raise FileNotFoundError(
-            "No tumor h5ad found.\n"
-            "Expected one of: *_tumor.h5ad | combined_tumor.h5ad | input_tumor.h5ad\n"
-            "in current directory or GSE_data/"
-        )
-
-    files = list(set(files))
-    return max(files, key=os.path.getctime)
-
-
-# ---------------------------------------------------------------------------
-# Figshare metadata fetch
-# ---------------------------------------------------------------------------
-
-def fetch_tabula_file_metadata():
-    url = f"https://api.figshare.com/v2/articles/{FIGSHARE_ARTICLE_ID}/files"
-    logger.info("Fetching Tabula Sapiens file list from Figshare …")
-
-    session = requests.Session()
-    retry = Retry(total=5, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
-    session.mount("https://", HTTPAdapter(max_retries=retry))
-
-    resp = session.get(url, timeout=30, headers={"User-Agent": "curl/7.68.0"})
-    resp.raise_for_status()
-
-    return [f for f in resp.json() if f["name"].endswith(".h5ad")]
-
-
-def find_best_reference_file(cancer_type: str, files):
-    tissue = cancer_type.replace("_cancer", "").lower().replace("_", " ")
-    logger.info(f"Matching tissue keyword: '{tissue}'")
-
-    for f in files:
-        if f["name"].lower().startswith(tissue.replace(" ", "_")):
-            return f
-    for f in files:
-        if tissue in f["name"].lower():
-            return f
-    return None
-
-
-def download_tabula_reference(cancer_type: str) -> str:
-    files = fetch_tabula_file_metadata()
-    selected = find_best_reference_file(cancer_type, files)
-
-    if selected is None:
-        raise ValueError(
-            f"Reference not found for '{cancer_type}' via Figshare API.\n"
-            f"Download manually from: {TABULA_DOI_LINK}\n"
-            f"Then pass: user_reference='path_to_reference.h5ad'"
-        )
-
-    save_path = os.path.join(REFERENCE_BASE_PATH, selected["name"])
-    if os.path.exists(save_path):
-        logger.info(f"Reference already cached: {selected['name']}")
-        return save_path
-
-    logger.info(f"Downloading reference: {selected['name']} …")
-    urllib.request.urlretrieve(selected["download_url"], save_path)
-    logger.info(f"Saved to: {save_path}")
-    return save_path
-
-
-def auto_select_reference(cancer_type: str, user_reference=None) -> str:
-    if user_reference:
-        if not os.path.exists(user_reference):
-            raise FileNotFoundError(f"Provided reference not found: {user_reference}")
-        return user_reference
-    return download_tabula_reference(cancer_type)
-
-
-# ---------------------------------------------------------------------------
-# Detect cancer type stored by Module 1
-# ---------------------------------------------------------------------------
-
-def detect_cancer_type_from_h5ad(h5ad_file: str) -> str:
-    adata = sc.read_h5ad(h5ad_file)
-    if "cancer_type" in adata.uns:
-        ct = adata.uns["cancer_type"]
-        logger.info(f"Detected cancer type from h5ad: {ct}")
-        return ct
-    raise ValueError(
-        "Could not detect cancer type from h5ad .uns['cancer_type'].\n"
-        "Provide user_reference manually via auto_run_popv(user_reference=…)."
-    )
-
-
-# ---------------------------------------------------------------------------
-# Data-type helpers
-# ---------------------------------------------------------------------------
-
-def _fix_obs_dtypes(adata):
-    for col in adata.obs.columns:
-        if str(adata.obs[col].dtype) == "category":
-            adata.obs[col] = adata.obs[col].astype(str)
-
-
-def _clean_obs_for_h5ad(adata):
-    for col in adata.obs.columns:
-        if adata.obs[col].dtype == object:
-            adata.obs[col] = adata.obs[col].astype(str)
-
-
-def _force_float32(adata):
-    if sp.issparse(adata.X):
-        adata.X = adata.X.tocsr().astype(np.float32)
-    else:
-        adata.X = np.asarray(adata.X, dtype=np.float32)
-
-
-def _validate_raw_counts(adata, context=""):
+def make_celltype_to_cell_ontology_id_dict(obo_file: str):
     """
-    Verify that adata.X contains non-negative values consistent with raw
-    integer counts.  Raises ValueError if the data appears to be
-    log-normalised (contains negatives, or mean < 2 with no negatives —
-    characteristic of log1p-normalised data).
+    Parse cl.obo with obonet (same as notebook).
 
-    SCART requires raw counts because scMalignantFinder and SCEVAN both
-    perform their own internal normalisation.
+    Returns
+    -------
+    name2id : dict  {cell type name → CL:xxxxxxx}
+    id2name : dict  {CL:xxxxxxx → cell type name}
     """
-    tag = f"[{context}] " if context else ""
+    logger.info(f"Parsing OBO: {obo_file}")
+    with open(obo_file, "r") as f:
+        co = obonet.read_obo(f)
 
-    X = adata.X
-    if sp.issparse(X):
-        X_sample = X.data[:10000] if X.nnz > 0 else np.array([0.0])
-    else:
-        X_sample = X.ravel()[:10000]
+    id2name = {
+        id_: data.get("name")
+        for id_, data in co.nodes(data=True)
+        if "CL:" in id_
+    }
+    id2name = {k: v for k, v in id2name.items() if v is not None}
+    name2id = {v: k for k, v in id2name.items()}
 
-    X_sample      = np.array(X_sample, dtype=np.float64)
-    has_negatives = bool(np.any(X_sample < 0))
-    mean_val      = float(np.mean(X_sample))
-    looks_lognorm = (not has_negatives) and (mean_val < 2.0) and (mean_val > 0)
-
-    if has_negatives:
-        raise ValueError(
-            f"{tag}adata.X contains negative values — this cannot be raw counts.\n"
-            "SCART requires raw integer counts (from GEO or your own h5ad).\n"
-            "Do NOT pass log-normalised or z-scored data.\n"
-            "Ensure layers['counts'] in your h5ad contains the original "
-            "integer count matrix from the sequencing platform."
-        )
-
-    if looks_lognorm:
-        raise ValueError(
-            f"{tag}adata.X has mean {mean_val:.4f} — this looks like "
-            "log-normalised data, not raw counts.\n"
-            "SCART requires raw integer counts for scMalignantFinder and SCEVAN.\n"
-            "If your h5ad was preprocessed, ensure layers['counts'] contains "
-            "the original integer matrix and re-run Module 1 so it can be "
-            "extracted correctly.\n"
-            "Do NOT pass log1p-normalised data to this pipeline."
-        )
-
-    logger.info(
-        f"{tag}Raw count validation passed — "
-        f"mean={mean_val:.2f}, no negatives, looks like integer counts."
-    )
+    logger.info(f"OBO loaded: {len(name2id):,} cell type labels.")
+    return name2id, id2name
 
 
-def _set_raw_input_matrix(adata):
+def _resolve_obo_file() -> str:
     """
-    Route raw counts into .X.
-
-    Priority:
-      1. layers['counts']     — written by Module 1 (preferred)
-      2. layers['raw_counts'] — accepted as fallback
-      3. adata.X              — assumed raw if no layer present
-
-    SCART requires raw counts only.  log1p mode has been removed.
+    Locate cl.obo from SCART bundle or popv package directory.
+    Returns path to the OBO FILE (not folder).
     """
-    if "counts" in adata.layers:
-        logger.info("Using layers['counts'] as raw input for .X.")
-        adata.layers["raw_counts"] = adata.layers["counts"].copy()
-        adata.X = adata.layers["raw_counts"]
-    elif "raw_counts" in adata.layers:
-        logger.info("Using existing layers['raw_counts'] for .X.")
-        adata.X = adata.layers["raw_counts"].copy()
-    else:
-        logger.info(
-            "No counts layer found — assuming adata.X already contains raw counts."
-        )
+    import importlib.resources as pkg_resources
 
-
-# ---------------------------------------------------------------------------
-# FIX 1 — case normalisation
-# ---------------------------------------------------------------------------
-
-def _build_label_map_from_obo(cl_obo_folder: str):
-    obo_candidates = ["cl.obo", "cl_popv.obo"]
-    obo_path = None
-    for fname in obo_candidates:
-        p = os.path.join(cl_obo_folder.rstrip("/"), fname)
-        if os.path.exists(p):
-            obo_path = p
-            break
-
-    if obo_path is None:
-        logger.warning(
-            f"cl.obo not found in {cl_obo_folder}. "
-            "Label normalisation and ontology ID sync will be skipped."
-        )
-        return {}, {}
-
-    logger.info(f"Building label map from OBO: {obo_path}")
-
-    label_map   = {}
-    label_to_id = {}
-    current_id  = None
-    current_lbl = None
-
-    with open(obo_path, encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            line = line.rstrip()
-            if line == "[Term]":
-                current_id  = None
-                current_lbl = None
-            elif line.startswith("id: CL:"):
-                current_id = line[4:].strip()
-            elif line.startswith("name: "):
-                current_lbl = line[6:].strip()
-            elif line == "" and current_id and current_lbl:
-                label_map[current_lbl.lower()] = current_lbl
-                label_to_id[current_lbl]       = current_id
-                current_id  = None
-                current_lbl = None
-
-    if current_id and current_lbl:
-        label_map[current_lbl.lower()] = current_lbl
-        label_to_id[current_lbl]       = current_id
-
-    logger.info(f"OBO parsed: {len(label_map):,} CL labels loaded.")
-    return label_map, label_to_id
-
-
-def _normalise_predictions(adata, label_map: dict):
-    pred_cols = [c for c in adata.obs.columns if c.endswith("_prediction")]
-    for col in pred_cols:
-        adata.obs[col] = (
-            adata.obs[col]
-            .astype(str)
-            .str.lower()
-            .map(lambda v: label_map.get(v, v))
-        )
-
-
-# ---------------------------------------------------------------------------
-# FIX 2 — resolve ontology folder (cl.obo for popv 0.4.2)
-# ---------------------------------------------------------------------------
-
-def _resolve_ontology_folder() -> str:
     obo_filenames = ["cl.obo", "cl_popv.obo"]
 
     candidate_packages = [
@@ -432,823 +109,984 @@ def _resolve_ontology_folder() -> str:
                 f = pkg_resources.files(pkg).joinpath(fname)
                 with pkg_resources.as_file(f) as p:
                     if p.exists():
-                        logger.info(f"Ontology (OBO) found via importlib ({pkg}): {p}")
-                        return str(p.parent) + "/"
-            except (ModuleNotFoundError, FileNotFoundError, TypeError, ValueError):
+                        logger.info(f"OBO found via importlib ({pkg}): {p}")
+                        return str(p)
+            except Exception:
                 continue
 
     walk_roots = []
-    try:
-        import SCART as _scart_pkg
-        walk_roots.append(os.path.dirname(_scart_pkg.__file__))
-    except ImportError:
-        pass
-    try:
-        import popv as _popv_pkg
-        walk_roots.append(os.path.dirname(_popv_pkg.__file__))
-    except ImportError:
-        pass
+    for pkg_name in ("SCART", "popv"):
+        try:
+            mod = __import__(pkg_name)
+            walk_roots.append(os.path.dirname(mod.__file__))
+        except ImportError:
+            pass
 
-    for pkg_root in walk_roots:
-        for root, _, fnames in os.walk(pkg_root):
+    for root_dir in walk_roots:
+        for dirpath, _, fnames in os.walk(root_dir):
             for fname in fnames:
                 if fname in obo_filenames:
-                    logger.info(
-                        f"Ontology (OBO) found via filesystem walk: "
-                        f"{os.path.join(root, fname)}"
-                    )
-                    return root + "/"
+                    full = os.path.join(dirpath, fname)
+                    logger.info(f"OBO found via filesystem walk: {full}")
+                    return full
 
     raise FileNotFoundError(
         "Could not locate cl.obo.\n"
-        "Expected location: SCART/PopV/resources/ontology/cl.obo\n"
-        "or inside the popv package directory.\n"
-        "Check that the SCART / popv 0.4.2 package is installed correctly."
+        "Expected at: SCART/PopV/resources/ontology/cl.obo\n"
+        "or inside the popv package directory."
     )
 
 
 # ---------------------------------------------------------------------------
-# FIX 3 — harmony batch guard
+# 2. Reference label normalisation — matches notebook corrections exactly,
+#    then extends generically via OBO lookup for any unseen label
 # ---------------------------------------------------------------------------
 
-def _check_batch_annotation(adata):
-    col = "_batch_annotation"
-    if col not in adata.obs.columns:
+# Exact replacements the notebook applies (kept verbatim)
+_NOTEBOOK_FIXES = {
+    "b cell":                        "B cell",
+    "cd4-positive, alpha-beta t cell": "CD4-positive, alpha-beta T cell",
+    "cd8-positive, alpha-beta t cell": "CD8-positive, alpha-beta T cell",
+    "mature nk t cell":              "mature NK T cell",
+    "t cell":                        "T cell",
+    "follicle":                      "follicle cell of egg chamber",
+}
+
+
+def _normalise_ref_labels(adata_ref: anndata.AnnData,
+                           label_col: str,
+                           name2id: dict) -> anndata.AnnData:
+    """
+    1. Apply the notebook's hardcoded fixes.
+    2. For any label still missing from the ontology, attempt a
+       case-insensitive OBO lookup.
+    3. Drop cells whose label still cannot be found (would cause
+       NetworkXError in PopV's KNN label propagation).
+    """
+    col = adata_ref.obs[label_col].astype(str).copy()
+
+    # Step 1 — notebook exact replacements
+    for wrong, right in _NOTEBOOK_FIXES.items():
+        col = col.replace(wrong, right)
+
+    # Step 2 — generic case-insensitive OBO lookup for anything still missing
+    lower2canonical = {k.lower(): k for k in name2id}
+    def _fix(v):
+        if v in name2id:
+            return v
+        return lower2canonical.get(v.lower(), v)
+    col = col.map(_fix)
+
+    adata_ref.obs[label_col] = col
+
+    # Step 3 — drop cells with labels not in ontology (same logic as before)
+    valid   = set(name2id.keys())
+    mask    = adata_ref.obs[label_col].isin(valid)
+    n_drop  = (~mask).sum()
+    if n_drop > 0:
+        bad = adata_ref.obs.loc[~mask, label_col].unique().tolist()
         logger.warning(
-            f"'{col}' not in adata.obs — KNN_HARMONY may fail. "
-            "Check that Process_Query ran correctly."
+            f"Dropping {n_drop} reference cells — labels not in OBO: {bad}"
         )
-        return
+        adata_ref = adata_ref[mask].copy()
 
-    unique_vals = adata.obs[col].unique()
-    logger.info(f"'{col}' unique values: {unique_vals}")
-
-    if len(unique_vals) < 2:
-        logger.warning(
-            f"'{col}' has only 1 unique value ({unique_vals}). "
-            "KNN_HARMONY will fail with a shape mismatch. "
-            "It will be skipped automatically."
-        )
-
-
-# ---------------------------------------------------------------------------
-# FIX 7 — extract query cells from the combined AnnData after PopV
-# ---------------------------------------------------------------------------
-
-def _extract_query_cells(adata_processed, adata_query_original):
-    if "_dataset" in adata_processed.obs.columns:
-        query_mask = adata_processed.obs["_dataset"] == "query"
-        n_query = query_mask.sum()
-        logger.info(
-            f"_extract_query_cells: '_dataset' found — "
-            f"extracting {n_query} query cells out of {adata_processed.n_obs} total."
-        )
-        if n_query > 0:
-            return adata_processed[query_mask].copy()
-        logger.warning("'_dataset' == 'query' matched 0 cells; trying fallback.")
-
-    original_names = set(adata_query_original.obs_names)
-    mask_by_name   = adata_processed.obs_names.isin(original_names)
-    n_matched      = mask_by_name.sum()
-    if n_matched > 0:
-        logger.info(f"_extract_query_cells: matched {n_matched} cells by obs_names.")
-        return adata_processed[mask_by_name].copy()
-
-    if "_reference_labels_annotation" in adata_processed.obs.columns:
-        mask_nan = adata_processed.obs["_reference_labels_annotation"].isna()
-        n_nan    = mask_nan.sum()
-        logger.warning(f"_extract_query_cells: NaN proxy — {n_nan} cells assumed query.")
-        if n_nan > 0:
-            return adata_processed[mask_nan].copy()
-
-    logger.error(
-        "Could not identify query cells — returning full combined object. "
-        "Output will contain reference cells too."
+    logger.info(
+        f"Reference labels normalised — {adata_ref.n_obs} cells, "
+        f"{adata_ref.obs[label_col].nunique()} unique labels."
     )
-    return adata_processed
+    return adata_ref
 
 
-def _drop_reference_only_columns(adata):
-    tabula_ref_cols = {
-        "donor", "tissue", "anatomical_position", "method", "cdna_plate",
-        "library_plate", "notes", "cdna_well", "old_index", "assay",
-        "sample_id", "replicate", "10X_run", "10X_barcode", "ambient_removal",
-        "donor_method", "donor_assay", "donor_tissue", "donor_tissue_assay",
-        "cell_ontology_class", "cell_ontology_id", "compartment",
-        "broad_cell_class", "free_annotation", "manually_annotated",
-        "published_2022", "n_genes_by_counts", "total_counts", "total_counts_mt",
-        "pct_counts_mt", "total_counts_ercc", "pct_counts_ercc",
-        "_scvi_batch", "_scvi_labels", "scvi_leiden_donorassay_full",
-        "age", "sex", "ethnicity", "scvi_leiden_res05_tissue", "sample_number",
-    }
+# ---------------------------------------------------------------------------
+# 3. Reference var index — notebook sets it to gene_symbol if present
+# ---------------------------------------------------------------------------
 
-    cols_to_drop = [c for c in adata.obs.columns if c in tabula_ref_cols]
-    if cols_to_drop:
-        logger.info(f"Dropping {len(cols_to_drop)} Tabula reference columns.")
-        adata.obs = adata.obs.drop(columns=cols_to_drop)
+def _set_ref_var_index(adata_ref: anndata.AnnData) -> anndata.AnnData:
+    """
+    Mirror notebook:  ref_adata.var.index = ref_adata.var['gene_symbol']
+    Falls back gracefully if the column is absent.
+    """
+    if "gene_symbol" in adata_ref.var.columns:
+        logger.info("Setting ref var index to 'gene_symbol' (notebook step).")
+        adata_ref.var.index = adata_ref.var["gene_symbol"]
+    elif "feature_name" in adata_ref.var.columns:
+        logger.info("Setting ref var index to 'feature_name'.")
+        adata_ref.var.index = adata_ref.var["feature_name"]
+    else:
+        logger.info("No gene_symbol / feature_name column — keeping existing var index.")
+
+    # Ensure string index and uniqueness (notebook does var_names_make_unique)
+    adata_ref.var.index = pd.Index(adata_ref.var.index.astype(str))
+    adata_ref.var_names_make_unique()
+    return adata_ref
+
+
+# ---------------------------------------------------------------------------
+# 4. Raw count routing — same as notebook's explicit layer checks
+# ---------------------------------------------------------------------------
+
+def _set_raw_counts_in_X(adata: anndata.AnnData, label: str = "") -> anndata.AnnData:
+    """
+    Put raw integer counts into .X, checking layers in priority order.
+    Mirrors notebook logic:
+      ref: X = layers['raw_counts'].copy()
+      query: X = layers['counts'].copy()
+    """
+    tag = f"[{label}] " if label else ""
+
+    if "counts" in adata.layers:
+        logger.info(f"{tag}Using layers['counts'] → .X")
+        adata.X = adata.layers["counts"].copy()
+    elif "raw_counts" in adata.layers:
+        logger.info(f"{tag}Using layers['raw_counts'] → .X")
+        adata.X = adata.layers["raw_counts"].copy()
+    elif "decontXcounts" in adata.layers:
+        logger.info(f"{tag}Using layers['decontXcounts'] → .X")
+        adata.X = adata.layers["decontXcounts"].copy()
+    else:
+        logger.info(f"{tag}No count layer found — assuming .X already contains raw counts.")
+
+    # Ensure float32 sparse (PopV requirement)
+    if sp.issparse(adata.X):
+        adata.X = adata.X.tocsr().astype(np.float32)
+    else:
+        adata.X = sp.csr_matrix(np.asarray(adata.X, dtype=np.float32))
+
     return adata
 
 
+def _validate_raw_counts(adata: anndata.AnnData, label: str = "") -> None:
+    tag = f"[{label}] " if label else ""
+    X = adata.X
+    sample = np.array(
+        X.data[:10000] if sp.issparse(X) and X.nnz > 0 else X.ravel()[:10000],
+        dtype=np.float64,
+    )
+    if np.any(sample < 0):
+        raise ValueError(
+            f"{tag}.X contains negative values — not raw counts.\n"
+            "SCART requires raw integer counts."
+        )
+    mean_val = float(np.mean(sample))
+    if 0 < mean_val < 2.0:
+        raise ValueError(
+            f"{tag}.X mean={mean_val:.4f} — looks like log-normalised data.\n"
+            "SCART requires raw integer counts."
+        )
+    logger.info(f"{tag}Raw count validation passed (mean={mean_val:.2f}).")
+
+
 # ---------------------------------------------------------------------------
-# FIX 8 (REVISED) — preserve full-gene raw counts as layers['full_counts']
+# 5. Standardise reference layer names — notebook renames raw_counts → counts
+# ---------------------------------------------------------------------------
+
+def _standardise_ref_layers(adata_ref: anndata.AnnData) -> anndata.AnnData:
+    """
+    Notebook: ref_adata.layers['counts'] = ref_adata.layers['raw_counts'].copy()
+    Ensures downstream code always finds layers['counts'] on the reference.
+    """
+    if "counts" not in adata_ref.layers:
+        if "raw_counts" in adata_ref.layers:
+            logger.info("Reference: renaming layers['raw_counts'] → layers['counts'].")
+            adata_ref.layers["counts"] = adata_ref.layers["raw_counts"].copy()
+        elif "decontXcounts" in adata_ref.layers:
+            logger.info("Reference: copying layers['decontXcounts'] → layers['counts'].")
+            adata_ref.layers["counts"] = adata_ref.layers["decontXcounts"].copy()
+    return adata_ref
+
+
+# ---------------------------------------------------------------------------
+# 6. Prefix reference obs columns — notebook renames all to 'ref_*'
+# ---------------------------------------------------------------------------
+
+def _prefix_ref_obs_columns(adata_ref: anndata.AnnData) -> tuple:
+    """
+    Mirror notebook:
+        ref_adata.obs.columns = [f'ref_{col}' for col in ref_adata.obs.columns]
+
+    Returns (adata_ref, ref_labels_key) where ref_labels_key is the
+    post-prefix column name used as the PopV label key.
+    """
+    new_cols = {c: f"ref_{c}" for c in adata_ref.obs.columns
+                if not c.startswith("ref_")}
+    if new_cols:
+        logger.info(f"Prefixing {len(new_cols)} reference obs columns with 'ref_'.")
+        adata_ref.obs = adata_ref.obs.rename(columns=new_cols)
+
+    # Determine correct label column name after prefixing
+    ref_labels_key = None
+    for candidate in ("ref_cell_ontology_class", "cell_ontology_class"):
+        if candidate in adata_ref.obs.columns:
+            ref_labels_key = candidate
+            break
+    if ref_labels_key is None:
+        raise ValueError(
+            "Cannot find 'cell_ontology_class' (or 'ref_cell_ontology_class') "
+            "in reference obs after column prefixing.\n"
+            f"Available columns: {list(adata_ref.obs.columns)}"
+        )
+
+    logger.info(f"Reference label key: '{ref_labels_key}'")
+    return adata_ref, ref_labels_key
+
+
+# ---------------------------------------------------------------------------
+# 7. Auto-detect query batch key — notebook uses 'sample'
+# ---------------------------------------------------------------------------
+
+_BATCH_KEY_CANDIDATES = ["sample", "batch", "Sample", "Batch", "patient",
+                          "donor", "library", "Run", "run"]
+
+
+def _detect_query_batch_key(adata_query: anndata.AnnData) -> str | None:
+    for key in _BATCH_KEY_CANDIDATES:
+        if key in adata_query.obs.columns:
+            n_unique = adata_query.obs[key].nunique()
+            if n_unique >= 2:
+                logger.info(
+                    f"query_batch_key auto-detected: '{key}' "
+                    f"({n_unique} unique values)."
+                )
+                return key
+    logger.warning(
+        "No suitable query_batch_key found — running without batch correction. "
+        f"Checked: {_BATCH_KEY_CANDIDATES}"
+    )
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 8. Layer alignment — notebook adds placeholder layers to query so it
+#    matches reference layer structure before concatenation
+# ---------------------------------------------------------------------------
+
+def _align_query_layers_to_ref(adata_query: anndata.AnnData,
+                                 adata_ref:   anndata.AnnData) -> anndata.AnnData:
+    """
+    Notebook:
+        layer_keys_to_add = ['decontXcounts', 'scale_data', 'log_normalized']
+        for layer in layer_keys_to_add:
+            if layer not in query_adata.layers:
+                query_adata.layers[layer] = sp.csr_matrix(zeros)
+
+    Generalised: add any layer present in ref but missing from query as zeros.
+    """
+    ref_layer_keys = list(adata_ref.layers.keys())
+    added = []
+    for lk in ref_layer_keys:
+        if lk not in adata_query.layers:
+            adata_query.layers[lk] = sp.csr_matrix(
+                np.zeros((adata_query.n_obs, adata_query.n_vars), dtype=np.float32)
+            )
+            added.append(lk)
+    if added:
+        logger.info(
+            f"Layer alignment: added placeholder layers to query: {added}"
+        )
+    return adata_query
+
+
+# ---------------------------------------------------------------------------
+# 9. Full-gene count preservation (FIX 8 — layer sidecar for Module 3)
 # ---------------------------------------------------------------------------
 
 def _store_full_counts_layer(adata_query: anndata.AnnData) -> anndata.AnnData:
     if "full_counts" in adata_query.layers:
         logger.info(
-            "FIX 8: 'full_counts' already present "
-            f"({adata_query.n_vars} genes) — skipping."
+            f"'full_counts' already present ({adata_query.n_vars} genes) — skipping."
         )
         return adata_query
 
     logger.info(
-        f"FIX 8: Snapshotting {adata_query.n_vars} genes → "
-        "layers['full_counts'] before Process_Query."
+        f"Snapshotting {adata_query.n_vars} genes → layers['full_counts'] "
+        "before Process_Query."
     )
-
     X = adata_query.X
-    if sp.issparse(X):
-        adata_query.layers["full_counts"] = X.tocsr().copy()
-    else:
-        adata_query.layers["full_counts"] = sp.csr_matrix(
-            np.asarray(X, dtype=np.float32)
-        )
-
+    adata_query.layers["full_counts"] = (
+        X.tocsr().copy() if sp.issparse(X)
+        else sp.csr_matrix(np.asarray(X, dtype=np.float32))
+    )
     adata_query.uns["full_counts_var_names"] = list(adata_query.var_names)
-
     logger.info(
-        f"FIX 8: Snapshot done — "
-        f"layers['full_counts'].shape = {adata_query.layers['full_counts'].shape}, "
-        f"uns['full_counts_var_names'] has "
-        f"{len(adata_query.uns['full_counts_var_names'])} entries."
+        f"full_counts snapshot: {adata_query.layers['full_counts'].shape}, "
+        f"uns['full_counts_var_names']: {len(adata_query.uns['full_counts_var_names'])} genes."
     )
     return adata_query
 
 
-def _verify_full_counts_layer(adata_out: anndata.AnnData) -> None:
-    if "full_counts" in adata_out.layers:
-        n_genes = adata_out.layers["full_counts"].shape[1]
-        n_names = len(adata_out.uns.get("full_counts_var_names", []))
+# ---------------------------------------------------------------------------
+# 10. Query cell extraction — notebook approach (obs_names isin query_cells)
+# ---------------------------------------------------------------------------
+
+def _extract_query_cells(adata_processed:    anndata.AnnData,
+                          query_obs_names:    pd.Index) -> anndata.AnnData:
+    """
+    Notebook:
+        query_cells = query_adata.obs_names
+        adata = adata[adata.obs_names.isin(query_cells)]
+
+    Multi-fallback version for robustness across datasets.
+    """
+    # Primary: obs_names intersection (notebook method)
+    mask = adata_processed.obs_names.isin(query_obs_names)
+    n    = mask.sum()
+    if n > 0:
         logger.info(
-            f"FIX 8 VERIFIED: layers['full_counts'] present — "
-            f"{adata_out.n_obs} cells × {n_genes} genes, "
-            f"uns['full_counts_var_names'] has {n_names} entries. "
-            "Module 3 will use full gene space for scMalignantFinder."
+            f"Query extraction (obs_names isin): {n} / {adata_processed.n_obs} cells."
         )
-    else:
-        logger.error(
-            "FIX 8 FAILED: layers['full_counts'] MISSING from query output. "
-            "Process_Query may have dropped non-HVG layers. "
-            "Module 3 will fall back to 4000 HVGs (~19% overlap)."
-        )
+        return adata_processed[mask].copy()
+
+    # Fallback 1: _dataset column written by Process_Query
+    if "_dataset" in adata_processed.obs.columns:
+        mask2 = adata_processed.obs["_dataset"] == "query"
+        n2    = mask2.sum()
+        if n2 > 0:
+            logger.warning(
+                f"Query extraction fallback (_dataset=='query'): {n2} cells."
+            )
+            return adata_processed[mask2].copy()
+
+    # Fallback 2: NaN in reference label column
+    ref_col_candidates = [c for c in adata_processed.obs.columns
+                          if "reference_labels" in c or "ref_cell_ontology" in c]
+    for col in ref_col_candidates:
+        mask3 = adata_processed.obs[col].isna()
+        n3    = mask3.sum()
+        if n3 > 0:
+            logger.warning(
+                f"Query extraction fallback (NaN in '{col}'): {n3} cells."
+            )
+            return adata_processed[mask3].copy()
+
+    logger.error(
+        "Could not isolate query cells — returning full combined object. "
+        "Output may contain reference cells."
+    )
+    return adata_processed
 
 
 # ---------------------------------------------------------------------------
-# Core annotation runner
+# 11. Sidecar h5ad for Module 3 (full-gene space)
+# ---------------------------------------------------------------------------
+
+def _write_full_counts_sidecar(
+    adata_query_out:      anndata.AnnData,
+    query_obs_names_orig: pd.Index,
+    full_counts_mat:      sp.csr_matrix,
+    full_var_names:       list,
+    output_dir:           str,
+) -> str:
+    snap_idx  = {n: i for i, n in enumerate(query_obs_names_orig)}
+    out_obs   = list(adata_query_out.obs_names)
+    row_idx   = [snap_idx[n] for n in out_obs if n in snap_idx]
+
+    if len(row_idx) != adata_query_out.n_obs:
+        logger.error(
+            f"Sidecar: only {len(row_idx)}/{adata_query_out.n_obs} obs matched. "
+            "Writing partial sidecar."
+        )
+
+    fc_aligned = full_counts_mat.tocsr()[row_idx, :]
+    sidecar    = anndata.AnnData(
+        X   = fc_aligned,
+        obs = adata_query_out.obs.copy(),
+        var = pd.DataFrame(index=full_var_names),
+    )
+    for col in sidecar.obs.columns:
+        if sidecar.obs[col].dtype == object:
+            sidecar.obs[col] = sidecar.obs[col].astype(str)
+
+    path    = os.path.join(output_dir, "full_counts_for_module3.h5ad")
+    sidecar.write(path)
+    size_mb = os.path.getsize(path) / 1e6
+    logger.info(
+        f"Sidecar written → {path} "
+        f"({sidecar.n_obs} cells × {sidecar.n_vars} genes, {size_mb:.1f} MB)."
+    )
+    return path
+
+
+# ---------------------------------------------------------------------------
+# 12. Tabula Sapiens reference download (Figshare)
+# ---------------------------------------------------------------------------
+
+def fetch_tabula_file_metadata():
+    url = f"https://api.figshare.com/v2/articles/{FIGSHARE_ARTICLE_ID}/files"
+    logger.info("Fetching Tabula Sapiens file list from Figshare …")
+
+    session = requests.Session()
+    retry   = Retry(total=5, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+    session.mount("https://", HTTPAdapter(max_retries=retry))
+
+    resp = session.get(url, timeout=30, headers={"User-Agent": "curl/7.68.0"})
+    resp.raise_for_status()
+    return [f for f in resp.json() if f["name"].endswith(".h5ad")]
+
+
+def find_best_reference_file(cancer_type: str, files: list):
+    tissue = cancer_type.replace("_cancer", "").lower().replace("_", " ")
+    logger.info(f"Matching tissue keyword: '{tissue}'")
+    for f in files:
+        if f["name"].lower().startswith(tissue.replace(" ", "_")):
+            return f
+    for f in files:
+        if tissue in f["name"].lower():
+            return f
+    return None
+
+
+def download_tabula_reference(cancer_type: str) -> str:
+    files    = fetch_tabula_file_metadata()
+    selected = find_best_reference_file(cancer_type, files)
+    if selected is None:
+        raise ValueError(
+            f"Reference not found for '{cancer_type}' via Figshare API.\n"
+            f"Download manually from: {TABULA_DOI_LINK}\n"
+            "Then pass: user_reference='path_to_reference.h5ad'"
+        )
+    save_path = os.path.join(REFERENCE_BASE_PATH, selected["name"])
+    if os.path.exists(save_path):
+        logger.info(f"Reference already cached: {selected['name']}")
+        return save_path
+    logger.info(f"Downloading reference: {selected['name']} …")
+    urllib.request.urlretrieve(selected["download_url"], save_path)
+    logger.info(f"Saved to: {save_path}")
+    return save_path
+
+
+def auto_select_reference(cancer_type: str, user_reference: str = None) -> str:
+    if user_reference:
+        if not os.path.exists(user_reference):
+            raise FileNotFoundError(f"Reference not found: {user_reference}")
+        return user_reference
+    return download_tabula_reference(cancer_type)
+
+
+# ---------------------------------------------------------------------------
+# 13. Locate Module 1 output
+# ---------------------------------------------------------------------------
+
+def get_latest_tumor_h5ad(data_dir: str = "GSE_data") -> str:
+    patterns = ["*_tumor.h5ad", "combined_tumor.h5ad", "input_tumor.h5ad"]
+    files    = []
+    for path in [os.getcwd(), data_dir]:
+        for pat in patterns:
+            files.extend(glob.glob(os.path.join(path, pat)))
+    files = list(set(files))
+    if not files:
+        raise FileNotFoundError(
+            "No tumor h5ad found.\n"
+            "Expected: *_tumor.h5ad | combined_tumor.h5ad | input_tumor.h5ad\n"
+            "in current directory or GSE_data/"
+        )
+    return max(files, key=os.path.getctime)
+
+
+def detect_cancer_type_from_h5ad(h5ad_file: str) -> str:
+    adata = sc.read_h5ad(h5ad_file)
+    if "cancer_type" in adata.uns:
+        ct = adata.uns["cancer_type"]
+        logger.info(f"Detected cancer type: {ct}")
+        return ct
+    raise ValueError(
+        "Could not detect cancer type from h5ad .uns['cancer_type'].\n"
+        "Provide user_reference manually."
+    )
+
+
+# ---------------------------------------------------------------------------
+# 14. Tabula Sapiens reference obs: fix cell_ontology_id 'None' string
+# ---------------------------------------------------------------------------
+
+def _fix_cell_ontology_id(adata_ref: anndata.AnnData,
+                           id_col: str = "ref_cell_ontology_id") -> anndata.AnnData:
+    """
+    Notebook: ref_adata.obs['cell_ontology_id'].replace("None", "CL:0000477")
+    Applied after column prefixing.
+    """
+    # Try both prefixed and unprefixed column names
+    for col in (id_col, "cell_ontology_id"):
+        if col in adata_ref.obs.columns:
+            before = (adata_ref.obs[col].astype(str) == "None").sum()
+            if before > 0:
+                adata_ref.obs[col] = (
+                    adata_ref.obs[col].astype(str).replace("None", "CL:0000477")
+                )
+                logger.info(
+                    f"Fixed {before} 'None' entries in '{col}' → 'CL:0000477'."
+                )
+            break
+    return adata_ref
+
+
+# ---------------------------------------------------------------------------
+# 15. Drop Tabula Sapiens-specific columns from query output
+# ---------------------------------------------------------------------------
+
+_TABULA_REF_COLS = {
+    "donor", "tissue", "anatomical_position", "method", "cdna_plate",
+    "library_plate", "notes", "cdna_well", "old_index", "assay",
+    "sample_id", "replicate", "10X_run", "10X_barcode", "ambient_removal",
+    "donor_method", "donor_assay", "donor_tissue", "donor_tissue_assay",
+    "cell_ontology_class", "cell_ontology_id", "compartment",
+    "broad_cell_class", "free_annotation", "manually_annotated",
+    "published_2022", "n_genes_by_counts", "total_counts", "total_counts_mt",
+    "pct_counts_mt", "total_counts_ercc", "pct_counts_ercc",
+    "_scvi_batch", "_scvi_labels", "age", "sex", "ethnicity",
+}
+
+
+def _drop_reference_only_columns(adata: anndata.AnnData) -> anndata.AnnData:
+    drop = [c for c in adata.obs.columns
+            if c in _TABULA_REF_COLS or c.startswith("ref_")]
+    if drop:
+        logger.info(f"Dropping {len(drop)} reference metadata columns.")
+        adata.obs = adata.obs.drop(columns=drop)
+    return adata
+
+
+# ---------------------------------------------------------------------------
+# 16. Core annotation runner
 # ---------------------------------------------------------------------------
 
 def run_popv_annotation(
     adata_query,
     adata_ref,
-    output_dir: str,
-    n_samples_per_label: int = 300,
+    output_dir:             str  = "popv_results",
+    nsamples:               int  = 300,
     drop_reference_columns: bool = True,
-    n_jobs: int = 1,
-):
+    n_jobs:                 int  = 1,
+) -> anndata.AnnData:
     """
-    Run PopV (0.4.2) cell-type annotation and write results to output_dir.
+    Run PopV cell-type annotation following the logic of PopV_GSE173682.ipynb.
 
-    SCART requires raw (integer) counts.  log1p mode has been removed.
-    Both scMalignantFinder and SCEVAN in Module 3 need true raw counts
-    for correct normalisation and CNV inference.
+    Works for any GSE / cancer type — all dataset-specific steps (batch key
+    detection, n_samples_per_label, gene symbol index, layer alignment) are
+    handled automatically.
 
     Parameters
     ----------
     adata_query : AnnData
-        Query dataset (tumor cells from Module 1).
-        Must contain raw integer counts in layers['counts'] or adata.X.
+        Tumor query cells from Module 1.  Must contain raw counts in
+        layers['counts'] or adata.X.
     adata_ref : AnnData
-        Tabula Sapiens tissue reference (always has raw counts).
+        Tabula Sapiens tissue reference.
     output_dir : str
-        Directory where final_popv_annotated.h5ad is written.
-    n_samples_per_label : int
-        Cells sampled per label during reference subsampling.
-    n_jobs : int
-        CPU cores for parallelisable methods. -1 = all cores.
+        Where to write final_popv_annotated.h5ad and sidecar.
+    nsamples : int
+        Minimum cells per label (floor).  Actual value =
+        max(min_celltype_size, nsamples) — matches notebook.
     drop_reference_columns : bool
         Remove Tabula Sapiens metadata columns from output.
+    n_jobs : int
+        CPU threads (-1 = all cores).
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    adata_query_snapshot = adata_query.copy()
+    # ── Resolve OBO file ────────────────────────────────────────────────────
+    obo_file      = _resolve_obo_file()
+    cl_obo_folder = os.path.dirname(obo_file) + "/"
+    name2id, _    = make_celltype_to_cell_ontology_id_dict(obo_file)
 
-    _fix_obs_dtypes(adata_query)
-    _fix_obs_dtypes(adata_ref)
+    # ── Snapshot original query obs_names for later extraction ──────────────
+    query_obs_names_orig = adata_query.obs_names.copy()
 
-    # Route raw counts into .X (layers['counts'] → layers['raw_counts'] → .X)
-    _set_raw_input_matrix(adata_query)
-    _set_raw_input_matrix(adata_ref)
+    # ── Step 1: set gene symbol index on reference (notebook step) ──────────
+    adata_ref = _set_ref_var_index(adata_ref)
 
-    _force_float32(adata_query)
-    _force_float32(adata_ref)
+    # ── Step 2: route raw counts into .X ────────────────────────────────────
+    adata_query = _set_raw_counts_in_X(adata_query, label="query")
+    adata_ref   = _set_raw_counts_in_X(adata_ref,   label="reference")
 
-    # Validate raw counts — raises ValueError if log-normalised data detected
-    _validate_raw_counts(adata_query, context="query")
+    _validate_raw_counts(adata_query, label="query")
 
-    adata_query.raw = None
-    adata_ref.raw   = None
+    # ── Step 3: normalise reference labels using OBO + notebook fixes ────────
+    # Must happen BEFORE column prefixing (label col is still 'cell_ontology_class')
+    if "cell_ontology_class" in adata_ref.obs.columns:
+        adata_ref = _normalise_ref_labels(adata_ref, "cell_ontology_class", name2id)
+    else:
+        logger.warning("'cell_ontology_class' not found in ref obs — skipping label normalisation.")
 
-    cl_obo_folder = _resolve_ontology_folder()
-    logger.info(f"cl_obo_folder: {cl_obo_folder}")
+    # ── Step 4: standardise reference layer names ────────────────────────────
+    adata_ref = _standardise_ref_layers(adata_ref)
 
-    label_map, label_to_id = _build_label_map_from_obo(cl_obo_folder)
-    logger.info(f"Loaded {len(label_map):,} ontology labels.")
+    # ── Step 5: prefix reference obs columns → 'ref_*' (notebook step) ──────
+    adata_ref, ref_labels_key = _prefix_ref_obs_columns(adata_ref)
 
-    _ref_label_col = "cell_ontology_class"
-    if _ref_label_col in adata_ref.obs.columns and label_map:
-        adata_ref.obs[_ref_label_col] = (
-            adata_ref.obs[_ref_label_col]
-            .astype(str)
-            .str.lower()
-            .map(lambda v: label_map.get(v, v))
-        )
-        valid_labels = set(label_to_id.keys())
-        mask_valid   = adata_ref.obs[_ref_label_col].isin(valid_labels)
-        n_before     = adata_ref.n_obs
-        n_dropped    = (~mask_valid).sum()
-        if n_dropped > 0:
-            dropped_labels = (
-                adata_ref.obs.loc[~mask_valid, _ref_label_col].unique().tolist()
-            )
-            logger.warning(
-                f"Dropping {n_dropped} reference cells with labels not in "
-                f"CL ontology digraph: {dropped_labels}. "
-                "These would cause NetworkXError during KNN label propagation."
-            )
-            adata_ref = adata_ref[mask_valid].copy()
-        logger.info(
-            f"Reference labels normalised — "
-            f"{n_before} → {adata_ref.n_obs} cells, "
-            f"{adata_ref.obs[_ref_label_col].nunique()} unique labels."
-        )
+    # ── Step 6: fix 'None' cell_ontology_id strings (notebook step) ─────────
+    adata_ref = _fix_cell_ontology_id(adata_ref)
 
-    adata_query = _store_full_counts_layer(adata_query)
+    # ── Step 7: make obs/var names unique (notebook step) ───────────────────
+    adata_query.obs_names_make_unique()
+    adata_ref.obs_names_make_unique()
+    adata_query.var_names_make_unique()
+    adata_ref.var_names_make_unique()
 
-    _ref_layer_info   = list(adata_ref.layers.keys())
-    _query_layer_info = list(adata_query.layers.keys())
-    if _ref_layer_info:
-        logger.info(f"Reference layers present (will be cleared): {_ref_layer_info}")
-    if _query_layer_info:
-        logger.info(f"Query layers present (full_counts/raw_counts will be saved): {_query_layer_info}")
+    # ── Step 8: auto-detect query batch key (notebook uses 'sample') ─────────
+    query_batch_key = _detect_query_batch_key(adata_query)
 
-    query_genes  = set(adata_query.var_names)
-    ref_genes    = set(adata_ref.var_names)
-    common_genes = sorted(query_genes & ref_genes)
+    # ── Step 9: compute n_samples_per_label dynamically (notebook formula) ───
+    min_celltype_size  = int(
+        adata_ref.obs.groupby(ref_labels_key).size().min()
+    )
+    n_samples_per_label = int(np.max([min_celltype_size, nsamples]))
+    logger.info(
+        f"n_samples_per_label = max({min_celltype_size}, {nsamples}) "
+        f"= {n_samples_per_label}"
+    )
 
+    # ── Step 10: check common genes ─────────────────────────────────────────
+    common_genes = sorted(
+        set(adata_query.var_names) & set(adata_ref.var_names)
+    )
+    logger.info(
+        f"Common genes: query {adata_query.n_vars}, "
+        f"ref {adata_ref.n_vars} → {len(common_genes)} shared."
+    )
     if len(common_genes) == 0:
         raise ValueError(
             "Query and reference share 0 genes. "
-            "Check that both datasets use the same gene identifier (Ensembl ID vs symbol)."
+            "Check that both use the same gene identifier (symbol vs Ensembl ID)."
         )
 
-    n_query_genes = adata_query.n_vars
-    n_ref_genes   = adata_ref.n_vars
+    # ── Step 11: snapshot full-gene counts BEFORE any subsetting ────────────
+    adata_query = _store_full_counts_layer(adata_query)
+    _full_counts_stash    = adata_query.layers["full_counts"].copy()
+    _full_var_names_stash = list(adata_query.uns["full_counts_var_names"])
 
-    _full_counts_stash    = None
-    _full_var_names_stash = None
-    _raw_counts_stash     = None
+    # ── Step 12: layer alignment — add placeholder layers to query ───────────
+    adata_query = _align_query_layers_to_ref(adata_query, adata_ref)
 
-    if len(common_genes) < n_query_genes or len(common_genes) < n_ref_genes:
-        logger.info(
-            f"Gene-space alignment: "
-            f"query {n_query_genes} genes, ref {n_ref_genes} genes → "
-            f"{len(common_genes)} common genes (intersection)."
-        )
+    # ── Step 13: clear raw from both (PopV manages its own raw internally) ───
+    adata_query.raw = None
+    adata_ref.raw   = None
 
-        _full_counts_stash    = adata_query.layers.pop("full_counts", None)
-        _full_var_names_stash = adata_query.uns.pop("full_counts_var_names", None)
-        _raw_counts_stash     = adata_query.layers.pop("raw_counts", None)
-
-        adata_query = adata_query[:, common_genes].copy()
-        adata_ref   = adata_ref[:, common_genes].copy()
-
-        if _raw_counts_stash is not None:
-            query_gene_list = list(adata_query_snapshot.var_names)
-            gene_to_idx     = {g: i for i, g in enumerate(query_gene_list)}
-            common_idx      = [gene_to_idx[g] for g in common_genes if g in gene_to_idx]
-            if sp.issparse(_raw_counts_stash):
-                adata_query.layers["raw_counts"] = (
-                    _raw_counts_stash[:, common_idx].tocsr().astype(np.float32)
-                )
-            else:
-                adata_query.layers["raw_counts"] = np.asarray(
-                    _raw_counts_stash[:, common_idx], dtype=np.float32
-                )
-            logger.info(
-                f"Gene-space alignment: raw_counts subsetted to "
-                f"{len(common_idx)} common genes."
-            )
-    else:
-        logger.info(
-            f"Gene-space alignment: query and reference already share "
-            f"all {len(common_genes)} genes — no subsetting needed."
-        )
-
-    _saved_full_counts    = (
-        adata_query.layers.pop("full_counts", None) or _full_counts_stash
-    )
-    _saved_full_var_names = (
-        adata_query.uns.pop("full_counts_var_names", None) or _full_var_names_stash
-    )
-    _saved_raw_counts = adata_query.layers.pop("raw_counts", None)
-
-    for lk in list(adata_query.layers.keys()):
-        del adata_query.layers[lk]
-    for lk in list(adata_ref.layers.keys()):
-        del adata_ref.layers[lk]
-
-    logger.info(
-        f"Layers cleared before Process_Query. "
-        f"full_counts saved: {_saved_full_counts is not None} "
-        f"({_saved_full_counts.shape[1] if _saved_full_counts is not None else 0} genes), "
-        f"raw_counts saved: {_saved_raw_counts is not None}."
-    )
-
-    pq = Process_Query(
-        query_adata=adata_query,
-        ref_adata=adata_ref,
-        ref_labels_key="cell_ontology_class",
-        ref_batch_key=None,
-        cl_obo_folder=cl_obo_folder,
-        n_samples_per_label=n_samples_per_label,
-    )
-    adata_processed = pq.adata
-
-    if "full_counts" in adata_processed.layers:
-        logger.info(
-            f"FIX 8: 'full_counts' survived Process_Query — "
-            f"combined shape {adata_processed.shape}"
-        )
-    else:
-        logger.error(
-            "FIX 8: 'full_counts' DROPPED by Process_Query — "
-            "Module 3 will fall back to 4000 HVGs."
-        )
-
-    _check_batch_annotation(adata_processed)
-
-    _POPV_PSEUDO_BATCHES = {"unknown", "unknown_query"}
-    _batch_vals = set()
-    if "_batch_annotation" in adata_processed.obs.columns:
-        _batch_vals = set(adata_processed.obs["_batch_annotation"].unique())
-
-    has_real_batches = bool(_batch_vals - _POPV_PSEUDO_BATCHES)
-
-    if not has_real_batches and _batch_vals:
-        logger.warning(
-            f"'_batch_annotation' only contains popv pseudo-labels "
-            f"{_batch_vals} — no real batch signal. "
-            "KNN_HARMONY will be skipped to avoid infinite convergence loop."
-        )
-
-    has_two_batches = has_real_batches
-
-    def _patch_onclass(label_to_id_map):
-        import contextlib
-
-        @contextlib.contextmanager
-        def _ctx():
-            candidates = [
-                ("onclass_utils", "cell_type_nlp_network", "cell_type_nlp"),
-                ("onclass_utils", "cell_ontology_graph",   "name2id"),
-            ]
-            patched = []
-            for mod_name, obj_attr, dict_attr in candidates:
-                try:
-                    import importlib as _il
-                    mod = _il.import_module(mod_name)
-                    obj = getattr(mod, obj_attr, None)
-                    if obj is None:
-                        continue
-                    d = getattr(obj, dict_attr, None)
-                    if not isinstance(d, dict):
-                        continue
-                    missing = {k: v for k, v in label_to_id_map.items() if k not in d}
-                    if missing:
-                        logger.info(
-                            f"ONCLASS patch: injecting {len(missing)} entries into "
-                            f"{mod_name}.{obj_attr}.{dict_attr}"
-                        )
-                        d.update(missing)
-                        patched.append((d, missing))
-                except Exception:
-                    continue
-            yield
-            for d, added in patched:
-                for k in added:
-                    d.pop(k, None)
-
-        return _ctx()
-
-    method_map = _discover_popv_methods()
-
+    # ── Step 14: parallelism ─────────────────────────────────────────────────
     import os as _os
-    _n_jobs_str = str(n_jobs if n_jobs > 0 else _os.cpu_count())
-    _os.environ['OMP_NUM_THREADS']      = _n_jobs_str
-    _os.environ['OPENBLAS_NUM_THREADS'] = _n_jobs_str
-    _os.environ['MKL_NUM_THREADS']      = _n_jobs_str
-    logger.info(f'Parallelism: n_jobs={n_jobs}')
+    n_threads = str(n_jobs if n_jobs > 0 else (_os.cpu_count() or 1))
+    for env_var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+        _os.environ[env_var] = n_threads
+    try:
+        popv.Config.num_threads = int(n_threads)
+    except Exception:
+        pass
+    logger.info(f"Parallelism: n_jobs={n_jobs} ({n_threads} threads).")
 
-    def _run_method_safe(adata, canonical, actual):
-        if actual in _ONCLASS_ALIASES or canonical in _ONCLASS_ALIASES:
-            with _patch_onclass(label_to_id):
-                annotate_data(adata, methods=[actual])
-        else:
-            annotate_data(adata, methods=[actual])
+    # ── Step 15: Process_Query ───────────────────────────────────────────────
+    # Mirrors notebook arguments exactly; only omits args removed in popv 0.4.2
+    logger.info("Running Process_Query …")
 
-    # All methods always run — raw counts are required and always present
-    run_order = [
-        "CELLTYPIST",
-        "KNN_BBKNN",
-        "KNN_SCANORAMA",
-        "KNN_SCVI",
-        "RANDOM_FOREST",
-        "SVM",
-        "ONCLASS",
-        "SCANVI",
-    ]
-    harmony_canonical = next(
-        (c for c in method_map if c in _HARMONY_ALIASES or method_map[c] in _HARMONY_ALIASES),
-        None,
-    )
-    if harmony_canonical and has_two_batches:
-        run_order.insert(4, harmony_canonical)
-    elif harmony_canonical:
-        logger.warning("Skipping KNN_HARMONY: fewer than 2 batch values.")
-
-    run_list  = [(c, method_map[c]) for c in run_order if c in method_map]
-    not_found = [c for c in run_order if c not in method_map]
-    if not_found:
-        logger.warning(
-            f"Methods not found in popv.algorithms and will be skipped: {not_found}"
-        )
-    logger.info(
-        f"Running {len(run_list)} methods: "
-        + ", ".join(f"{c}({a})" for c, a in run_list)
+    pq_kwargs = dict(
+        query_labels_key      = None,
+        query_batch_key       = query_batch_key,
+        ref_labels_key        = ref_labels_key,
+        ref_batch_key         = None,
+        unknown_celltype_label= "unknown",
+        cl_obo_folder         = cl_obo_folder,
+        n_samples_per_label   = n_samples_per_label,
+        compute_embedding     = True,
+        hvg                   = None,
     )
 
-    successful_methods = []
-
-    for canonical, actual in run_list:
+    # Gracefully add args that may not exist in all popv 0.4.x sub-versions
+    _tmp_dir = os.path.join(output_dir, "tmp")
+    os.makedirs(_tmp_dir, exist_ok=True)
+    for optional_kwarg, value in [
+        ("save_path_trained_models", _tmp_dir),
+        ("prediction_mode",          "retrain"),
+        ("accelerator",              "cpu"),
+    ]:
         try:
-            _run_method_safe(adata_processed, canonical, actual)
-            if label_map:
-                _normalise_predictions(adata_processed, label_map)
-            successful_methods.append(actual)
-            logger.info(f"✓ {canonical} ({actual}) completed.")
+            import inspect
+            sig = inspect.signature(Process_Query.__init__)
+            if optional_kwarg in sig.parameters:
+                pq_kwargs[optional_kwarg] = value
+                logger.info(f"Process_Query: '{optional_kwarg}' = {value!r}")
+            else:
+                logger.info(f"Process_Query: '{optional_kwarg}' not in API — skipped.")
+        except Exception:
+            pass
+
+    adata_combined = Process_Query(
+        adata_query,
+        adata_ref,
+        **pq_kwargs,
+    ).adata
+
+    logger.info(f"Process_Query done — combined shape: {adata_combined.shape}")
+
+    # ── Step 16: run annotation methods (notebook method list) ───────────────
+    # Notebook: ["celltypist", "knn_on_bbknn", "knn_on_harmony",
+    #            "knn_on_scanorama", "onclass", "rf", "svm"]
+    # We try both old-style lowercase and new UPPER_SNAKE names for compatibility.
+
+    _METHOD_CANDIDATES = [
+        ["celltypist",      "CELLTYPIST"],
+        ["knn_on_bbknn",    "KNN_BBKNN"],
+        ["knn_on_harmony",  "KNN_HARMONY"],
+        ["knn_on_scanorama","KNN_SCANORAMA"],
+        ["onclass",         "ONCLASS"],
+        ["rf",              "RANDOM_FOREST"],
+        ["svm",             "SVM"],
+    ]
+
+    def _resolve_method_name(candidates: list) -> str | None:
+        try:
+            import popv.algorithms as _alg
+            for name in candidates:
+                if hasattr(_alg, name):
+                    return name
+        except ImportError:
+            pass
+        # Fall back to first candidate and let annotate_data raise if wrong
+        return candidates[0]
+
+    # Build run list — skip harmony if fewer than 2 batch values
+    _batch_vals = set()
+    if "_batch_annotation" in adata_combined.obs.columns:
+        _batch_vals = set(adata_combined.obs["_batch_annotation"].unique())
+    has_two_batches = len(_batch_vals - {"unknown", "unknown_query"}) >= 2
+
+    _tmp_save = os.path.join(output_dir, "tmp")
+
+    successful = []
+    for candidates in _METHOD_CANDIDATES:
+        canonical = candidates[0]  # human-readable name for logging
+        if "harmony" in canonical and not has_two_batches:
+            logger.warning(
+                f"Skipping {canonical}: fewer than 2 real batch values in "
+                f"'_batch_annotation' ({_batch_vals})."
+            )
+            continue
+
+        method_name = _resolve_method_name(candidates)
+        try:
+            # annotate_data signature varies: try with save_path, fall back without
+            try:
+                annotate_data(adata_combined, methods=[method_name],
+                              save_path=_tmp_save)
+            except TypeError:
+                annotate_data(adata_combined, methods=[method_name])
+
+            successful.append(method_name)
+            logger.info(f"✓ {canonical} ({method_name}) completed.")
         except Exception as exc:
             logger.warning(
-                f"✗ Skipping {canonical} ({actual}): {type(exc).__name__}: {exc}"
+                f"✗ Skipping {canonical} ({method_name}): "
+                f"{type(exc).__name__}: {exc}"
             )
 
-    logger.info(f"Methods completed: {successful_methods}")
+    logger.info(f"Annotation complete. Successful methods: {successful}")
 
-    if "popv_majority_vote_prediction" not in adata_processed.obs.columns:
-        pred_cols = [
-            c for c in adata_processed.obs.columns
-            if c.endswith("_prediction")
-            and c != "popv_majority_vote_prediction"
-            and adata_processed.obs[c].notna().any()
+    # ── Step 17: consensus prediction column ────────────────────────────────
+    # Notebook uses 'popv_prediction'; newer popv may write 'popv_majority_vote_prediction'
+    for pred_col in ("popv_prediction", "popv_majority_vote_prediction"):
+        if pred_col in adata_combined.obs.columns:
+            logger.info(
+                f"Prediction column: '{pred_col}' — "
+                f"{adata_combined.obs[pred_col].nunique()} unique labels."
+            )
+            break
+    else:
+        # Build fallback from whichever prediction columns exist
+        fallback_cols = [
+            c for c in adata_combined.obs.columns
+            if c.endswith("_prediction") and adata_combined.obs[c].notna().any()
         ]
-        if pred_cols:
-            logger.warning(
-                "popv_majority_vote_prediction missing — "
-                f"using '{pred_cols[0]}' as fallback."
+        if fallback_cols:
+            adata_combined.obs["popv_majority_vote_prediction"] = (
+                adata_combined.obs[fallback_cols[0]]
             )
-            adata_processed.obs["popv_majority_vote_prediction"] = (
-                adata_processed.obs[pred_cols[0]]
+            logger.warning(
+                f"No consensus column found — using '{fallback_cols[0]}' as fallback."
             )
         else:
-            logger.error("No prediction columns found at all. Annotation failed.")
+            logger.error("No prediction columns found at all — annotation failed.")
 
-    logger.info(
-        f"Combined shape after annotation: {adata_processed.shape} "
-        f"(query {adata_query_snapshot.n_obs} + reference cells)"
-    )
-    adata_query_out = _extract_query_cells(adata_processed, adata_query_snapshot)
-    logger.info(f"Query-only shape: {adata_query_out.shape}")
-
-    if _saved_full_counts is None:
-        logger.error(
-            "full_counts snapshot missing — sidecar will not be written. "
-            "Module 3 will fall back to 4000 HVGs."
+    # Ensure 'popv_majority_vote_prediction' always exists for downstream modules
+    if ("popv_majority_vote_prediction" not in adata_combined.obs.columns
+            and "popv_prediction" in adata_combined.obs.columns):
+        adata_combined.obs["popv_majority_vote_prediction"] = (
+            adata_combined.obs["popv_prediction"]
         )
 
-    if _saved_raw_counts is not None:
-        snapshot_obs  = list(adata_query_snapshot.obs_names)
-        snap_name_idx = {n: i for i, n in enumerate(snapshot_obs)}
-        out_obs       = list(adata_query_out.obs_names)
-        row_idx       = [snap_name_idx[n] for n in out_obs if n in snap_name_idx]
+    # ── Step 18: extract query cells (notebook: obs_names isin query_cells) ──
+    adata_out = _extract_query_cells(adata_combined, query_obs_names_orig)
+    logger.info(f"Query-only shape: {adata_out.shape}")
 
-        if len(row_idx) == adata_query_out.n_obs:
-            rc_aligned = (
-                _saved_raw_counts.tocsr()[row_idx, :]
-                if sp.issparse(_saved_raw_counts)
-                else _saved_raw_counts[row_idx, :]
-            )
-            logger.info(
-                f"raw_counts row-aligned — "
-                f"{rc_aligned.shape[0]} cells × {rc_aligned.shape[1]} genes."
-            )
+    # ── Step 19: notebook saves log_normalised X as a layer ──────────────────
+    # We preserve the PopV-internal .X (usually log-normalised) as 'log_normalized'
+    adata_out.layers["log_normalized"] = adata_out.X.copy()
 
-            hvg_names   = list(adata_query_out.var_names)
-            cg_to_idx   = {g: i for i, g in enumerate(common_genes)}
-            hvg_col_idx = [cg_to_idx[g] for g in hvg_names if g in cg_to_idx]
+    # ── Step 20: restore raw counts layer in HVG space ───────────────────────
+    hvg_names   = list(adata_out.var_names)
+    full_var_idx = {g: i for i, g in enumerate(_full_var_names_stash)}
+    hvg_col_in_full = [full_var_idx[g] for g in hvg_names if g in full_var_idx]
 
-            if len(hvg_col_idx) == len(hvg_names):
-                adata_query_out.X = rc_aligned.tocsr()[:, hvg_col_idx]
-                logger.info(
-                    f".X set to raw counts in HVG space "
-                    f"({adata_query_out.n_obs} cells × {len(hvg_names)} genes)."
-                )
-            else:
-                logger.warning(
-                    f".X: only {len(hvg_col_idx)}/{len(hvg_names)} HVGs found "
-                    "in intersection genes — leaving .X as PopV internal matrix."
-                )
-        else:
-            logger.warning(
-                f"raw_counts row-alignment failed: "
-                f"{len(row_idx)}/{adata_query_out.n_obs} obs_names matched."
-            )
+    snap_idx  = {n: i for i, n in enumerate(query_obs_names_orig)}
+    out_obs   = list(adata_out.obs_names)
+    row_idx   = [snap_idx[n] for n in out_obs if n in snap_idx]
+
+    if len(row_idx) == adata_out.n_obs and len(hvg_col_in_full) == len(hvg_names):
+        fc_aligned  = _full_counts_stash.tocsr()[row_idx, :]
+        adata_out.X = fc_aligned[:, hvg_col_in_full].tocsr()
+        adata_out.layers["counts"] = adata_out.X.copy()
+        logger.info(
+            f"Raw counts restored to .X and layers['counts'] "
+            f"({adata_out.n_obs} cells × {len(hvg_names)} HVGs)."
+        )
     else:
         logger.warning(
-            "No _saved_raw_counts available — "
-            "layers['raw_counts'] not added and .X not restored."
+            "Could not fully restore raw counts to .X "
+            f"(row match: {len(row_idx)}/{adata_out.n_obs}, "
+            f"col match: {len(hvg_col_in_full)}/{len(hvg_names)})."
         )
 
-    if _saved_full_counts is not None:
-        snapshot_obs = list(adata_query_snapshot.obs_names)
-        snap_idx     = {n: i for i, n in enumerate(snapshot_obs)}
-        out_obs      = list(adata_query_out.obs_names)
-        fc_row_idx   = [snap_idx[n] for n in out_obs if n in snap_idx]
-        full_X_out   = _saved_full_counts.tocsr()[fc_row_idx, :]
+    # ── Step 21: attach full_counts layer to output for completeness ─────────
+    if len(row_idx) == adata_out.n_obs:
+        adata_out.layers["full_counts"] = _full_counts_stash.tocsr()[row_idx, :]
+        adata_out.uns["full_counts_var_names"] = _full_var_names_stash
+        logger.info("layers['full_counts'] attached to query output.")
 
-        rc_out = None
-        if _saved_raw_counts is not None:
-            rc_out = (
-                _saved_raw_counts.tocsr()[fc_row_idx, :]
-                if sp.issparse(_saved_raw_counts)
-                else _saved_raw_counts[fc_row_idx, :]
-            )
-
-        import pandas as pd
-        sidecar = anndata.AnnData(
-            X   = full_X_out,
-            obs = adata_query_out.obs.copy(),
-            var = pd.DataFrame(index=_saved_full_var_names),
+    # ── Step 22: write sidecar h5ad for Module 3 ─────────────────────────────
+    if len(row_idx) == adata_out.n_obs:
+        sidecar_path = _write_full_counts_sidecar(
+            adata_out,
+            query_obs_names_orig,
+            _full_counts_stash,
+            _full_var_names_stash,
+            output_dir,
         )
-
-        if rc_out is not None:
-            if rc_out.shape[1] == full_X_out.shape[1]:
-                sidecar.layers["raw_counts"] = rc_out
-                logger.info(
-                    f"Sidecar: raw_counts attached as layer "
-                    f"({rc_out.shape[1]} genes match full_counts)."
-                )
-            else:
-                logger.info(
-                    f"Sidecar: raw_counts ({rc_out.shape[1]} genes) differs "
-                    f"from full_counts ({full_X_out.shape[1]} genes) — "
-                    "storing raw_counts in uns['raw_counts_matrix']."
-                )
-                sidecar.uns["raw_counts_matrix"] = rc_out
-            sidecar.uns["raw_counts_var_names"] = list(common_genes)
-
-        _clean_obs_for_h5ad(sidecar)
-
-        sidecar_path = os.path.join(output_dir, "full_counts_for_module3.h5ad")
-        sidecar.write(sidecar_path)
-        adata_query_out.uns["full_counts_h5ad_path"] = sidecar_path
-        size_mb = os.path.getsize(sidecar_path) / 1e6
-        logger.info(
-            f"Sidecar written → {sidecar_path} "
-            f"({sidecar.n_obs} cells × {sidecar.n_vars} genes, {size_mb:.1f} MB)."
-        )
+        adata_out.uns["full_counts_h5ad_path"] = sidecar_path
     else:
-        logger.error("full_counts snapshot missing — sidecar not written.")
+        logger.error("Sidecar not written — obs_names alignment failed.")
 
-    _counts_layer_written = False
-
-    _snap_obs_for_counts = list(adata_query_snapshot.obs_names)
-    _snap_idx_for_counts = {n: i for i, n in enumerate(_snap_obs_for_counts)}
-    _out_obs_for_counts  = list(adata_query_out.obs_names)
-    _counts_row_idx      = [_snap_idx_for_counts[n]
-                            for n in _out_obs_for_counts
-                            if n in _snap_idx_for_counts]
-
-    hvg_names_for_counts = list(adata_query_out.var_names)
-
-    if len(_counts_row_idx) == adata_query_out.n_obs and _saved_full_counts is not None:
-        _full_var_list   = _saved_full_var_names
-        _full_var_idx    = {g: i for i, g in enumerate(_full_var_list)}
-        _hvg_col_in_full = [_full_var_idx[g]
-                            for g in hvg_names_for_counts
-                            if g in _full_var_idx]
-
-        if len(_hvg_col_in_full) == len(hvg_names_for_counts):
-            _fc_aligned = _saved_full_counts.tocsr()[_counts_row_idx, :]
-            adata_query_out.layers["counts"] = (
-                _fc_aligned[:, _hvg_col_in_full].tocsr().astype(np.float32)
-            )
-            logger.info(
-                f"layers['counts'] restored from full_counts snapshot — "
-                f"{adata_query_out.n_obs} cells × {len(hvg_names_for_counts)} HVGs."
-            )
-            _counts_layer_written = True
-        else:
-            logger.warning(
-                f"layers['counts']: only {len(_hvg_col_in_full)}/"
-                f"{len(hvg_names_for_counts)} HVGs found in full_counts var names."
-            )
-
-    if not _counts_layer_written and _saved_raw_counts is not None:
-        _cg_idx_map    = {g: i for i, g in enumerate(common_genes)}
-        _hvg_col_in_cg = [_cg_idx_map[g]
-                          for g in hvg_names_for_counts
-                          if g in _cg_idx_map]
-
-        if (len(_counts_row_idx) == adata_query_out.n_obs
-                and len(_hvg_col_in_cg) == len(hvg_names_for_counts)):
-            _rc_aligned = (
-                _saved_raw_counts.tocsr()[_counts_row_idx, :]
-                if sp.issparse(_saved_raw_counts)
-                else _saved_raw_counts[_counts_row_idx, :]
-            )
-            adata_query_out.layers["counts"] = (
-                _rc_aligned.tocsr()[:, _hvg_col_in_cg].astype(np.float32)
-            )
-            logger.info(
-                f"layers['counts'] restored from raw_counts (intersection fallback) — "
-                f"{adata_query_out.n_obs} cells × {len(hvg_names_for_counts)} HVGs."
-            )
-            _counts_layer_written = True
-        else:
-            logger.warning(
-                "layers['counts']: fallback raw_counts column-subsetting failed."
-            )
-
-    if not _counts_layer_written:
-        logger.error(
-            "layers['counts'] could NOT be restored — "
-            "neither full_counts nor raw_counts snapshot was usable."
-        )
-
-    _verify_full_counts_layer(adata_query_out)
+    # ── Step 23: clean up obs dtypes ─────────────────────────────────────────
+    for col in adata_out.obs.columns:
+        if adata_out.obs[col].dtype == object:
+            adata_out.obs[col] = adata_out.obs[col].astype(str)
 
     if drop_reference_columns:
-        adata_query_out = _drop_reference_only_columns(adata_query_out)
+        adata_out = _drop_reference_only_columns(adata_out)
 
-    _clean_obs_for_h5ad(adata_query_out)
-
+    # ── Step 24: write output ─────────────────────────────────────────────────
     out_path = os.path.join(output_dir, "final_popv_annotated.h5ad")
-    adata_query_out.write(out_path)
+    adata_out.write(out_path)
+
+    pred_col_final = next(
+        (c for c in ("popv_majority_vote_prediction", "popv_prediction")
+         if c in adata_out.obs.columns), "N/A"
+    )
 
     logger.info(
         f"\n{'='*60}\n"
-        f"PopV output saved      : {out_path}\n"
-        f"Full-gene sidecar      : {adata_query_out.uns.get('full_counts_h5ad_path', 'N/A')}\n"
-        f"Shape                  : {adata_query_out.shape}\n"
-        f"obs columns            : {list(adata_query_out.obs.columns)}\n"
-        f"layers                 : {list(adata_query_out.layers.keys())}\n"
-        f"uns keys               : {list(adata_query_out.uns.keys())}\n"
+        f"PopV output          : {out_path}\n"
+        f"Full-gene sidecar    : {adata_out.uns.get('full_counts_h5ad_path', 'N/A')}\n"
+        f"Shape                : {adata_out.shape}\n"
+        f"Prediction column    : {pred_col_final}\n"
+        f"Unique predictions   : "
+        f"{adata_out.obs.get(pred_col_final, pd.Series()).nunique()}\n"
+        f"layers               : {list(adata_out.layers.keys())}\n"
         f"{'='*60}"
     )
 
-    return adata_query_out
+    return adata_out
 
 
 # ---------------------------------------------------------------------------
-# Auto entry-point
+# 17. Public entry-point
 # ---------------------------------------------------------------------------
 
 def auto_run_popv(
-    nsamples: int = 300,
-    output_dir: str = "popv_results",
-    user_reference: str = None,
+    nsamples:               int  = 300,
+    output_dir:             str  = "popv_results",
+    user_reference:         str  = None,
     drop_reference_columns: bool = True,
-    user_popv_prediction: str = None,
-    n_jobs: int = 1,
-):
+    user_popv_prediction:   str  = None,
+    n_jobs:                 int  = 1,
+) -> anndata.AnnData:
     """
-    Fully automatic entry-point.  Finds the tumor h5ad from Module 1,
-    downloads the matching Tabula Sapiens reference (or uses
-    user_reference), and runs PopV 0.4.2 annotation.
+    Fully automatic entry-point for Module 2.
 
-    SCART requires raw (integer) counts.  input_type='log1p' has been
-    removed.  Ensure your h5ad contains raw counts in layers['counts']
-    or adata.X before calling this function.
+    Finds the tumor h5ad written by Module 1, downloads the matching
+    Tabula Sapiens reference (or uses user_reference), and runs PopV
+    annotation using the same analysis logic as PopV_GSE173682.ipynb.
 
     Parameters
     ----------
     nsamples : int
-        Cells sampled per label during reference subsampling.
+        Minimum cells per label (floor for n_samples_per_label).
+        Actual value = max(min_celltype_size_in_ref, nsamples).
     output_dir : str
-        Directory where final_popv_annotated.h5ad is written.
+        Directory for output files.
     user_reference : str, optional
-        Path to a local Tabula Sapiens (or compatible) reference h5ad.
-        If provided, the automatic Figshare download is skipped.
+        Path to a local Tabula Sapiens h5ad.  Skips Figshare download.
     drop_reference_columns : bool
-        Remove Tabula Sapiens metadata columns from the saved output.
+        Remove Tabula Sapiens metadata from saved output.
     user_popv_prediction : str, optional
-        Path to an already-annotated h5ad containing PopV prediction
-        columns.  When supplied, the entire PopV pipeline is SKIPPED.
+        Path to an already-annotated h5ad.  Skips the entire PopV pipeline.
     n_jobs : int
-        CPU cores for parallelisable methods. -1 = all cores.
+        CPU threads (-1 = all cores).
 
     Usage
     -----
     from SCART import popv_annotation
 
-    # Standard run
+    # Standard run — supply reference
     adata = popv_annotation.auto_run_popv(
         nsamples       = 300,
-        user_reference = "/data/Ovary_TSP1_30.h5ad"
+        user_reference = "/data/Ovary_TSP1_30_version2d_10X_smartseq_scvi.h5ad"
     )
 
-    # Use your own pre-computed PopV result
+    # Auto-download reference from Figshare
+    adata = popv_annotation.auto_run_popv(nsamples=300)
+
+    # Skip pipeline — use pre-computed PopV result
     adata = popv_annotation.auto_run_popv(
-        user_popv_prediction = "/data/my_popv_annotated.h5ad",
-        output_dir           = "popv_results"
+        user_popv_prediction = "/data/my_popv_annotated.h5ad"
     )
     """
+    # ── Bypass: user supplies pre-computed annotation ─────────────────────
     if user_popv_prediction is not None:
         if not os.path.exists(user_popv_prediction):
             raise FileNotFoundError(
-                f"user_popv_prediction file not found: {user_popv_prediction}"
+                f"user_popv_prediction not found: {user_popv_prediction}"
             )
-
-        logger.info(
-            f"user_popv_prediction provided — skipping PopV pipeline.\n"
-            f"Loading: {user_popv_prediction}"
-        )
+        logger.info(f"Loading pre-computed PopV result: {user_popv_prediction}")
         adata = sc.read_h5ad(user_popv_prediction)
 
         pred_cols = [c for c in adata.obs.columns if c.endswith("_prediction")]
         if not pred_cols:
             raise ValueError(
                 f"No '_prediction' columns found in {user_popv_prediction}.\n"
-                "Expected at least one column ending in '_prediction' in .obs.\n"
-                "Please supply a valid PopV-annotated h5ad."
-            )
-        if "popv_majority_vote_prediction" not in adata.obs.columns:
-            logger.warning(
-                "'popv_majority_vote_prediction' not found in user-supplied h5ad. "
-                f"Found prediction columns: {pred_cols}. "
-                "Downstream modules expecting 'popv_majority_vote_prediction' "
-                "may need adjustment."
-            )
-        else:
-            logger.info(
-                f"'popv_majority_vote_prediction' present — "
-                f"{adata.obs['popv_majority_vote_prediction'].nunique()} unique labels."
+                "Supply a valid PopV-annotated h5ad."
             )
 
         os.makedirs(output_dir, exist_ok=True)
         out_path = os.path.join(output_dir, "final_popv_annotated.h5ad")
         if os.path.abspath(user_popv_prediction) != os.path.abspath(out_path):
-            logger.info(f"Copying user prediction to: {out_path}")
             adata.write(out_path)
-        else:
-            logger.info("user_popv_prediction is already the output path — no copy needed.")
-
-        logger.info(
-            f"\n{'='*60}\n"
-            f"User PopV prediction loaded: {out_path}\n"
-            f"Shape       : {adata.shape}\n"
-            f"Pred columns: {pred_cols}\n"
-            f"{'='*60}"
-        )
+        logger.info(f"User PopV prediction saved to: {out_path}")
         return adata
 
-    tumor_file = get_latest_tumor_h5ad()
-    logger.info(f"Query file: {tumor_file}")
-
-    cancer_type    = detect_cancer_type_from_h5ad(tumor_file)
+    # ── Locate Module 1 output ────────────────────────────────────────────
+    tumor_file  = get_latest_tumor_h5ad()
+    cancer_type = detect_cancer_type_from_h5ad(tumor_file)
     primary_cancer = cancer_type.split(",")[0].strip()
+
     reference_path = auto_select_reference(primary_cancer, user_reference)
 
-    logger.info(f"Loading query    : {tumor_file}")
-    logger.info(f"Loading reference: {reference_path}")
+    logger.info(f"Query    : {tumor_file}")
+    logger.info(f"Reference: {reference_path}")
 
     adata_query = sc.read_h5ad(tumor_file)
     adata_ref   = sc.read_h5ad(reference_path)
 
     return run_popv_annotation(
-        adata_query=adata_query,
-        adata_ref=adata_ref,
-        output_dir=output_dir,
-        n_samples_per_label=nsamples,
-        drop_reference_columns=drop_reference_columns,
-        n_jobs=n_jobs,
+        adata_query            = adata_query,
+        adata_ref              = adata_ref,
+        output_dir             = output_dir,
+        nsamples               = nsamples,
+        drop_reference_columns = drop_reference_columns,
+        n_jobs                 = n_jobs,
     )
