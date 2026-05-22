@@ -830,28 +830,20 @@ def run_popv_annotation(
     #            "knn_on_scanorama", "onclass", "rf", "svm"]
     # We try both old-style lowercase and new UPPER_SNAKE names for compatibility.
 
-    # Check whether cl.ontology exists — OnClass requires it (separate from cl.obo).
-    # The notebook only uses cl.obo and never runs OnClass.
-    # Skip OnClass silently if the file is absent rather than letting it crash.
-    _cl_ontology_path = os.path.join(cl_obo_folder, "cl.ontology")
-    _onclass_available = os.path.exists(_cl_ontology_path)
-    if not _onclass_available:
-        logger.warning(
-            f"OnClass skipped: 'cl.ontology' not found at {_cl_ontology_path}. "
-            "The notebook only uses cl.obo and does not run OnClass. "
-            "To enable OnClass, place cl.ontology in the same folder as cl.obo."
-        )
-
+    # OnClass is included in the notebook's method list and works from cl.obo alone.
+    # PopV internally generates cl.ontology from cl.obo during Process_Query and
+    # saves it to save_path_trained_models (tmp dir) — so it exists by this point.
+    # We always include OnClass; if it still fails it is caught by the per-method
+    # try/except below and skipped with a warning rather than crashing the pipeline.
     _METHOD_CANDIDATES = [
         ["celltypist",      "CELLTYPIST"],
         ["knn_on_bbknn",    "KNN_BBKNN"],
         ["knn_on_harmony",  "KNN_HARMONY"],
         ["knn_on_scanorama","KNN_SCANORAMA"],
+        ["onclass",         "ONCLASS"],
         ["rf",              "RANDOM_FOREST"],
         ["svm",             "SVM"],
     ]
-    if _onclass_available:
-        _METHOD_CANDIDATES.insert(4, ["onclass", "ONCLASS"])
 
     def _resolve_method_name(candidates: list) -> str | None:
         try:
