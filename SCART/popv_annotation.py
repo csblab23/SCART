@@ -153,6 +153,7 @@ _NOTEBOOK_FIXES = {
 }
 
 
+
 def _normalise_ref_labels(adata_ref: anndata.AnnData,
                            label_col: str,
                            name2id: dict) -> anndata.AnnData:
