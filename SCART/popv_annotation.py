@@ -150,6 +150,8 @@ _NOTEBOOK_FIXES = {
     "mature nk t cell":              "mature NK T cell",
     "t cell":                        "T cell",
     "follicle":                      "follicle cell of egg chamber",
+    # Present in Tabula Sapiens ovary reference — kept verbatim (valid CL term)
+    "glandular epithelial cell":     "glandular epithelial cell",
 }
 
 
@@ -377,20 +379,26 @@ def _strip_layers_for_popv(adata_query: anndata.AnnData,
     The 'counts' layer on query is kept as the sole exception because
     some popv internals check for it.  All other layers are dropped.
     """
-    # ── Reference: keep ALL layers (notebook passes decontXcounts, log_normalized,
-    #    scale_data, counts through to Process_Query — do not strip them)
-    logger.info(f"Reference layers kept as-is: {list(adata_ref.layers.keys())}.")
+    # Both query and reference must have IDENTICAL layer keys before Process_Query.
+    # anndata.concat(join='outer', fill_value='unknown') fills missing layer slots
+    # with the string 'unknown' → scipy.sparse dtype str224 error.
+    # Solution: keep only 'counts' on both sides. PopV only reads .X internally.
 
-    # ── Query: keep only 'counts' (full_counts already stashed externally) ───
-    # Query layers are stripped to 'counts' only so anndata.concat join='outer'
-    # never sees a layer that exists on query but not reference — which would
-    # trigger the scipy.sparse dtype str error with fill_value='unknown'.
+    # ── Reference: strip to 'counts' only ───────────────────────────────────
+    ref_keep = {"counts"}
+    ref_drop  = [k for k in list(adata_ref.layers.keys()) if k not in ref_keep]
+    for k in ref_drop:
+        del adata_ref.layers[k]
+    if ref_drop:
+        logger.info(f"Layer strip (reference): removed {ref_drop}, kept ['counts'].")
+
+    # ── Query: strip to 'counts' only (full_counts already stashed externally) ─
     query_keep = {"counts"}
     query_drop  = [k for k in list(adata_query.layers.keys()) if k not in query_keep]
     for k in query_drop:
         del adata_query.layers[k]
     if query_drop:
-        logger.info(f"Layer strip (query): removed {query_drop}, kept {list(query_keep & set(adata_query.layers.keys()))}.")
+        logger.info(f"Layer strip (query): removed {query_drop}, kept ['counts'].")
 
     return adata_query, adata_ref
 
