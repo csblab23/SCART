@@ -356,34 +356,41 @@ def _detect_query_batch_key(adata_query: anndata.AnnData) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# 8. Layer alignment — notebook adds placeholder layers to query so it
-#    matches reference layer structure before concatenation
+# 8. Layer alignment — strip all layers from both sides before Process_Query
 # ---------------------------------------------------------------------------
 
-def _align_query_layers_to_ref(adata_query: anndata.AnnData,
-                                 adata_ref:   anndata.AnnData) -> anndata.AnnData:
+def _strip_layers_for_popv(adata_query: anndata.AnnData,
+                            adata_ref:   anndata.AnnData) -> tuple:
     """
-    Notebook:
-        layer_keys_to_add = ['decontXcounts', 'scale_data', 'log_normalized']
-        for layer in layer_keys_to_add:
-            if layer not in query_adata.layers:
-                query_adata.layers[layer] = sp.csr_matrix(zeros)
+    anndata.concat(..., join='outer', fill_value='unknown') fills missing
+    layer slots with the string 'unknown', which scipy.sparse rejects
+    (dtype str224 is not supported).
 
-    Generalised: add any layer present in ref but missing from query as zeros.
+    The safe fix is to strip ALL layers from both query and reference
+    before passing to Process_Query, so anndata.concat never sees a
+    layer mismatch.  PopV only needs .X (raw counts) — it builds its
+    own internal layers during preprocessing.
+
+    The 'counts' layer on query is kept as the sole exception because
+    some popv internals check for it.  All other layers are dropped.
     """
-    ref_layer_keys = list(adata_ref.layers.keys())
-    added = []
-    for lk in ref_layer_keys:
-        if lk not in adata_query.layers:
-            adata_query.layers[lk] = sp.csr_matrix(
-                np.zeros((adata_query.n_obs, adata_query.n_vars), dtype=np.float32)
-            )
-            added.append(lk)
-    if added:
-        logger.info(
-            f"Layer alignment: added placeholder layers to query: {added}"
-        )
-    return adata_query
+    # ── Reference: keep only 'counts' ───────────────────────────────────────
+    ref_keep = {"counts"}
+    ref_drop  = [k for k in list(adata_ref.layers.keys()) if k not in ref_keep]
+    for k in ref_drop:
+        del adata_ref.layers[k]
+    if ref_drop:
+        logger.info(f"Layer strip (reference): removed {ref_drop}, kept {list(ref_keep & set(adata_ref.layers.keys()))}.")
+
+    # ── Query: keep only 'counts' (full_counts already stashed externally) ───
+    query_keep = {"counts"}
+    query_drop  = [k for k in list(adata_query.layers.keys()) if k not in query_keep]
+    for k in query_drop:
+        del adata_query.layers[k]
+    if query_drop:
+        logger.info(f"Layer strip (query): removed {query_drop}, kept {list(query_keep & set(adata_query.layers.keys()))}.")
+
+    return adata_query, adata_ref
 
 
 # ---------------------------------------------------------------------------
@@ -754,8 +761,11 @@ def run_popv_annotation(
     _full_counts_stash    = adata_query.layers["full_counts"].copy()
     _full_var_names_stash = list(adata_query.uns["full_counts_var_names"])
 
-    # ── Step 12: layer alignment — add placeholder layers to query ───────────
-    adata_query = _align_query_layers_to_ref(adata_query, adata_ref)
+    # ── Step 12: strip layers from both sides before Process_Query ──────────
+    # anndata.concat fill_value='unknown' (a string) causes scipy.sparse
+    # dtype errors when layers exist on one side but not the other.
+    # Solution: keep only 'counts' on both — PopV only needs .X anyway.
+    adata_query, adata_ref = _strip_layers_for_popv(adata_query, adata_ref)
 
     # ── Step 13: clear raw from both (PopV manages its own raw internally) ───
     adata_query.raw = None
