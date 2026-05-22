@@ -219,6 +219,8 @@ def _set_ref_var_index(adata_ref: anndata.AnnData) -> anndata.AnnData:
     # Ensure string index and uniqueness (notebook does var_names_make_unique)
     adata_ref.var.index = pd.Index(adata_ref.var.index.astype(str))
     adata_ref.var_names_make_unique()
+    # Notebook converts to CategoricalIndex — affects HVG selection inside Process_Query
+    adata_ref.var.index = pd.CategoricalIndex(adata_ref.var.index)
     return adata_ref
 
 
@@ -375,15 +377,14 @@ def _strip_layers_for_popv(adata_query: anndata.AnnData,
     The 'counts' layer on query is kept as the sole exception because
     some popv internals check for it.  All other layers are dropped.
     """
-    # ── Reference: keep only 'counts' ───────────────────────────────────────
-    ref_keep = {"counts"}
-    ref_drop  = [k for k in list(adata_ref.layers.keys()) if k not in ref_keep]
-    for k in ref_drop:
-        del adata_ref.layers[k]
-    if ref_drop:
-        logger.info(f"Layer strip (reference): removed {ref_drop}, kept {list(ref_keep & set(adata_ref.layers.keys()))}.")
+    # ── Reference: keep ALL layers (notebook passes decontXcounts, log_normalized,
+    #    scale_data, counts through to Process_Query — do not strip them)
+    logger.info(f"Reference layers kept as-is: {list(adata_ref.layers.keys())}.")
 
     # ── Query: keep only 'counts' (full_counts already stashed externally) ───
+    # Query layers are stripped to 'counts' only so anndata.concat join='outer'
+    # never sees a layer that exists on query but not reference — which would
+    # trigger the scipy.sparse dtype str error with fill_value='unknown'.
     query_keep = {"counts"}
     query_drop  = [k for k in list(adata_query.layers.keys()) if k not in query_keep]
     for k in query_drop:
@@ -755,13 +756,15 @@ def run_popv_annotation(
     query_batch_key = _detect_query_batch_key(adata_query)
 
     # ── Step 9: compute n_samples_per_label dynamically (notebook formula) ───
-    min_celltype_size  = int(
+    # Notebook: min_celltype_size computed on ref_labels_key AFTER prefixing
+    # (ref_labels_key = 'ref_cell_ontology_class' at this point — matches notebook exactly)
+    min_celltype_size   = int(
         adata_ref.obs.groupby(ref_labels_key).size().min()
     )
     n_samples_per_label = int(np.max([min_celltype_size, nsamples]))
     logger.info(
-        f"n_samples_per_label = max({min_celltype_size}, {nsamples}) "
-        f"= {n_samples_per_label}"
+        f"n_samples_per_label = max(min_celltype_size={min_celltype_size}, "
+        f"nsamples={nsamples}) = {n_samples_per_label}"
     )
 
     # ── Step 10: check common genes ─────────────────────────────────────────
