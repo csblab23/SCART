@@ -17,3 +17,5 @@ recursive-include SCART/external/scMalignantFinder/model *
 recursive-include SCART/external *
 recursive-include SCART/PopV/resources *
 recursive-include SCART/GESP *
+recursive-include SCART/PopV/resources/ontology/cl.obo
+recursive-include SCART/PopV/resources/ontology/cl.ontology
