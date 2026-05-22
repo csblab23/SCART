@@ -25,6 +25,7 @@ import os
 import glob
 import logging
 import urllib.request
+import unicodedata
 
 import numpy as np
 import pandas as pd
@@ -155,29 +156,47 @@ _NOTEBOOK_FIXES = {
 }
 
 
-
 def _normalise_ref_labels(adata_ref: anndata.AnnData,
                            label_col: str,
                            name2id: dict) -> anndata.AnnData:
     """
-    1. Apply the notebook's hardcoded fixes.
-    2. For any label still missing from the ontology, attempt a
-       case-insensitive OBO lookup.
-    3. Drop cells whose label still cannot be found (would cause
+    1. Strip leading/trailing whitespace and apply Unicode NFC normalisation.
+       Newer Tabula Sapiens reference versions (e.g. Nov 2024) store some
+       labels with invisible characters or non-breaking spaces that cause the
+       OBO lookup to fail even though the label text looks correct.
+    2. Apply the notebook's hardcoded fixes.
+    3. For any label still missing from the ontology, attempt a
+       case-insensitive OBO lookup (also on the stripped/normalised form).
+    4. Drop cells whose label still cannot be found (would cause
        NetworkXError in PopV's KNN label propagation).
     """
     col = adata_ref.obs[label_col].astype(str).copy()
 
-    # Step 1 — notebook exact replacements
+    # Step 0 — strip whitespace + NFC unicode normalisation
+    # This fixes labels like 'glandular epithelial cell ' (trailing space)
+    # or 'glandular\xa0epithelial cell' (non-breaking space) that appear in
+    # newer reference versions and silently break the OBO membership check.
+    col = col.str.strip()
+    col = col.map(lambda s: unicodedata.normalize("NFC", s))
+
+    # Step 1 — notebook exact replacements (applied on the cleaned strings)
     for wrong, right in _NOTEBOOK_FIXES.items():
         col = col.replace(wrong, right)
 
     # Step 2 — generic case-insensitive OBO lookup for anything still missing
-    lower2canonical = {k.lower(): k for k in name2id}
+    # Build lookup on stripped+normalised canonical names so it is consistent
+    # with the cleaning applied above.
+    lower2canonical = {
+        unicodedata.normalize("NFC", k.strip()).lower(): k
+        for k in name2id
+    }
+
     def _fix(v):
-        if v in name2id:
-            return v
-        return lower2canonical.get(v.lower(), v)
+        v_clean = unicodedata.normalize("NFC", v.strip())
+        if v_clean in name2id:
+            return v_clean
+        return lower2canonical.get(v_clean.lower(), v_clean)
+
     col = col.map(_fix)
 
     adata_ref.obs[label_col] = col
