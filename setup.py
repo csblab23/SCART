@@ -5,19 +5,11 @@ import urllib.request
 import os
 import sys
 
-
 OBO_URL = "http://purl.obolibrary.org/obo/cl.obo"
 
-
 def _get_obo_path(install_lib=None):
-    """
-    Resolve the correct cl.obo destination path.
-    Falls back to the already-importable package location if install_lib is None.
-    """
     if install_lib:
         return os.path.join(install_lib, "SCART", "PopV", "resources", "ontology", "cl.obo")
-
-    # Fallback: find the installed package via importlib
     try:
         import importlib.util
         spec = importlib.util.find_spec("SCART")
@@ -26,29 +18,22 @@ def _get_obo_path(install_lib=None):
             return os.path.join(pkg_root, "PopV", "resources", "ontology", "cl.obo")
     except Exception:
         pass
-
-    # Last resort: relative to this setup.py (editable / source install)
     here = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(here, "SCART", "PopV", "resources", "ontology", "cl.obo")
 
-
 def _is_lfs_stub(path):
-    """Return True if the file is a Git-LFS pointer stub, not the real file."""
     try:
         with open(path, "r", errors="ignore") as f:
             return f.read(30).startswith("version https://git-lfs")
     except OSError:
         return False
 
-
 def download_cl_obo(install_lib=None):
     obo_path = _get_obo_path(install_lib)
     os.makedirs(os.path.dirname(obo_path), exist_ok=True)
-
     if os.path.exists(obo_path) and not _is_lfs_stub(obo_path):
         print(f"cl.obo already present at {obo_path}, skipping download.")
         return
-
     print(f"Downloading cl.obo ontology (~17 MB) → {obo_path} ...")
     try:
         urllib.request.urlretrieve(OBO_URL, obo_path)
@@ -61,20 +46,15 @@ def download_cl_obo(install_lib=None):
             file=sys.stderr,
         )
 
-
 class PostInstall(install):
-    """Runs after a normal `pip install`."""
     def run(self):
         super().run()
         download_cl_obo(self.install_lib)
 
-
 class PostDevelop(develop):
-    """Runs after `pip install -e .` (editable / develop mode)."""
     def run(self):
         super().run()
-        download_cl_obo()          # install_lib not needed; source tree IS the package
-
+        download_cl_obo()
 
 setup(
     name="SCART",
@@ -95,6 +75,9 @@ setup(
             "**/*.joblib",
             "**/*.gmt",
             "**/*.tsv",
+            # Ontology files bundled with SCART for PopV annotation
+            "PopV/resources/ontology/cl.obo",
+            "PopV/resources/ontology/cl.ontology",
         ]
     },
     zip_safe=False,
