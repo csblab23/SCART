@@ -830,15 +830,28 @@ def run_popv_annotation(
     #            "knn_on_scanorama", "onclass", "rf", "svm"]
     # We try both old-style lowercase and new UPPER_SNAKE names for compatibility.
 
+    # Check whether cl.ontology exists — OnClass requires it (separate from cl.obo).
+    # The notebook only uses cl.obo and never runs OnClass.
+    # Skip OnClass silently if the file is absent rather than letting it crash.
+    _cl_ontology_path = os.path.join(cl_obo_folder, "cl.ontology")
+    _onclass_available = os.path.exists(_cl_ontology_path)
+    if not _onclass_available:
+        logger.warning(
+            f"OnClass skipped: 'cl.ontology' not found at {_cl_ontology_path}. "
+            "The notebook only uses cl.obo and does not run OnClass. "
+            "To enable OnClass, place cl.ontology in the same folder as cl.obo."
+        )
+
     _METHOD_CANDIDATES = [
         ["celltypist",      "CELLTYPIST"],
         ["knn_on_bbknn",    "KNN_BBKNN"],
         ["knn_on_harmony",  "KNN_HARMONY"],
         ["knn_on_scanorama","KNN_SCANORAMA"],
-        ["onclass",         "ONCLASS"],
         ["rf",              "RANDOM_FOREST"],
         ["svm",             "SVM"],
     ]
+    if _onclass_available:
+        _METHOD_CANDIDATES.insert(4, ["onclass", "ONCLASS"])
 
     def _resolve_method_name(candidates: list) -> str | None:
         try:
@@ -952,11 +965,17 @@ def run_popv_annotation(
             f"col match: {len(hvg_col_in_full)}/{len(hvg_names)})."
         )
 
-    # ── Step 21: attach full_counts layer to output for completeness ─────────
+    # ── Step 21: store full_counts var names in uns (layer goes to sidecar only) ─
+    # full_counts has shape (n_cells, 27984) — full gene space.
+    # adata_out has shape (n_cells, 21418) — HVG space.
+    # AnnData layers must match .var shape, so full_counts cannot be a layer here.
+    # It is written to the sidecar h5ad (Step 22) for Module 3 instead.
     if len(row_idx) == adata_out.n_obs:
-        adata_out.layers["full_counts"] = _full_counts_stash.tocsr()[row_idx, :]
         adata_out.uns["full_counts_var_names"] = _full_var_names_stash
-        logger.info("layers['full_counts'] attached to query output.")
+        logger.info(
+            f"uns['full_counts_var_names'] stored ({len(_full_var_names_stash)} genes). "
+            "Full-gene matrix is in the sidecar h5ad (full_counts_for_module3.h5ad)."
+        )
 
     # ── Step 22: write sidecar h5ad for Module 3 ─────────────────────────────
     if len(row_idx) == adata_out.n_obs:
