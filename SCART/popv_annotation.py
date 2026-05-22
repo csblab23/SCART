@@ -696,6 +696,28 @@ def run_popv_annotation(
     cl_obo_folder = os.path.dirname(obo_file) + "/"
     name2id, _    = make_celltype_to_cell_ontology_id_dict(obo_file)
 
+    # OnClass needs cl.ontology in the same folder as cl.obo (notebook assumption).
+    # If missing, check whether it was uploaded alongside this run and copy it in.
+    _cl_ontology_dest = os.path.join(cl_obo_folder, "cl.ontology")
+    if not os.path.exists(_cl_ontology_dest):
+        _search_paths = [
+            os.path.join(os.getcwd(), "cl.ontology"),
+            os.path.join(os.path.dirname(__file__), "cl.ontology"),
+        ]
+        _found_ontology = next((p for p in _search_paths if os.path.exists(p)), None)
+        if _found_ontology:
+            import shutil
+            shutil.copy2(_found_ontology, _cl_ontology_dest)
+            logger.info(f"cl.ontology copied from {_found_ontology} → {_cl_ontology_dest}")
+        else:
+            logger.warning(
+                f"cl.ontology not found in {cl_obo_folder}. "
+                "OnClass will be skipped. "
+                "Place cl.ontology alongside cl.obo to enable it:
+"
+                f"  cp cl.ontology {cl_obo_folder}"
+            )
+
     # ── Snapshot original query obs_names for later extraction ──────────────
     query_obs_names_orig = adata_query.obs_names.copy()
 
