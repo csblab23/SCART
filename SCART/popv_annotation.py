@@ -713,9 +713,8 @@ def run_popv_annotation(
             logger.warning(
                 f"cl.ontology not found in {cl_obo_folder}. "
                 "OnClass will be skipped. "
-                "Place cl.ontology alongside cl.obo to enable it:
-"
-                f"  cp cl.ontology {cl_obo_folder}"
+                f"Place cl.ontology alongside cl.obo to enable it: "
+                f"cp cl.ontology {cl_obo_folder}"
             )
 
     # ── Snapshot original query obs_names for later extraction ──────────────
