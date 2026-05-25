@@ -67,19 +67,22 @@ def make_celltype_to_cell_ontology_id_dict(obo_file: str):
     Parse cl.obo with obonet (same as notebook), then supplement with a
     direct line-scan of the OBO file.
 
-    obonet builds a graph from relationship edges.  Depending on the OBO
-    release version and the installed obonet version, some [Term] blocks
-    whose nodes have no outgoing edges (e.g. root-like terms such as
-    CL:0000150 'glandular epithelial cell') may be absent from the graph
-    even though their [Term] block is physically present in the file.  The
-    direct scan ensures every CL [Term] block contributes to name2id/id2name
-    regardless of graph connectivity or obonet version.
+    Three-tier approach to handle all OBO variants:
+      Tier 1 — obonet graph: catches all [Term] blocks with outgoing edges.
+      Tier 2 — direct [Term] scan: catches blocks obonet missed (no-edge nodes,
+               blocks without blank-line separators, etc.).
+      Tier 3 — inline comment mining: catches CL IDs that have NO [Term] block
+               at all but appear as relationship targets with an inline '! name'
+               comment (e.g. 'is_a: CL:0000150 ! glandular epithelial cell').
+               This is the case for CL:0000150 in the SCART-bundled cl.obo.
 
     Returns
     -------
     name2id : dict  {cell type name -> CL:xxxxxxx}
     id2name : dict  {CL:xxxxxxx -> cell type name}
     """
+    import re
+
     logger.info(f"Parsing OBO: {obo_file}")
     with open(obo_file, "r") as f:
         co = obonet.read_obo(f)
@@ -92,15 +95,9 @@ def make_celltype_to_cell_ontology_id_dict(obo_file: str):
     id2name = {k: v for k, v in id2name.items() if v is not None}
 
     # ------------------------------------------------------------------
-    # Supplemental direct scan — catches any CL [Term] block that obonet
-    # did not add to its graph (version- and topology-dependent gap).
-    # Only adds entries that are genuinely missing; never overwrites obonet.
-    #
-    # FIX: flush the current term when a new [Term] header is encountered
-    # (before resetting cur_id/cur_name), not only on blank lines.
-    # Some OBO files omit the blank-line separator between [Term] blocks,
-    # which caused the previous version to silently drop terms such as
-    # CL:0000150 'glandular epithelial cell'.
+    # Tier 2 — direct [Term] scan
+    # Flush on [Term] header (not just blank lines) to catch blocks with
+    # no blank-line separator between them.
     # ------------------------------------------------------------------
     _scan_added = 0
     try:
@@ -128,7 +125,6 @@ def make_celltype_to_cell_ontology_id_dict(obo_file: str):
                     cur_name = line[6:].strip()
                 elif line.startswith("is_obsolete: true"):
                     cur_obs = True
-                # blank-line flush kept as belt-and-suspenders
                 elif line == "" and cur_id and cur_name and not cur_obs:
                     _flush()
                     cur_id = cur_name = None
@@ -141,15 +137,42 @@ def make_celltype_to_cell_ontology_id_dict(obo_file: str):
 
     if _scan_added:
         logger.info(
-            f"Direct OBO scan added {_scan_added} CL terms missed by obonet "
-            f"(e.g. root/disconnected nodes such as CL:0000150 "
-            f"'glandular epithelial cell')."
+            f"Direct OBO scan added {_scan_added} CL terms missed by obonet."
+        )
+
+    # ------------------------------------------------------------------
+    # Tier 3 — inline comment mining
+    # Some CL IDs have no [Term] block at all; they only appear as
+    # relationship targets with an inline '! name' comment, e.g.:
+    #   is_a: CL:0000150 ! glandular epithelial cell
+    # obonet adds these as graph nodes but with name=None (filtered above).
+    # Neither Tier 1 nor Tier 2 can recover the name — this tier does.
+    # ------------------------------------------------------------------
+    _inline_added = 0
+    try:
+        _inline_pattern = re.compile(r'\bCL:(\d{7})\s+!\s+([^{}\n]+)')
+        with open(obo_file, "r", errors="replace") as fh:
+            for raw in fh:
+                m = _inline_pattern.search(raw)
+                if m:
+                    cl_id = f"CL:{m.group(1)}"
+                    name  = re.sub(r'\s*\{[^}]*\}', '', m.group(2)).strip()
+                    if cl_id not in id2name and name:
+                        id2name[cl_id] = name
+                        _inline_added += 1
+    except Exception as exc:
+        logger.warning(f"Inline comment mining failed (non-fatal): {exc}")
+
+    if _inline_added:
+        logger.info(
+            f"Inline comment mining added {_inline_added} CL terms "
+            f"(e.g. CL:0000150 'glandular epithelial cell')."
         )
 
     name2id = {v: k for k, v in id2name.items()}
     logger.info(
         f"OBO loaded: {len(name2id):,} cell type labels "
-        f"(obonet + {_scan_added} direct-scan supplements)."
+        f"(obonet + {_scan_added} [Term] scan + {_inline_added} inline supplements)."
     )
     return name2id, id2name
 
