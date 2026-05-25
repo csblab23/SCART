@@ -67,7 +67,7 @@ def make_celltype_to_cell_ontology_id_dict(obo_file: str):
     Parse cl.obo with obonet (same as notebook), then supplement with a
     direct line-scan of the OBO file.
 
-    Three-tier approach to handle all OBO variants:
+    Four-tier approach to handle all OBO variants:
       Tier 1 — obonet graph: catches all [Term] blocks with outgoing edges.
       Tier 2 — direct [Term] scan: catches blocks obonet missed (no-edge nodes,
                blocks without blank-line separators, etc.).
@@ -75,6 +75,13 @@ def make_celltype_to_cell_ontology_id_dict(obo_file: str):
                at all but appear as relationship targets with an inline '! name'
                comment (e.g. 'is_a: CL:0000150 ! glandular epithelial cell').
                This is the case for CL:0000150 in the SCART-bundled cl.obo.
+      Tier 4 — synonym parsing: catches names that were used in older OBO
+               releases and are now stored as EXACT synonyms. Reference datasets
+               built against older CL versions may store the synonym rather than
+               the current primary name, causing valid cells to be dropped.
+               Example: CL:0000150 primary name is now 'glandular secretory
+               epithelial cell' but carries synonym "glandular epithelial cell"
+               EXACT [] — which is what the Tabula Sapiens Nov 2024 reference uses.
 
     Returns
     -------
@@ -170,9 +177,52 @@ def make_celltype_to_cell_ontology_id_dict(obo_file: str):
         )
 
     name2id = {v: k for k, v in id2name.items()}
+
+    # ------------------------------------------------------------------
+    # Tier 4 — synonym parsing
+    # OBO terms can have EXACT synonyms for names that were used in older
+    # releases. Reference datasets built against older CL versions may
+    # store the synonym rather than the current primary name, causing
+    # valid cells to be dropped. This tier adds synonym -> CL ID mappings
+    # so both old and new names resolve correctly.
+    # Example: CL:0000150 primary name is now 'glandular secretory
+    # epithelial cell' but carries synonym "glandular epithelial cell"
+    # EXACT [] — which is what the Tabula Sapiens Nov 2024 reference uses.
+    # ------------------------------------------------------------------
+    _synonym_added = 0
+    try:
+        import re as _re
+        _syn_pattern = _re.compile(r'^synonym:\s+"([^"]+)"\s+EXACT')
+        cur_id_syn   = None
+        with open(obo_file, "r", errors="replace") as fh:
+            for raw in fh:
+                line = raw.rstrip()
+                if line == "[Term]":
+                    cur_id_syn = None
+                elif line.startswith("id: CL:"):
+                    cur_id_syn = line[4:].strip()
+                elif cur_id_syn and line.startswith("synonym:"):
+                    m = _syn_pattern.match(line)
+                    if m:
+                        syn_name = m.group(1).strip()
+                        # Add synonym as an additional name2id entry
+                        # only if not already present as a primary name
+                        if syn_name not in name2id:
+                            name2id[syn_name] = cur_id_syn
+                            _synonym_added += 1
+    except Exception as exc:
+        logger.warning(f"Synonym parsing failed (non-fatal): {exc}")
+
+    if _synonym_added:
+        logger.info(
+            f"Synonym parsing added {_synonym_added} additional name aliases "
+            f"(e.g. 'glandular epithelial cell' → CL:0000150)."
+        )
+
     logger.info(
         f"OBO loaded: {len(name2id):,} cell type labels "
-        f"(obonet + {_scan_added} [Term] scan + {_inline_added} inline supplements)."
+        f"(obonet + {_scan_added} [Term] scan + {_inline_added} inline "
+        f"+ {_synonym_added} synonyms)."
     )
     return name2id, id2name
 
@@ -339,8 +389,9 @@ _NOTEBOOK_FIXES = {
     "mature nk t cell":              "mature NK T cell",
     "t cell":                        "T cell",
     "follicle":                      "follicle cell of egg chamber",
-    # Present in Tabula Sapiens ovary reference — kept verbatim (valid CL term)
-    "glandular epithelial cell":     "glandular epithelial cell",
+    # CL:0000150 was renamed in newer CL releases; the Tabula Sapiens Nov 2024
+    # reference still uses the old synonym name.
+    "glandular epithelial cell":     "glandular secretory epithelial cell",
 }
 
 
