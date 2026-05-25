@@ -93,36 +93,44 @@ def _resolve_obo_file() -> str:
     Returns path to the OBO FILE (not folder).
 
     Resolution order (first match wins):
-      1. Current working directory  — allows drop-in replacement of the full
-         cl.obo without touching the installed package.  Place the complete
-         cl.obo (e.g. releases/2023-01-09, 17 k+ terms) here and it will be
-         used instead of the stripped SCART-bundled copy (~3 k terms) that
-         silently drops valid labels such as 'glandular epithelial cell'
-         (CL:0000150).
-      2. Directory of this source file  — same drop-in logic for editable
-         installs where __file__ resolves to the project source tree.
-      3. Actual on-disk path of the installed SCART/popv package ontology
-         directory  — resolved via importlib + as_file so that the real
-         filesystem path is obtained and its SIZE can be compared against any
-         CWD candidate.  The larger file (more terms) is always preferred.
+      1. Current working directory
+      2. Directory of this source file
+      3. importlib (installed package copy) — validated for completeness;
+         if the bundled copy is the known stripped subset (~3,324 terms)
+         that is missing valid CL terms such as CL:0000150
+         'glandular epithelial cell', a clear error is raised with the
+         exact command needed to replace it with the full OBO.
       4. Filesystem walk of the SCART / popv package trees.
     """
     import importlib.resources as pkg_resources
 
     obo_filenames = ["cl.obo", "cl_popv.obo"]
 
+    # Minimum number of CL 'name:' lines that a COMPLETE cl.obo must have.
+    # The full CL release (2023-01-09) has ~17 k terms; the SCART-bundled
+    # stripped copy has only ~3,324 and silently drops valid reference labels.
+    _MIN_OBO_NAME_LINES = 10_000
+
+    def _count_name_lines(path: str) -> int:
+        """Fast line-count of 'name:' entries — proxy for OBO completeness."""
+        try:
+            n = 0
+            with open(path, "r", errors="replace") as fh:
+                for line in fh:
+                    if line.startswith("name:"):
+                        n += 1
+            return n
+        except Exception:
+            return 0
+
+    def _is_full_obo(path: str) -> bool:
+        return _count_name_lines(path) >= _MIN_OBO_NAME_LINES
+
     # ------------------------------------------------------------------
-    # Priority 1 & 2 — check local directories before the package bundle.
-    # The SCART-bundled cl.obo is a stripped subset (~3,324 CL terms) and
-    # is missing valid labels present in the full release (e.g. CL:0000150
-    # "glandular epithelial cell").  A full cl.obo dropped into cwd or the
-    # directory of this file will be preferred automatically.
+    # Priority 1 & 2 — cwd and script directory (drop-in replacement)
     # ------------------------------------------------------------------
-    _local_search_dirs = [
-        os.getcwd(),
-        os.path.dirname(os.path.abspath(__file__)),
-    ]
-    for search_dir in _local_search_dirs:
+    for search_dir in [os.getcwd(),
+                       os.path.dirname(os.path.abspath(__file__))]:
         for fname in obo_filenames:
             candidate = os.path.join(search_dir, fname)
             if os.path.isfile(candidate):
@@ -133,7 +141,7 @@ def _resolve_obo_file() -> str:
                 return candidate
 
     # ------------------------------------------------------------------
-    # Priority 3 — importlib (finds the installed package copy)
+    # Priority 3 — importlib (installed package copy)
     # ------------------------------------------------------------------
     candidate_packages = [
         "SCART.PopV.resources.ontology",
@@ -148,9 +156,45 @@ def _resolve_obo_file() -> str:
             try:
                 f = pkg_resources.files(pkg).joinpath(fname)
                 with pkg_resources.as_file(f) as p:
-                    if p.exists():
-                        logger.info(f"OBO found via importlib ({pkg}): {p}")
-                        return str(p)
+                    if not p.exists():
+                        continue
+                    obo_path = str(p)
+
+                    # ── Completeness check ───────────────────────────
+                    # The SCART-bundled cl.obo is a stripped subset that
+                    # omits valid CL terms (e.g. CL:0000150 'glandular
+                    # epithelial cell'), causing reference cells to be
+                    # silently dropped.  Detect this and fail loudly
+                    # with the exact remediation command rather than
+                    # proceeding with a broken ontology.
+                    n_names = _count_name_lines(obo_path)
+                    if n_names < _MIN_OBO_NAME_LINES:
+                        raise FileNotFoundError(
+                            f"\n{'='*65}\n"
+                            f"INCOMPLETE OBO DETECTED\n"
+                            f"{'='*65}\n"
+                            f"Found  : {obo_path}\n"
+                            f"Terms  : {n_names:,}  (need ≥ {_MIN_OBO_NAME_LINES:,})\n\n"
+                            f"The SCART-bundled cl.obo is a stripped subset that is\n"
+                            f"missing valid CL terms such as:\n"
+                            f"  CL:0000150  glandular epithelial cell\n\n"
+                            f"Fix — replace it with the full CL release:\n\n"
+                            f"  # 1. Back up the stripped copy\n"
+                            f"  cp {obo_path} {obo_path}.bak\n\n"
+                            f"  # 2. Copy in the full cl.obo\n"
+                            f"  cp /path/to/full/cl.obo {obo_path}\n\n"
+                            f"OR place the full cl.obo in your working directory:\n\n"
+                            f"  cp /path/to/full/cl.obo $(pwd)/cl.obo\n"
+                            f"{'='*65}"
+                        )
+
+                    logger.info(
+                        f"OBO found via importlib ({pkg}): {obo_path} "
+                        f"({n_names:,} terms — OK)"
+                    )
+                    return obo_path
+            except FileNotFoundError:
+                raise   # re-raise our own completeness error immediately
             except Exception:
                 continue
 
@@ -170,16 +214,24 @@ def _resolve_obo_file() -> str:
             for fname in fnames:
                 if fname in obo_filenames:
                     full = os.path.join(dirpath, fname)
-                    logger.info(f"OBO found via filesystem walk: {full}")
+                    n_names = _count_name_lines(full)
+                    if n_names < _MIN_OBO_NAME_LINES:
+                        logger.warning(
+                            f"Skipping incomplete OBO ({n_names:,} terms): {full}"
+                        )
+                        continue
+                    logger.info(
+                        f"OBO found via filesystem walk: {full} "
+                        f"({n_names:,} terms — OK)"
+                    )
                     return full
 
     raise FileNotFoundError(
-        "Could not locate cl.obo.\n"
-        "Expected at: SCART/PopV/resources/ontology/cl.obo\n"
-        "or inside the popv package directory.\n\n"
-        "TIP: To avoid the stripped bundled copy dropping valid labels\n"
-        "(e.g. 'glandular epithelial cell'), place the full cl.obo in\n"
-        "your working directory — it will be picked up automatically."
+        "Could not locate a complete cl.obo (≥ 10,000 CL terms).\n"
+        "Place the full CL release cl.obo in your working directory:\n\n"
+        "  cp /path/to/full/cl.obo $(pwd)/cl.obo\n\n"
+        "or replace the SCART-bundled copy at:\n"
+        "  SCART/PopV/resources/ontology/cl.obo"
     )
 
 
