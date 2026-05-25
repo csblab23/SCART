@@ -96,9 +96,6 @@ setup(
         "scvi-tools",
         "torch",
         "rpy2>=3.5",
-        "torchmetrics>=0.10.3,<0.11",
-        "lightning<2.0",
-        "setuptools<81",
     ],
     cmdclass={
         "install": PostInstall,
