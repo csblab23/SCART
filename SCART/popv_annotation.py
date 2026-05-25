@@ -19,9 +19,23 @@ Key notebook logic preserved:
  10. Query cells extracted by obs_names after annotation (notebook approach)
  11. Full-gene raw counts preserved via layers['full_counts'] + sidecar h5ad
      for Module 3 (scMalignantFinder / SCEVAN)
+
+FIX: OnClass (TensorFlow) and popv (PyTorch) imports are deferred to inside
+run_popv_annotation() to prevent a segfault caused by both backends loading
+simultaneously at module import time.
 """
 
+# ---------------------------------------------------------------------------
+# Force PyTorch-only mode for HuggingFace Transformers BEFORE any imports.
+# This prevents transformers from initialising TensorFlow alongside PyTorch,
+# which is the root cause of the segfault.
+# ---------------------------------------------------------------------------
 import os
+os.environ.setdefault("USE_TF", "0")
+os.environ.setdefault("USE_TORCH", "1")
+os.environ.setdefault("USE_JAX", "0")
+os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+
 import glob
 import logging
 import urllib.request
@@ -37,13 +51,12 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 import obonet
-import OnClass
-import sys
-sys.modules["onclass_utils"] = OnClass
 
-import popv
-from popv.preprocessing import Process_Query
-from popv.annotation import annotate_data
+# ---------------------------------------------------------------------------
+# NOTE: OnClass, popv, Process_Query, annotate_data are intentionally NOT
+# imported here at module level.  They are imported inside run_popv_annotation()
+# to prevent the TensorFlow + PyTorch simultaneous-load segfault.
+# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -106,8 +119,6 @@ def make_celltype_to_cell_ontology_id_dict(obo_file: str):
 
     # ------------------------------------------------------------------
     # Tier 2 — direct [Term] scan
-    # Flush on [Term] header (not just blank lines) to catch blocks with
-    # no blank-line separator between them.
     # ------------------------------------------------------------------
     _scan_added = 0
     try:
@@ -126,7 +137,7 @@ def make_celltype_to_cell_ontology_id_dict(obo_file: str):
             for raw in fh:
                 line = raw.rstrip()
                 if line == "[Term]":
-                    _flush()                    # flush BEFORE reset
+                    _flush()
                     cur_id = cur_name = None
                     cur_obs = False
                 elif line.startswith("id: CL:"):
@@ -140,23 +151,16 @@ def make_celltype_to_cell_ontology_id_dict(obo_file: str):
                     cur_id = cur_name = None
                     cur_obs = False
 
-        _flush()  # flush final term at EOF
+        _flush()
 
     except Exception as exc:
         logger.warning(f"Direct OBO scan failed (non-fatal): {exc}")
 
     if _scan_added:
-        logger.info(
-            f"Direct OBO scan added {_scan_added} CL terms missed by obonet."
-        )
+        logger.info(f"Direct OBO scan added {_scan_added} CL terms missed by obonet.")
 
     # ------------------------------------------------------------------
     # Tier 3 — inline comment mining
-    # Some CL IDs have no [Term] block at all; they only appear as
-    # relationship targets with an inline '! name' comment, e.g.:
-    #   is_a: CL:0000150 ! glandular epithelial cell
-    # obonet adds these as graph nodes but with name=None (filtered above).
-    # Neither Tier 1 nor Tier 2 can recover the name — this tier does.
     # ------------------------------------------------------------------
     _inline_added = 0
     try:
@@ -183,15 +187,6 @@ def make_celltype_to_cell_ontology_id_dict(obo_file: str):
 
     # ------------------------------------------------------------------
     # Tier 4 — synonym parsing
-    # OBO terms can have EXACT synonyms for names used in older releases.
-    # Reference datasets built against older CL versions may store a synonym
-    # rather than the current primary name, causing valid cells to be dropped.
-    # This tier adds synonym -> CL ID mappings so both old and new names
-    # resolve correctly.
-    # NOTE: In the notebook's bundled cl.obo, "glandular epithelial cell" is
-    # already the PRIMARY name for CL:0000150 — no synonym remapping occurs
-    # for that term with this OBO. This tier is retained for forward-compat
-    # with newer OBO releases where terms may be renamed.
     # ------------------------------------------------------------------
     _synonym_added = 0
     try:
@@ -209,8 +204,6 @@ def make_celltype_to_cell_ontology_id_dict(obo_file: str):
                     m = _syn_pattern.match(line)
                     if m:
                         syn_name = m.group(1).strip()
-                        # Add synonym as an additional name2id entry
-                        # only if not already present as a primary name
                         if syn_name not in name2id:
                             name2id[syn_name] = cur_id_syn
                             _synonym_added += 1
@@ -231,33 +224,18 @@ def make_celltype_to_cell_ontology_id_dict(obo_file: str):
     return name2id, id2name
 
 
-
 def _resolve_obo_file() -> str:
     """
     Locate cl.obo from SCART bundle or popv package directory.
     Returns path to the OBO FILE (not folder).
-
-    Resolution order (first match wins):
-      1. Current working directory
-      2. Directory of this source file
-      3. importlib (installed package copy) — validated for completeness;
-         if the bundled copy is the known stripped subset (~3,324 terms)
-         that is missing valid CL terms such as CL:0000150
-         'glandular epithelial cell', a clear error is raised with the
-         exact command needed to replace it with the full OBO.
-      4. Filesystem walk of the SCART / popv package trees.
     """
     import importlib.resources as pkg_resources
 
     obo_filenames = ["cl.obo", "cl_popv.obo"]
 
-    # Minimum number of CL 'name:' lines that a COMPLETE cl.obo must have.
-    # The full CL release (2023-01-09) has ~17 k terms; the SCART-bundled
-    # stripped copy has only ~3,324 and silently drops valid reference labels.
     _MIN_OBO_NAME_LINES = 10_000
 
     def _count_name_lines(path: str) -> int:
-        """Fast line-count of 'name:' entries — proxy for OBO completeness."""
         try:
             n = 0
             with open(path, "r", errors="replace") as fh:
@@ -271,9 +249,6 @@ def _resolve_obo_file() -> str:
     def _is_full_obo(path: str) -> bool:
         return _count_name_lines(path) >= _MIN_OBO_NAME_LINES
 
-    # ------------------------------------------------------------------
-    # Priority 1 & 2 — cwd and script directory (drop-in replacement)
-    # ------------------------------------------------------------------
     for search_dir in [os.getcwd(),
                        os.path.dirname(os.path.abspath(__file__))]:
         for fname in obo_filenames:
@@ -285,9 +260,6 @@ def _resolve_obo_file() -> str:
                 )
                 return candidate
 
-    # ------------------------------------------------------------------
-    # Priority 3 — importlib (installed package copy)
-    # ------------------------------------------------------------------
     candidate_packages = [
         "SCART.PopV.resources.ontology",
         "SCART.PopV.resources",
@@ -305,13 +277,6 @@ def _resolve_obo_file() -> str:
                         continue
                     obo_path = str(p)
 
-                    # ── Completeness check ───────────────────────────
-                    # The SCART-bundled cl.obo is a stripped subset that
-                    # omits valid CL terms (e.g. CL:0000150 'glandular
-                    # epithelial cell'), causing reference cells to be
-                    # silently dropped.  Detect this and fail loudly
-                    # with the exact remediation command rather than
-                    # proceeding with a broken ontology.
                     n_names = _count_name_lines(obo_path)
                     if n_names < _MIN_OBO_NAME_LINES:
                         raise FileNotFoundError(
@@ -339,13 +304,10 @@ def _resolve_obo_file() -> str:
                     )
                     return obo_path
             except FileNotFoundError:
-                raise   # re-raise our own completeness error immediately
+                raise
             except Exception:
                 continue
 
-    # ------------------------------------------------------------------
-    # Priority 4 — filesystem walk
-    # ------------------------------------------------------------------
     walk_roots = []
     for pkg_name in ("SCART", "popv"):
         try:
@@ -381,16 +343,9 @@ def _resolve_obo_file() -> str:
 
 
 # ---------------------------------------------------------------------------
-# 2. Reference label normalisation — matches notebook corrections exactly,
-#    then extends generically via OBO lookup for any unseen label
+# 2. Reference label normalisation
 # ---------------------------------------------------------------------------
 
-# Exact replacements the notebook applies (Cell 13 of PopV_GSE173682.ipynb — kept verbatim).
-# IMPORTANT: Do NOT add a mapping for "glandular epithelial cell".
-#   In the notebook's bundled cl.obo (CL:0000150), "glandular epithelial cell" IS the
-#   primary name.  Adding any remapping here causes those reference cells to be dropped
-#   (the remapped target doesn't exist in the ontology) and corrupts PopV predictions.
-#   "glandular secretory epithelial cell" does NOT appear anywhere in the notebook OBO.
 _NOTEBOOK_FIXES = {
     "b cell":                          "B cell",
     "cd4-positive, alpha-beta t cell": "CD4-positive, alpha-beta T cell",
@@ -404,33 +359,14 @@ _NOTEBOOK_FIXES = {
 def _normalise_ref_labels(adata_ref: anndata.AnnData,
                            label_col: str,
                            name2id: dict) -> anndata.AnnData:
-    """
-    1. Strip leading/trailing whitespace and apply Unicode NFC normalisation.
-       Newer Tabula Sapiens reference versions (e.g. Nov 2024) store some
-       labels with invisible characters or non-breaking spaces that cause the
-       OBO lookup to fail even though the label text looks correct.
-    2. Apply the notebook's hardcoded fixes.
-    3. For any label still missing from the ontology, attempt a
-       case-insensitive OBO lookup (also on the stripped/normalised form).
-    4. Drop cells whose label still cannot be found (would cause
-       NetworkXError in PopV's KNN label propagation).
-    """
     col = adata_ref.obs[label_col].astype(str).copy()
 
-    # Step 0 — strip whitespace + NFC unicode normalisation
-    # This fixes labels like 'glandular epithelial cell ' (trailing space)
-    # or 'glandular\xa0epithelial cell' (non-breaking space) that appear in
-    # newer reference versions and silently break the OBO membership check.
     col = col.str.strip()
     col = col.map(lambda s: unicodedata.normalize("NFC", s))
 
-    # Step 1 — notebook exact replacements (applied on the cleaned strings)
     for wrong, right in _NOTEBOOK_FIXES.items():
         col = col.replace(wrong, right)
 
-    # Step 2 — generic case-insensitive OBO lookup for anything still missing
-    # Build lookup on stripped+normalised canonical names so it is consistent
-    # with the cleaning applied above.
     lower2canonical = {
         unicodedata.normalize("NFC", k.strip()).lower(): k
         for k in name2id
@@ -446,7 +382,6 @@ def _normalise_ref_labels(adata_ref: anndata.AnnData,
 
     adata_ref.obs[label_col] = col
 
-    # Step 3 — drop cells with labels not in ontology (same logic as before)
     valid   = set(name2id.keys())
     mask    = adata_ref.obs[label_col].isin(valid)
     n_drop  = (~mask).sum()
@@ -465,14 +400,10 @@ def _normalise_ref_labels(adata_ref: anndata.AnnData,
 
 
 # ---------------------------------------------------------------------------
-# 3. Reference var index — notebook sets it to gene_symbol if present
+# 3. Reference var index
 # ---------------------------------------------------------------------------
 
 def _set_ref_var_index(adata_ref: anndata.AnnData) -> anndata.AnnData:
-    """
-    Mirror notebook:  ref_adata.var.index = ref_adata.var['gene_symbol']
-    Falls back gracefully if the column is absent.
-    """
     if "gene_symbol" in adata_ref.var.columns:
         logger.info("Setting ref var index to 'gene_symbol' (notebook step).")
         adata_ref.var.index = adata_ref.var["gene_symbol"]
@@ -482,25 +413,17 @@ def _set_ref_var_index(adata_ref: anndata.AnnData) -> anndata.AnnData:
     else:
         logger.info("No gene_symbol / feature_name column — keeping existing var index.")
 
-    # Ensure string index and uniqueness (notebook does var_names_make_unique)
     adata_ref.var.index = pd.Index(adata_ref.var.index.astype(str))
     adata_ref.var_names_make_unique()
-    # Notebook converts to CategoricalIndex — affects HVG selection inside Process_Query
     adata_ref.var.index = pd.CategoricalIndex(adata_ref.var.index)
     return adata_ref
 
 
 # ---------------------------------------------------------------------------
-# 4. Raw count routing — same as notebook's explicit layer checks
+# 4. Raw count routing
 # ---------------------------------------------------------------------------
 
 def _set_raw_counts_in_X(adata: anndata.AnnData, label: str = "") -> anndata.AnnData:
-    """
-    Put raw integer counts into .X, checking layers in priority order.
-    Mirrors notebook logic:
-      ref: X = layers['raw_counts'].copy()
-      query: X = layers['counts'].copy()
-    """
     tag = f"[{label}] " if label else ""
 
     if "counts" in adata.layers:
@@ -515,7 +438,6 @@ def _set_raw_counts_in_X(adata: anndata.AnnData, label: str = "") -> anndata.Ann
     else:
         logger.info(f"{tag}No count layer found — assuming .X already contains raw counts.")
 
-    # Ensure float32 sparse (PopV requirement)
     if sp.issparse(adata.X):
         adata.X = adata.X.tocsr().astype(np.float32)
     else:
@@ -546,14 +468,10 @@ def _validate_raw_counts(adata: anndata.AnnData, label: str = "") -> None:
 
 
 # ---------------------------------------------------------------------------
-# 5. Standardise reference layer names — notebook renames raw_counts → counts
+# 5. Standardise reference layer names
 # ---------------------------------------------------------------------------
 
 def _standardise_ref_layers(adata_ref: anndata.AnnData) -> anndata.AnnData:
-    """
-    Notebook: ref_adata.layers['counts'] = ref_adata.layers['raw_counts'].copy()
-    Ensures downstream code always finds layers['counts'] on the reference.
-    """
     if "counts" not in adata_ref.layers:
         if "raw_counts" in adata_ref.layers:
             logger.info("Reference: renaming layers['raw_counts'] → layers['counts'].")
@@ -565,24 +483,16 @@ def _standardise_ref_layers(adata_ref: anndata.AnnData) -> anndata.AnnData:
 
 
 # ---------------------------------------------------------------------------
-# 6. Prefix reference obs columns — notebook renames all to 'ref_*'
+# 6. Prefix reference obs columns
 # ---------------------------------------------------------------------------
 
 def _prefix_ref_obs_columns(adata_ref: anndata.AnnData) -> tuple:
-    """
-    Mirror notebook:
-        ref_adata.obs.columns = [f'ref_{col}' for col in ref_adata.obs.columns]
-
-    Returns (adata_ref, ref_labels_key) where ref_labels_key is the
-    post-prefix column name used as the PopV label key.
-    """
     new_cols = {c: f"ref_{c}" for c in adata_ref.obs.columns
                 if not c.startswith("ref_")}
     if new_cols:
         logger.info(f"Prefixing {len(new_cols)} reference obs columns with 'ref_'.")
         adata_ref.obs = adata_ref.obs.rename(columns=new_cols)
 
-    # Determine correct label column name after prefixing
     ref_labels_key = None
     for candidate in ("ref_cell_ontology_class", "cell_ontology_class"):
         if candidate in adata_ref.obs.columns:
@@ -600,7 +510,7 @@ def _prefix_ref_obs_columns(adata_ref: anndata.AnnData) -> tuple:
 
 
 # ---------------------------------------------------------------------------
-# 7. Auto-detect query batch key — notebook uses 'sample'
+# 7. Auto-detect query batch key
 # ---------------------------------------------------------------------------
 
 _BATCH_KEY_CANDIDATES = ["sample", "batch", "Sample", "Batch", "patient",
@@ -625,30 +535,11 @@ def _detect_query_batch_key(adata_query: anndata.AnnData) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# 8. Layer alignment — strip all layers from both sides before Process_Query
+# 8. Layer alignment
 # ---------------------------------------------------------------------------
 
 def _strip_layers_for_popv(adata_query: anndata.AnnData,
                             adata_ref:   anndata.AnnData) -> tuple:
-    """
-    anndata.concat(..., join='outer', fill_value='unknown') fills missing
-    layer slots with the string 'unknown', which scipy.sparse rejects
-    (dtype str224 is not supported).
-
-    The safe fix is to strip ALL layers from both query and reference
-    before passing to Process_Query, so anndata.concat never sees a
-    layer mismatch.  PopV only needs .X (raw counts) — it builds its
-    own internal layers during preprocessing.
-
-    The 'counts' layer on query is kept as the sole exception because
-    some popv internals check for it.  All other layers are dropped.
-    """
-    # Both query and reference must have IDENTICAL layer keys before Process_Query.
-    # anndata.concat(join='outer', fill_value='unknown') fills missing layer slots
-    # with the string 'unknown' → scipy.sparse dtype str224 error.
-    # Solution: keep only 'counts' on both sides. PopV only reads .X internally.
-
-    # ── Reference: strip to 'counts' only ───────────────────────────────────
     ref_keep = {"counts"}
     ref_drop  = [k for k in list(adata_ref.layers.keys()) if k not in ref_keep]
     for k in ref_drop:
@@ -656,7 +547,6 @@ def _strip_layers_for_popv(adata_query: anndata.AnnData,
     if ref_drop:
         logger.info(f"Layer strip (reference): removed {ref_drop}, kept ['counts'].")
 
-    # ── Query: strip to 'counts' only (full_counts already stashed externally) ─
     query_keep = {"counts"}
     query_drop  = [k for k in list(adata_query.layers.keys()) if k not in query_keep]
     for k in query_drop:
@@ -668,7 +558,7 @@ def _strip_layers_for_popv(adata_query: anndata.AnnData,
 
 
 # ---------------------------------------------------------------------------
-# 9. Full-gene count preservation (FIX 8 — layer sidecar for Module 3)
+# 9. Full-gene count preservation
 # ---------------------------------------------------------------------------
 
 def _store_full_counts_layer(adata_query: anndata.AnnData) -> anndata.AnnData:
@@ -696,19 +586,11 @@ def _store_full_counts_layer(adata_query: anndata.AnnData) -> anndata.AnnData:
 
 
 # ---------------------------------------------------------------------------
-# 10. Query cell extraction — notebook approach (obs_names isin query_cells)
+# 10. Query cell extraction
 # ---------------------------------------------------------------------------
 
 def _extract_query_cells(adata_processed:    anndata.AnnData,
                           query_obs_names:    pd.Index) -> anndata.AnnData:
-    """
-    Notebook:
-        query_cells = query_adata.obs_names
-        adata = adata[adata.obs_names.isin(query_cells)]
-
-    Multi-fallback version for robustness across datasets.
-    """
-    # Primary: obs_names intersection (notebook method)
     mask = adata_processed.obs_names.isin(query_obs_names)
     n    = mask.sum()
     if n > 0:
@@ -717,7 +599,6 @@ def _extract_query_cells(adata_processed:    anndata.AnnData,
         )
         return adata_processed[mask].copy()
 
-    # Fallback 1: _dataset column written by Process_Query
     if "_dataset" in adata_processed.obs.columns:
         mask2 = adata_processed.obs["_dataset"] == "query"
         n2    = mask2.sum()
@@ -727,7 +608,6 @@ def _extract_query_cells(adata_processed:    anndata.AnnData,
             )
             return adata_processed[mask2].copy()
 
-    # Fallback 2: NaN in reference label column
     ref_col_candidates = [c for c in adata_processed.obs.columns
                           if "reference_labels" in c or "ref_cell_ontology" in c]
     for col in ref_col_candidates:
@@ -747,7 +627,7 @@ def _extract_query_cells(adata_processed:    anndata.AnnData,
 
 
 # ---------------------------------------------------------------------------
-# 11. Sidecar h5ad for Module 3 (full-gene space)
+# 11. Sidecar h5ad for Module 3
 # ---------------------------------------------------------------------------
 
 def _write_full_counts_sidecar(
@@ -881,11 +761,6 @@ def detect_cancer_type_from_h5ad(h5ad_file: str) -> str:
 
 def _fix_cell_ontology_id(adata_ref: anndata.AnnData,
                            id_col: str = "ref_cell_ontology_id") -> anndata.AnnData:
-    """
-    Notebook: ref_adata.obs['cell_ontology_id'].replace("None", "CL:0000477")
-    Applied after column prefixing.
-    """
-    # Try both prefixed and unprefixed column names
     for col in (id_col, "cell_ontology_id"):
         if col in adata_ref.obs.columns:
             before = (adata_ref.obs[col].astype(str) == "None").sum()
@@ -962,6 +837,19 @@ def run_popv_annotation(
     n_jobs : int
         CPU threads (-1 = all cores).
     """
+    # ── Deferred heavy imports ───────────────────────────────────────────────
+    # OnClass (TensorFlow) and popv (PyTorch) are imported HERE rather than at
+    # module level to prevent a segfault caused by both backends initialising
+    # simultaneously when the module is first imported.
+    import sys as _sys
+    import OnClass as _OnClass
+    _sys.modules["onclass_utils"] = _OnClass
+
+    import popv
+    from popv.preprocessing import Process_Query
+    from popv.annotation import annotate_data
+    # ────────────────────────────────────────────────────────────────────────
+
     os.makedirs(output_dir, exist_ok=True)
 
     # ── Resolve OBO file ────────────────────────────────────────────────────
@@ -969,8 +857,6 @@ def run_popv_annotation(
     cl_obo_folder = os.path.dirname(obo_file) + "/"
     name2id, _    = make_celltype_to_cell_ontology_id_dict(obo_file)
 
-    # OnClass needs cl.ontology in the same folder as cl.obo (notebook assumption).
-    # If missing, check whether it was uploaded alongside this run and copy it in.
     _cl_ontology_dest = os.path.join(cl_obo_folder, "cl.ontology")
     if not os.path.exists(_cl_ontology_dest):
         _search_paths = [
@@ -993,7 +879,7 @@ def run_popv_annotation(
     # ── Snapshot original query obs_names for later extraction ──────────────
     query_obs_names_orig = adata_query.obs_names.copy()
 
-    # ── Step 1: set gene symbol index on reference (notebook step) ──────────
+    # ── Step 1: set gene symbol index on reference ───────────────────────────
     adata_ref = _set_ref_var_index(adata_ref)
 
     # ── Step 2: route raw counts into .X ────────────────────────────────────
@@ -1002,8 +888,7 @@ def run_popv_annotation(
 
     _validate_raw_counts(adata_query, label="query")
 
-    # ── Step 3: normalise reference labels using OBO + notebook fixes ────────
-    # Must happen BEFORE column prefixing (label col is still 'cell_ontology_class')
+    # ── Step 3: normalise reference labels ───────────────────────────────────
     if "cell_ontology_class" in adata_ref.obs.columns:
         adata_ref = _normalise_ref_labels(adata_ref, "cell_ontology_class", name2id)
     else:
@@ -1012,24 +897,22 @@ def run_popv_annotation(
     # ── Step 4: standardise reference layer names ────────────────────────────
     adata_ref = _standardise_ref_layers(adata_ref)
 
-    # ── Step 5: prefix reference obs columns → 'ref_*' (notebook step) ──────
+    # ── Step 5: prefix reference obs columns ─────────────────────────────────
     adata_ref, ref_labels_key = _prefix_ref_obs_columns(adata_ref)
 
-    # ── Step 6: fix 'None' cell_ontology_id strings (notebook step) ─────────
+    # ── Step 6: fix 'None' cell_ontology_id strings ──────────────────────────
     adata_ref = _fix_cell_ontology_id(adata_ref)
 
-    # ── Step 7: make obs/var names unique (notebook step) ───────────────────
+    # ── Step 7: make obs/var names unique ────────────────────────────────────
     adata_query.obs_names_make_unique()
     adata_ref.obs_names_make_unique()
     adata_query.var_names_make_unique()
     adata_ref.var_names_make_unique()
 
-    # ── Step 8: auto-detect query batch key (notebook uses 'sample') ─────────
+    # ── Step 8: auto-detect query batch key ──────────────────────────────────
     query_batch_key = _detect_query_batch_key(adata_query)
 
-    # ── Step 9: compute n_samples_per_label dynamically (notebook formula) ───
-    # Notebook: min_celltype_size computed on ref_labels_key AFTER prefixing
-    # (ref_labels_key = 'ref_cell_ontology_class' at this point — matches notebook exactly)
+    # ── Step 9: compute n_samples_per_label dynamically ──────────────────────
     min_celltype_size   = int(
         adata_ref.obs.groupby(ref_labels_key).size().min()
     )
@@ -1039,7 +922,7 @@ def run_popv_annotation(
         f"nsamples={nsamples}) = {n_samples_per_label}"
     )
 
-    # ── Step 10: check common genes ─────────────────────────────────────────
+    # ── Step 10: check common genes ──────────────────────────────────────────
     common_genes = sorted(
         set(adata_query.var_names) & set(adata_ref.var_names)
     )
@@ -1053,34 +936,29 @@ def run_popv_annotation(
             "Check that both use the same gene identifier (symbol vs Ensembl ID)."
         )
 
-    # ── Step 11: snapshot full-gene counts BEFORE any subsetting ────────────
+    # ── Step 11: snapshot full-gene counts BEFORE any subsetting ─────────────
     adata_query = _store_full_counts_layer(adata_query)
     _full_counts_stash    = adata_query.layers["full_counts"].copy()
     _full_var_names_stash = list(adata_query.uns["full_counts_var_names"])
 
-    # ── Step 12: strip layers from both sides before Process_Query ──────────
-    # anndata.concat fill_value='unknown' (a string) causes scipy.sparse
-    # dtype errors when layers exist on one side but not the other.
-    # Solution: keep only 'counts' on both — PopV only needs .X anyway.
+    # ── Step 12: strip layers from both sides before Process_Query ───────────
     adata_query, adata_ref = _strip_layers_for_popv(adata_query, adata_ref)
 
-    # ── Step 13: clear raw from both (PopV manages its own raw internally) ───
+    # ── Step 13: clear raw ────────────────────────────────────────────────────
     adata_query.raw = None
     adata_ref.raw   = None
 
-    # ── Step 14: parallelism ─────────────────────────────────────────────────
-    import os as _os
-    n_threads = str(n_jobs if n_jobs > 0 else (_os.cpu_count() or 1))
+    # ── Step 14: parallelism ──────────────────────────────────────────────────
+    n_threads = str(n_jobs if n_jobs > 0 else (os.cpu_count() or 1))
     for env_var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
-        _os.environ[env_var] = n_threads
+        os.environ[env_var] = n_threads
     try:
         popv.Config.num_threads = int(n_threads)
     except Exception:
         pass
     logger.info(f"Parallelism: n_jobs={n_jobs} ({n_threads} threads).")
 
-    # ── Step 15: Process_Query ───────────────────────────────────────────────
-    # Mirrors notebook arguments exactly; only omits args removed in popv 0.4.2
+    # ── Step 15: Process_Query ────────────────────────────────────────────────
     logger.info("Running Process_Query …")
 
     pq_kwargs = dict(
@@ -1095,7 +973,6 @@ def run_popv_annotation(
         hvg                   = None,
     )
 
-    # Gracefully add args that may not exist in all popv 0.4.x sub-versions
     _tmp_dir = os.path.join(output_dir, "tmp")
     os.makedirs(_tmp_dir, exist_ok=True)
     for optional_kwarg, value in [
@@ -1122,16 +999,7 @@ def run_popv_annotation(
 
     logger.info(f"Process_Query done — combined shape: {adata_combined.shape}")
 
-    # ── Step 16: run annotation methods (notebook method list) ───────────────
-    # Notebook: ["celltypist", "knn_on_bbknn", "knn_on_harmony",
-    #            "knn_on_scanorama", "onclass", "rf", "svm"]
-    # We try both old-style lowercase and new UPPER_SNAKE names for compatibility.
-
-    # OnClass is included in the notebook's method list and works from cl.obo alone.
-    # PopV internally generates cl.ontology from cl.obo during Process_Query and
-    # saves it to save_path_trained_models (tmp dir) — so it exists by this point.
-    # We always include OnClass; if it still fails it is caught by the per-method
-    # try/except below and skipped with a warning rather than crashing the pipeline.
+    # ── Step 16: run annotation methods ──────────────────────────────────────
     _METHOD_CANDIDATES = [
         ["celltypist",      "CELLTYPIST"],
         ["knn_on_bbknn",    "KNN_BBKNN"],
@@ -1150,10 +1018,8 @@ def run_popv_annotation(
                     return name
         except ImportError:
             pass
-        # Fall back to first candidate and let annotate_data raise if wrong
         return candidates[0]
 
-    # Build run list — skip harmony if fewer than 2 batch values
     _batch_vals = set()
     if "_batch_annotation" in adata_combined.obs.columns:
         _batch_vals = set(adata_combined.obs["_batch_annotation"].unique())
@@ -1163,7 +1029,7 @@ def run_popv_annotation(
 
     successful = []
     for candidates in _METHOD_CANDIDATES:
-        canonical = candidates[0]  # human-readable name for logging
+        canonical = candidates[0]
         if "harmony" in canonical and not has_two_batches:
             logger.warning(
                 f"Skipping {canonical}: fewer than 2 real batch values in "
@@ -1173,7 +1039,6 @@ def run_popv_annotation(
 
         method_name = _resolve_method_name(candidates)
         try:
-            # annotate_data signature varies: try with save_path, fall back without
             try:
                 annotate_data(adata_combined, methods=[method_name],
                               save_path=_tmp_save)
@@ -1190,8 +1055,7 @@ def run_popv_annotation(
 
     logger.info(f"Annotation complete. Successful methods: {successful}")
 
-    # ── Step 17: consensus prediction column ────────────────────────────────
-    # Notebook uses 'popv_prediction'; newer popv may write 'popv_majority_vote_prediction'
+    # ── Step 17: consensus prediction column ─────────────────────────────────
     for pred_col in ("popv_prediction", "popv_majority_vote_prediction"):
         if pred_col in adata_combined.obs.columns:
             logger.info(
@@ -1200,7 +1064,6 @@ def run_popv_annotation(
             )
             break
     else:
-        # Build fallback from whichever prediction columns exist
         fallback_cols = [
             c for c in adata_combined.obs.columns
             if c.endswith("_prediction") and adata_combined.obs[c].notna().any()
@@ -1215,19 +1078,17 @@ def run_popv_annotation(
         else:
             logger.error("No prediction columns found at all — annotation failed.")
 
-    # Ensure 'popv_majority_vote_prediction' always exists for downstream modules
     if ("popv_majority_vote_prediction" not in adata_combined.obs.columns
             and "popv_prediction" in adata_combined.obs.columns):
         adata_combined.obs["popv_majority_vote_prediction"] = (
             adata_combined.obs["popv_prediction"]
         )
 
-    # ── Step 18: extract query cells (notebook: obs_names isin query_cells) ──
+    # ── Step 18: extract query cells ─────────────────────────────────────────
     adata_out = _extract_query_cells(adata_combined, query_obs_names_orig)
     logger.info(f"Query-only shape: {adata_out.shape}")
 
-    # ── Step 19: notebook saves log_normalised X as a layer ──────────────────
-    # We preserve the PopV-internal .X (usually log-normalised) as 'log_normalized'
+    # ── Step 19: preserve log-normalised X as layer ───────────────────────────
     adata_out.layers["log_normalized"] = adata_out.X.copy()
 
     # ── Step 20: restore raw counts layer in HVG space ───────────────────────
@@ -1254,11 +1115,7 @@ def run_popv_annotation(
             f"col match: {len(hvg_col_in_full)}/{len(hvg_names)})."
         )
 
-    # ── Step 21: store full_counts var names in uns (layer goes to sidecar only) ─
-    # full_counts has shape (n_cells, 27984) — full gene space.
-    # adata_out has shape (n_cells, 21418) — HVG space.
-    # AnnData layers must match .var shape, so full_counts cannot be a layer here.
-    # It is written to the sidecar h5ad (Step 22) for Module 3 instead.
+    # ── Step 21: store full_counts var names in uns ───────────────────────────
     if len(row_idx) == adata_out.n_obs:
         adata_out.uns["full_counts_var_names"] = _full_var_names_stash
         logger.info(
