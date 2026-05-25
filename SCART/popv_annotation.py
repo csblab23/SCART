@@ -64,12 +64,21 @@ TABULA_DOI_LINK     = "https://doi.org/10.6084/m9.figshare.27921984"
 
 def make_celltype_to_cell_ontology_id_dict(obo_file: str):
     """
-    Parse cl.obo with obonet (same as notebook).
+    Parse cl.obo with obonet (same as notebook), then supplement with a
+    direct line-scan of the OBO file.
+
+    obonet builds a graph from relationship edges.  Depending on the OBO
+    release version and the installed obonet version, some [Term] blocks
+    whose nodes have no outgoing edges (e.g. root-like terms such as
+    CL:0000150 'glandular epithelial cell') may be absent from the graph
+    even though their [Term] block is physically present in the file.  The
+    direct scan ensures every CL [Term] block contributes to name2id/id2name
+    regardless of graph connectivity or obonet version.
 
     Returns
     -------
-    name2id : dict  {cell type name → CL:xxxxxxx}
-    id2name : dict  {CL:xxxxxxx → cell type name}
+    name2id : dict  {cell type name -> CL:xxxxxxx}
+    id2name : dict  {CL:xxxxxxx -> cell type name}
     """
     logger.info(f"Parsing OBO: {obo_file}")
     with open(obo_file, "r") as f:
@@ -81,10 +90,56 @@ def make_celltype_to_cell_ontology_id_dict(obo_file: str):
         if "CL:" in id_
     }
     id2name = {k: v for k, v in id2name.items() if v is not None}
-    name2id = {v: k for k, v in id2name.items()}
 
-    logger.info(f"OBO loaded: {len(name2id):,} cell type labels.")
+    # ------------------------------------------------------------------
+    # Supplemental direct scan — catches any CL [Term] block that obonet
+    # did not add to its graph (version- and topology-dependent gap).
+    # Only adds entries that are genuinely missing; never overwrites obonet.
+    # ------------------------------------------------------------------
+    _scan_added = 0
+    try:
+        cur_id   = None
+        cur_name = None
+        cur_obs  = False
+        with open(obo_file, "r", errors="replace") as fh:
+            for raw in fh:
+                line = raw.rstrip()
+                if line == "[Term]":
+                    cur_id = cur_name = None
+                    cur_obs = False
+                elif line.startswith("id: CL:"):
+                    cur_id = line[4:].strip()
+                elif line.startswith("name: ") and cur_id is not None:
+                    cur_name = line[6:].strip()
+                elif line.startswith("is_obsolete: true"):
+                    cur_obs = True
+                elif line == "" and cur_id and cur_name and not cur_obs:
+                    if cur_id not in id2name:
+                        id2name[cur_id] = cur_name
+                        _scan_added += 1
+                    cur_id = cur_name = None
+                    cur_obs = False
+            # flush last term if file does not end with a blank line
+            if cur_id and cur_name and not cur_obs and cur_id not in id2name:
+                id2name[cur_id] = cur_name
+                _scan_added += 1
+    except Exception as exc:
+        logger.warning(f"Direct OBO scan failed (non-fatal): {exc}")
+
+    if _scan_added:
+        logger.info(
+            f"Direct OBO scan added {_scan_added} CL terms missed by obonet "
+            f"(e.g. root/disconnected nodes such as CL:0000150 "
+            f"'glandular epithelial cell')."
+        )
+
+    name2id = {v: k for k, v in id2name.items()}
+    logger.info(
+        f"OBO loaded: {len(name2id):,} cell type labels "
+        f"(obonet + {_scan_added} direct-scan supplements)."
+    )
     return name2id, id2name
+
 
 
 def _resolve_obo_file() -> str:
