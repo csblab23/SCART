@@ -79,9 +79,12 @@ def make_celltype_to_cell_ontology_id_dict(obo_file: str):
                releases and are now stored as EXACT synonyms. Reference datasets
                built against older CL versions may store the synonym rather than
                the current primary name, causing valid cells to be dropped.
-               Example: CL:0000150 primary name is now 'glandular secretory
-               epithelial cell' but carries synonym "glandular epithelial cell"
-               EXACT [] — which is what the Tabula Sapiens Nov 2024 reference uses.
+               NOTE: The notebook's bundled cl.obo (2810 CL terms) has
+               "glandular epithelial cell" as the PRIMARY name for CL:0000150 —
+               no synonym remapping is needed or applied for that term.
+               This tier is retained for forward-compatibility with newer OBO
+               releases where terms may be renamed and the old name demoted to
+               an EXACT synonym.
 
     Returns
     -------
@@ -180,14 +183,15 @@ def make_celltype_to_cell_ontology_id_dict(obo_file: str):
 
     # ------------------------------------------------------------------
     # Tier 4 — synonym parsing
-    # OBO terms can have EXACT synonyms for names that were used in older
-    # releases. Reference datasets built against older CL versions may
-    # store the synonym rather than the current primary name, causing
-    # valid cells to be dropped. This tier adds synonym -> CL ID mappings
-    # so both old and new names resolve correctly.
-    # Example: CL:0000150 primary name is now 'glandular secretory
-    # epithelial cell' but carries synonym "glandular epithelial cell"
-    # EXACT [] — which is what the Tabula Sapiens Nov 2024 reference uses.
+    # OBO terms can have EXACT synonyms for names used in older releases.
+    # Reference datasets built against older CL versions may store a synonym
+    # rather than the current primary name, causing valid cells to be dropped.
+    # This tier adds synonym -> CL ID mappings so both old and new names
+    # resolve correctly.
+    # NOTE: In the notebook's bundled cl.obo, "glandular epithelial cell" is
+    # already the PRIMARY name for CL:0000150 — no synonym remapping occurs
+    # for that term with this OBO. This tier is retained for forward-compat
+    # with newer OBO releases where terms may be renamed.
     # ------------------------------------------------------------------
     _synonym_added = 0
     try:
@@ -216,7 +220,7 @@ def make_celltype_to_cell_ontology_id_dict(obo_file: str):
     if _synonym_added:
         logger.info(
             f"Synonym parsing added {_synonym_added} additional name aliases "
-            f"(e.g. 'glandular epithelial cell' → CL:0000150)."
+            f"from OBO EXACT synonyms (forward-compatibility with newer CL releases)."
         )
 
     logger.info(
@@ -381,17 +385,19 @@ def _resolve_obo_file() -> str:
 #    then extends generically via OBO lookup for any unseen label
 # ---------------------------------------------------------------------------
 
-# Exact replacements the notebook applies (kept verbatim)
+# Exact replacements the notebook applies (Cell 13 of PopV_GSE173682.ipynb — kept verbatim).
+# IMPORTANT: Do NOT add a mapping for "glandular epithelial cell".
+#   In the notebook's bundled cl.obo (CL:0000150), "glandular epithelial cell" IS the
+#   primary name.  Adding any remapping here causes those reference cells to be dropped
+#   (the remapped target doesn't exist in the ontology) and corrupts PopV predictions.
+#   "glandular secretory epithelial cell" does NOT appear anywhere in the notebook OBO.
 _NOTEBOOK_FIXES = {
-    "b cell":                        "B cell",
+    "b cell":                          "B cell",
     "cd4-positive, alpha-beta t cell": "CD4-positive, alpha-beta T cell",
     "cd8-positive, alpha-beta t cell": "CD8-positive, alpha-beta T cell",
-    "mature nk t cell":              "mature NK T cell",
-    "t cell":                        "T cell",
-    "follicle":                      "follicle cell of egg chamber",
-    # CL:0000150 was renamed in newer CL releases; the Tabula Sapiens Nov 2024
-    # reference still uses the old synonym name.
-    "glandular epithelial cell":     "glandular secretory epithelial cell",
+    "mature nk t cell":                "mature NK T cell",
+    "t cell":                          "T cell",
+    "follicle":                        "follicle cell of egg chamber",
 }
 
 
