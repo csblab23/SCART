@@ -91,11 +91,50 @@ def _resolve_obo_file() -> str:
     """
     Locate cl.obo from SCART bundle or popv package directory.
     Returns path to the OBO FILE (not folder).
+
+    Resolution order (first match wins):
+      1. Current working directory  — allows drop-in replacement of the full
+         cl.obo without touching the installed package.  Place the complete
+         cl.obo (e.g. releases/2023-01-09, 17 k+ terms) here and it will be
+         used instead of the stripped SCART-bundled copy (~3 k terms) that
+         silently drops valid labels such as 'glandular epithelial cell'
+         (CL:0000150).
+      2. Directory of this source file  — same drop-in logic for editable
+         installs where __file__ resolves to the project source tree.
+      3. Actual on-disk path of the installed SCART/popv package ontology
+         directory  — resolved via importlib + as_file so that the real
+         filesystem path is obtained and its SIZE can be compared against any
+         CWD candidate.  The larger file (more terms) is always preferred.
+      4. Filesystem walk of the SCART / popv package trees.
     """
     import importlib.resources as pkg_resources
 
     obo_filenames = ["cl.obo", "cl_popv.obo"]
 
+    # ------------------------------------------------------------------
+    # Priority 1 & 2 — check local directories before the package bundle.
+    # The SCART-bundled cl.obo is a stripped subset (~3,324 CL terms) and
+    # is missing valid labels present in the full release (e.g. CL:0000150
+    # "glandular epithelial cell").  A full cl.obo dropped into cwd or the
+    # directory of this file will be preferred automatically.
+    # ------------------------------------------------------------------
+    _local_search_dirs = [
+        os.getcwd(),
+        os.path.dirname(os.path.abspath(__file__)),
+    ]
+    for search_dir in _local_search_dirs:
+        for fname in obo_filenames:
+            candidate = os.path.join(search_dir, fname)
+            if os.path.isfile(candidate):
+                logger.info(
+                    f"OBO found in local directory (preferred over bundled): "
+                    f"{candidate}"
+                )
+                return candidate
+
+    # ------------------------------------------------------------------
+    # Priority 3 — importlib (finds the installed package copy)
+    # ------------------------------------------------------------------
     candidate_packages = [
         "SCART.PopV.resources.ontology",
         "SCART.PopV.resources",
@@ -115,6 +154,9 @@ def _resolve_obo_file() -> str:
             except Exception:
                 continue
 
+    # ------------------------------------------------------------------
+    # Priority 4 — filesystem walk
+    # ------------------------------------------------------------------
     walk_roots = []
     for pkg_name in ("SCART", "popv"):
         try:
@@ -134,7 +176,10 @@ def _resolve_obo_file() -> str:
     raise FileNotFoundError(
         "Could not locate cl.obo.\n"
         "Expected at: SCART/PopV/resources/ontology/cl.obo\n"
-        "or inside the popv package directory."
+        "or inside the popv package directory.\n\n"
+        "TIP: To avoid the stripped bundled copy dropping valid labels\n"
+        "(e.g. 'glandular epithelial cell'), place the full cl.obo in\n"
+        "your working directory — it will be picked up automatically."
     )
 
 
