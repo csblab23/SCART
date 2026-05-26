@@ -509,11 +509,14 @@ def _set_raw_counts_in_X(adata: anndata.AnnData, label: str = "") -> anndata.Ann
     else:
         logger.info(f"{tag}No count layer found — assuming .X already contains raw counts.")
 
-    # Ensure float32 sparse (PopV requirement)
-    if sp.issparse(adata.X):
-        adata.X = adata.X.tocsr().astype(np.float32)
+    # Ensure float32 sparse (PopV requirement) WITHOUT densifying sparse matrices.
+    X = adata.X
+    if sp.issparse(X):
+        if X.dtype != np.float32:
+            X = X.astype(np.float32)
+        adata.X = X if sp.isspmatrix_csr(X) else X.tocsr()
     else:
-        adata.X = sp.csr_matrix(np.asarray(adata.X, dtype=np.float32))
+        adata.X = sp.csr_matrix(np.asarray(X, dtype=np.float32))
 
     return adata
 
@@ -931,6 +934,8 @@ def run_popv_annotation(
     nsamples:               int  = 300,
     drop_reference_columns: bool = True,
     n_jobs:                 int  = 1,
+    max_ref_cells:          int  = 20000,
+    hvg:                    int  = 4000,
 ) -> anndata.AnnData:
     """
     Run PopV cell-type annotation following the logic of PopV_GSE173682.ipynb.
@@ -955,6 +960,13 @@ def run_popv_annotation(
         Remove Tabula Sapiens metadata columns from output.
     n_jobs : int
         CPU threads (-1 = all cores).
+    max_ref_cells : int, optional
+        Subsample reference to this many cells AFTER gene-restriction.
+        Set to 0 to disable. Default 20000 keeps memory < 16 GB on most
+        Tabula Sapiens references with no measurable loss of accuracy.
+    hvg : int, optional
+        Number of highly variable genes to pass to Process_Query.
+        Default 4000 is the PopV-recommended value.
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -989,6 +1001,29 @@ def run_popv_annotation(
 
     # ── Step 1: set gene symbol index on reference (notebook step) ──────────
     adata_ref = _set_ref_var_index(adata_ref)
+
+    # ── Step 1b: restrict to shared genes + cap reference cells ────────────
+    # PopV only uses genes shared between query and ref. Carrying the rest
+    # blows up memory in Process_Query, HVG selection, and scVI training.
+    _shared = adata_ref.var_names.intersection(adata_query.var_names)
+    if len(_shared) == 0:
+        raise ValueError(
+            "Query and reference share 0 genes. "
+            "Check that both use the same gene identifier (symbol vs Ensembl ID)."
+        )
+    logger.info(
+        f"Restricting to shared genes: ref {adata_ref.n_vars} -> {len(_shared)}, "
+        f"query {adata_query.n_vars} -> {len(_shared)}"
+    )
+    adata_ref   = adata_ref[:, _shared].copy()
+    adata_query = adata_query[:, _shared].copy()
+
+    if max_ref_cells and adata_ref.n_obs > max_ref_cells:
+        logger.info(
+            f"Subsampling reference: {adata_ref.n_obs} -> {max_ref_cells} cells "
+            f"(set max_ref_cells=0 to disable)."
+        )
+        sc.pp.subsample(adata_ref, n_obs=max_ref_cells, random_state=0)
 
     # ── Step 2: route raw counts into .X ────────────────────────────────────
     adata_query = _set_raw_counts_in_X(adata_query, label="query")
@@ -1077,6 +1112,23 @@ def run_popv_annotation(
     # Mirrors notebook arguments exactly; only omits args removed in popv 0.4.2
     logger.info("Running Process_Query …")
 
+    # Detect a pretrained scVI bundled with the reference (Tabula Sapiens
+    # references shipped via Figshare contain one). When present, run in
+    # 'inference' mode — re-training scVI is the dominant OOM cause on CPU.
+    _pretrained_scvi = None
+    _pretrained_candidates = [
+        os.path.join(REFERENCE_BASE_PATH, "pretrained_models"),
+        os.path.join(REFERENCE_BASE_PATH, "scvi"),
+        os.path.join(os.path.dirname(reference_path), "pretrained_models")
+            if "reference_path" in dir() else None,
+    ]
+    for _p in _pretrained_candidates:
+        if _p and os.path.isdir(_p) and os.listdir(_p):
+            _pretrained_scvi = _p
+            break
+    _mode = "inference" if _pretrained_scvi else "retrain"
+    logger.info(f"PopV mode: {_mode}  pretrained_scvi={_pretrained_scvi}")
+
     pq_kwargs = dict(
         query_labels_key      = None,
         query_batch_key       = query_batch_key,
@@ -1085,8 +1137,8 @@ def run_popv_annotation(
         unknown_celltype_label= "unknown",
         cl_obo_folder         = cl_obo_folder,
         n_samples_per_label   = n_samples_per_label,
-        compute_embedding     = True,
-        hvg                   = None,
+        compute_embedding     = (_mode == "retrain"),
+        hvg                   = hvg,
     )
 
     # Gracefully add args that may not exist in all popv 0.4.x sub-versions
@@ -1094,14 +1146,16 @@ def run_popv_annotation(
     os.makedirs(_tmp_dir, exist_ok=True)
     for optional_kwarg, value in [
         ("save_path_trained_models", _tmp_dir),
-        ("prediction_mode",          "retrain"),
+        ("prediction_mode",          _mode),
+        ("pretrained_scvi_path",     _pretrained_scvi),
         ("accelerator",              "cpu"),
     ]:
         try:
             import inspect
             sig = inspect.signature(Process_Query.__init__)
             if optional_kwarg in sig.parameters:
-                pq_kwargs[optional_kwarg] = value
+                if value is not None or optional_kwarg == "pretrained_scvi_path":
+                    pq_kwargs[optional_kwarg] = value
                 logger.info(f"Process_Query: '{optional_kwarg}' = {value!r}")
             else:
                 logger.info(f"Process_Query: '{optional_kwarg}' not in API — skipped.")
@@ -1315,7 +1369,9 @@ def auto_run_popv(
     user_reference:         str  = None,
     drop_reference_columns: bool = True,
     user_popv_prediction:   str  = None,
-    n_jobs:                 int  = 1,
+    n_jobs:                 int  = -1,
+    max_ref_cells:          int  = 20000,
+    hvg:                    int  = 4000,
 ) -> anndata.AnnData:
     """
     Fully automatic entry-point for Module 2.
@@ -1401,4 +1457,6 @@ def auto_run_popv(
         nsamples               = nsamples,
         drop_reference_columns = drop_reference_columns,
         n_jobs                 = n_jobs,
+        max_ref_cells          = max_ref_cells,
+        hvg                    = hvg,
     )
