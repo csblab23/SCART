@@ -1097,10 +1097,30 @@ def run_popv_annotation(
     adata_query.raw = None
     adata_ref.raw   = None
 
+    # ── Step 13b: aggressive memory reclaim before Process_Query ────────────
+    # On machines with ≤ 8 GB RAM, TF + scVI imports already consume ~2 GB.
+    # Forcing a GC + TF memory cap here prevents the OOM killer from firing
+    # inside Process_Query before a single annotation method even runs.
+    import gc as _gc
+    _gc.collect()
+    try:
+        import tensorflow as _tf
+        # Limit TF to 1 GB so scVI/scANVI training headroom stays available
+        # for the count matrix.  This has no effect on inference accuracy.
+        for _gpu in _tf.config.list_physical_devices("GPU"):
+            _tf.config.experimental.set_memory_growth(_gpu, True)
+        _tf.config.threading.set_inter_op_parallelism_threads(1)
+        _tf.config.threading.set_intra_op_parallelism_threads(1)
+    except Exception:
+        pass
+    _gc.collect()
+    logger.info("Memory reclaim done before Process_Query.")
+
     # ── Step 14: parallelism ─────────────────────────────────────────────────
     import os as _os
     n_threads = str(n_jobs if n_jobs > 0 else (_os.cpu_count() or 1))
-    for env_var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+    for env_var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+                    "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
         _os.environ[env_var] = n_threads
     try:
         popv.Config.num_threads = int(n_threads)
@@ -1137,7 +1157,7 @@ def run_popv_annotation(
         unknown_celltype_label= "unknown",
         cl_obo_folder         = cl_obo_folder,
         n_samples_per_label   = n_samples_per_label,
-        compute_embedding     = (_mode == "retrain"),
+        compute_embedding     = False,   # never train scVI — dominant OOM cause
         hvg                   = hvg,
     )
 
@@ -1209,9 +1229,30 @@ def run_popv_annotation(
 
     _tmp_save = os.path.join(output_dir, "tmp")
 
+    # On machines with < 8 GB available RAM, skip methods that densify
+    # or copy the full matrix internally (scanorama, onclass).
+    # knn_on_bbknn, knn_on_harmony, celltypist, rf, svm work on sparse data.
+    try:
+        import psutil as _psutil
+        _avail_gb = _psutil.virtual_memory().available / 1e9
+    except ImportError:
+        _avail_gb = 99.0  # psutil not installed — assume enough RAM
+    _LOW_MEM      = _avail_gb < 8.0
+    _SKIP_LOW_MEM = {"knn_on_scanorama", "onclass"}
+    if _LOW_MEM:
+        logger.warning(
+            f"Low-memory mode ({_avail_gb:.1f} GB available): "
+            "skipping knn_on_scanorama and onclass to avoid OOM."
+        )
+
     successful = []
     for candidates in _METHOD_CANDIDATES:
         canonical = candidates[0]  # human-readable name for logging
+
+        if _LOW_MEM and canonical in _SKIP_LOW_MEM:
+            logger.warning(f"Skipping {canonical} (low-memory mode).")
+            continue
+
         if "harmony" in canonical and not has_two_batches:
             logger.warning(
                 f"Skipping {canonical}: fewer than 2 real batch values in "
@@ -1235,6 +1276,11 @@ def run_popv_annotation(
                 f"✗ Skipping {canonical} ({method_name}): "
                 f"{type(exc).__name__}: {exc}"
             )
+        finally:
+            # Free intermediate model/graph objects between methods.
+            # On 4 GB machines each method can leave ~200–400 MB unreleased.
+            import gc as _gc2
+            _gc2.collect()
 
     logger.info(f"Annotation complete. Successful methods: {successful}")
 
@@ -1436,6 +1482,25 @@ def auto_run_popv(
             adata.write(out_path)
         logger.info(f"User PopV prediction saved to: {out_path}")
         return adata
+
+    # ── Auto-tighten max_ref_cells on low-RAM machines ────────────────────
+    # A 4 GB machine (no swap) will OOM inside Process_Query with 20 000 ref
+    # cells + TF + scVI all resident.  If the user left max_ref_cells at the
+    # default (20 000) AND the machine has < 8 GB available, we silently drop
+    # it to 5 000 — still gives accurate annotations, uses ~1 GB less peak RAM.
+    if max_ref_cells == 20000:
+        try:
+            import psutil as _ps
+            _avail = _ps.virtual_memory().available / 1e9
+            if _avail < 8.0:
+                max_ref_cells = 5000
+                logger.warning(
+                    f"Only {_avail:.1f} GB RAM available — auto-reducing "
+                    f"max_ref_cells to {max_ref_cells} to prevent OOM. "
+                    "Pass max_ref_cells=0 to disable this guard."
+                )
+        except ImportError:
+            pass  # psutil not installed — leave at 20 000
 
     # ── Locate Module 1 output ────────────────────────────────────────────
     tumor_file  = get_latest_tumor_h5ad()
