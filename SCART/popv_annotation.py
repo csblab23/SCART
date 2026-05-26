@@ -422,22 +422,38 @@ def _set_raw_counts_in_X(adata: anndata.AnnData, label: str = "") -> anndata.Ann
     """
     Put raw integer counts into .X, checking layers in priority order.
     Mirrors notebook logic:
-      ref: X = layers['raw_counts'].copy()
+      ref: X = layers['decontXcounts'].copy()  — ambient-RNA-removed counts
       query: X = layers['counts'].copy()
     """
     tag = f"[{label}] " if label else ""
 
-    if "counts" in adata.layers:
-        logger.info(f"{tag}Using layers['counts'] → .X")
-        adata.X = adata.layers["counts"].copy()
-    elif "raw_counts" in adata.layers:
-        logger.info(f"{tag}Using layers['raw_counts'] → .X")
-        adata.X = adata.layers["raw_counts"].copy()
-    elif "decontXcounts" in adata.layers:
-        logger.info(f"{tag}Using layers['decontXcounts'] → .X")
-        adata.X = adata.layers["decontXcounts"].copy()
+    if label == "reference":
+        # Reference priority: decontXcounts first (ambient-RNA-removed),
+        # then raw_counts, then counts
+        if "decontXcounts" in adata.layers:
+            logger.info(f"{tag}Using layers['decontXcounts'] → .X")
+            adata.X = adata.layers["decontXcounts"].copy()
+        elif "raw_counts" in adata.layers:
+            logger.info(f"{tag}Using layers['raw_counts'] → .X")
+            adata.X = adata.layers["raw_counts"].copy()
+        elif "counts" in adata.layers:
+            logger.info(f"{tag}Using layers['counts'] → .X")
+            adata.X = adata.layers["counts"].copy()
+        else:
+            logger.info(f"{tag}No count layer found — assuming .X already contains raw counts.")
     else:
-        logger.info(f"{tag}No count layer found — assuming .X already contains raw counts.")
+        # Query priority: counts first, then raw_counts, then decontXcounts
+        if "counts" in adata.layers:
+            logger.info(f"{tag}Using layers['counts'] → .X")
+            adata.X = adata.layers["counts"].copy()
+        elif "raw_counts" in adata.layers:
+            logger.info(f"{tag}Using layers['raw_counts'] → .X")
+            adata.X = adata.layers["raw_counts"].copy()
+        elif "decontXcounts" in adata.layers:
+            logger.info(f"{tag}Using layers['decontXcounts'] → .X")
+            adata.X = adata.layers["decontXcounts"].copy()
+        else:
+            logger.info(f"{tag}No count layer found — assuming .X already contains raw counts.")
 
     # Ensure float32 sparse (PopV requirement)
     if sp.issparse(adata.X):
@@ -475,16 +491,17 @@ def _validate_raw_counts(adata: anndata.AnnData, label: str = "") -> None:
 
 def _standardise_ref_layers(adata_ref: anndata.AnnData) -> anndata.AnnData:
     """
-    Notebook: ref_adata.layers['counts'] = ref_adata.layers['raw_counts'].copy()
-    Ensures downstream code always finds layers['counts'] on the reference.
+    Notebook: ref_adata.layers['counts'] = ref_adata.layers['decontXcounts'].copy()
+    Ensures downstream code always finds layers['counts'] on the reference,
+    built from decontXcounts (ambient-RNA-removed) as first priority.
     """
     if "counts" not in adata_ref.layers:
-        if "raw_counts" in adata_ref.layers:
-            logger.info("Reference: renaming layers['raw_counts'] → layers['counts'].")
-            adata_ref.layers["counts"] = adata_ref.layers["raw_counts"].copy()
-        elif "decontXcounts" in adata_ref.layers:
+        if "decontXcounts" in adata_ref.layers:
             logger.info("Reference: copying layers['decontXcounts'] → layers['counts'].")
             adata_ref.layers["counts"] = adata_ref.layers["decontXcounts"].copy()
+        elif "raw_counts" in adata_ref.layers:
+            logger.info("Reference: renaming layers['raw_counts'] → layers['counts'].")
+            adata_ref.layers["counts"] = adata_ref.layers["raw_counts"].copy()
     return adata_ref
 
 
