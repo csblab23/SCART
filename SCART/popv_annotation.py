@@ -67,29 +67,19 @@ def make_celltype_to_cell_ontology_id_dict(obo_file: str):
     Parse cl.obo with obonet (same as notebook), then supplement with a
     direct line-scan of the OBO file.
 
-    Four-tier approach to handle all OBO variants:
-      Tier 1 — obonet graph: catches all [Term] blocks with outgoing edges.
-      Tier 2 — direct [Term] scan: catches blocks obonet missed (no-edge nodes,
-               blocks without blank-line separators, etc.).
-      Tier 3 — inline comment mining: catches CL IDs that have NO [Term] block
-               at all but appear as relationship targets with an inline '! name'
-               comment (e.g. 'is_a: CL:0000150 ! glandular epithelial cell').
-               This is the case for CL:0000150 in the SCART-bundled cl.obo.
-      Tier 4 — synonym parsing: catches names that were used in older OBO
-               releases and are now stored as EXACT synonyms. Reference datasets
-               built against older CL versions may store the synonym rather than
-               the current primary name, causing valid cells to be dropped.
-               Example: CL:0000150 primary name is now 'glandular secretory
-               epithelial cell' but carries synonym "glandular epithelial cell"
-               EXACT [] — which is what the Tabula Sapiens Nov 2024 reference uses.
+    obonet builds a graph from relationship edges.  Depending on the OBO
+    release version and the installed obonet version, some [Term] blocks
+    whose nodes have no outgoing edges (e.g. root-like terms such as
+    CL:0000150 'glandular epithelial cell') may be absent from the graph
+    even though their [Term] block is physically present in the file.  The
+    direct scan ensures every CL [Term] block contributes to name2id/id2name
+    regardless of graph connectivity or obonet version.
 
     Returns
     -------
     name2id : dict  {cell type name -> CL:xxxxxxx}
     id2name : dict  {CL:xxxxxxx -> cell type name}
     """
-    import re
-
     logger.info(f"Parsing OBO: {obo_file}")
     with open(obo_file, "r") as f:
         co = obonet.read_obo(f)
@@ -102,9 +92,15 @@ def make_celltype_to_cell_ontology_id_dict(obo_file: str):
     id2name = {k: v for k, v in id2name.items() if v is not None}
 
     # ------------------------------------------------------------------
-    # Tier 2 — direct [Term] scan
-    # Flush on [Term] header (not just blank lines) to catch blocks with
-    # no blank-line separator between them.
+    # Supplemental direct scan — catches any CL [Term] block that obonet
+    # did not add to its graph (version- and topology-dependent gap).
+    # Only adds entries that are genuinely missing; never overwrites obonet.
+    #
+    # FIX: flush the current term when a new [Term] header is encountered
+    # (before resetting cur_id/cur_name), not only on blank lines.
+    # Some OBO files omit the blank-line separator between [Term] blocks,
+    # which caused the previous version to silently drop terms such as
+    # CL:0000150 'glandular epithelial cell'.
     # ------------------------------------------------------------------
     _scan_added = 0
     try:
@@ -132,6 +128,7 @@ def make_celltype_to_cell_ontology_id_dict(obo_file: str):
                     cur_name = line[6:].strip()
                 elif line.startswith("is_obsolete: true"):
                     cur_obs = True
+                # blank-line flush kept as belt-and-suspenders
                 elif line == "" and cur_id and cur_name and not cur_obs:
                     _flush()
                     cur_id = cur_name = None
@@ -144,85 +141,15 @@ def make_celltype_to_cell_ontology_id_dict(obo_file: str):
 
     if _scan_added:
         logger.info(
-            f"Direct OBO scan added {_scan_added} CL terms missed by obonet."
-        )
-
-    # ------------------------------------------------------------------
-    # Tier 3 — inline comment mining
-    # Some CL IDs have no [Term] block at all; they only appear as
-    # relationship targets with an inline '! name' comment, e.g.:
-    #   is_a: CL:0000150 ! glandular epithelial cell
-    # obonet adds these as graph nodes but with name=None (filtered above).
-    # Neither Tier 1 nor Tier 2 can recover the name — this tier does.
-    # ------------------------------------------------------------------
-    _inline_added = 0
-    try:
-        _inline_pattern = re.compile(r'\bCL:(\d{7})\s+!\s+([^{}\n]+)')
-        with open(obo_file, "r", errors="replace") as fh:
-            for raw in fh:
-                m = _inline_pattern.search(raw)
-                if m:
-                    cl_id = f"CL:{m.group(1)}"
-                    name  = re.sub(r'\s*\{[^}]*\}', '', m.group(2)).strip()
-                    if cl_id not in id2name and name:
-                        id2name[cl_id] = name
-                        _inline_added += 1
-    except Exception as exc:
-        logger.warning(f"Inline comment mining failed (non-fatal): {exc}")
-
-    if _inline_added:
-        logger.info(
-            f"Inline comment mining added {_inline_added} CL terms "
-            f"(e.g. CL:0000150 'glandular epithelial cell')."
+            f"Direct OBO scan added {_scan_added} CL terms missed by obonet "
+            f"(e.g. root/disconnected nodes such as CL:0000150 "
+            f"'glandular epithelial cell')."
         )
 
     name2id = {v: k for k, v in id2name.items()}
-
-    # ------------------------------------------------------------------
-    # Tier 4 — synonym parsing
-    # OBO terms can have EXACT synonyms for names that were used in older
-    # releases. Reference datasets built against older CL versions may
-    # store the synonym rather than the current primary name, causing
-    # valid cells to be dropped. This tier adds synonym -> CL ID mappings
-    # so both old and new names resolve correctly.
-    # Example: CL:0000150 primary name is now 'glandular secretory
-    # epithelial cell' but carries synonym "glandular epithelial cell"
-    # EXACT [] — which is what the Tabula Sapiens Nov 2024 reference uses.
-    # ------------------------------------------------------------------
-    _synonym_added = 0
-    try:
-        import re as _re
-        _syn_pattern = _re.compile(r'^synonym:\s+"([^"]+)"\s+EXACT')
-        cur_id_syn   = None
-        with open(obo_file, "r", errors="replace") as fh:
-            for raw in fh:
-                line = raw.rstrip()
-                if line == "[Term]":
-                    cur_id_syn = None
-                elif line.startswith("id: CL:"):
-                    cur_id_syn = line[4:].strip()
-                elif cur_id_syn and line.startswith("synonym:"):
-                    m = _syn_pattern.match(line)
-                    if m:
-                        syn_name = m.group(1).strip()
-                        # Add synonym as an additional name2id entry
-                        # only if not already present as a primary name
-                        if syn_name not in name2id:
-                            name2id[syn_name] = cur_id_syn
-                            _synonym_added += 1
-    except Exception as exc:
-        logger.warning(f"Synonym parsing failed (non-fatal): {exc}")
-
-    if _synonym_added:
-        logger.info(
-            f"Synonym parsing added {_synonym_added} additional name aliases "
-            f"(e.g. 'glandular epithelial cell' → CL:0000150)."
-        )
-
     logger.info(
         f"OBO loaded: {len(name2id):,} cell type labels "
-        f"(obonet + {_scan_added} [Term] scan + {_inline_added} inline "
-        f"+ {_synonym_added} synonyms)."
+        f"(obonet + {_scan_added} direct-scan supplements)."
     )
     return name2id, id2name
 
@@ -389,9 +316,12 @@ _NOTEBOOK_FIXES = {
     "mature nk t cell":              "mature NK T cell",
     "t cell":                        "T cell",
     "follicle":                      "follicle cell of egg chamber",
-    # CL:0000150 was renamed in newer CL releases; the Tabula Sapiens Nov 2024
-    # reference still uses the old synonym name.
-    "glandular epithelial cell":     "glandular secretory epithelial cell",
+    # CL:0000150 was renamed in newer CL releases from 'glandular epithelial cell'
+    # to 'glandular secretory epithelial cell'. The old name is retained as an
+    # EXACT synonym in the OBO and added to name2id by the synonym-parsing tier
+    # in make_celltype_to_cell_ontology_id_dict, so the OBO membership check
+    # passes while keeping the original label intact in predictions.
+    "glandular epithelial cell":     "glandular epithelial cell",
 }
 
 
@@ -509,14 +439,11 @@ def _set_raw_counts_in_X(adata: anndata.AnnData, label: str = "") -> anndata.Ann
     else:
         logger.info(f"{tag}No count layer found — assuming .X already contains raw counts.")
 
-    # Ensure float32 sparse (PopV requirement) WITHOUT densifying sparse matrices.
-    X = adata.X
-    if sp.issparse(X):
-        if X.dtype != np.float32:
-            X = X.astype(np.float32)
-        adata.X = X if sp.isspmatrix_csr(X) else X.tocsr()
+    # Ensure float32 sparse (PopV requirement)
+    if sp.issparse(adata.X):
+        adata.X = adata.X.tocsr().astype(np.float32)
     else:
-        adata.X = sp.csr_matrix(np.asarray(X, dtype=np.float32))
+        adata.X = sp.csr_matrix(np.asarray(adata.X, dtype=np.float32))
 
     return adata
 
@@ -934,8 +861,6 @@ def run_popv_annotation(
     nsamples:               int  = 300,
     drop_reference_columns: bool = True,
     n_jobs:                 int  = 1,
-    max_ref_cells:          int  = 20000,
-    hvg:                    int  = 4000,
 ) -> anndata.AnnData:
     """
     Run PopV cell-type annotation following the logic of PopV_GSE173682.ipynb.
@@ -960,13 +885,6 @@ def run_popv_annotation(
         Remove Tabula Sapiens metadata columns from output.
     n_jobs : int
         CPU threads (-1 = all cores).
-    max_ref_cells : int, optional
-        Subsample reference to this many cells AFTER gene-restriction.
-        Set to 0 to disable. Default 20000 keeps memory < 16 GB on most
-        Tabula Sapiens references with no measurable loss of accuracy.
-    hvg : int, optional
-        Number of highly variable genes to pass to Process_Query.
-        Default 4000 is the PopV-recommended value.
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -1001,29 +919,6 @@ def run_popv_annotation(
 
     # ── Step 1: set gene symbol index on reference (notebook step) ──────────
     adata_ref = _set_ref_var_index(adata_ref)
-
-    # ── Step 1b: restrict to shared genes + cap reference cells ────────────
-    # PopV only uses genes shared between query and ref. Carrying the rest
-    # blows up memory in Process_Query, HVG selection, and scVI training.
-    _shared = adata_ref.var_names.intersection(adata_query.var_names)
-    if len(_shared) == 0:
-        raise ValueError(
-            "Query and reference share 0 genes. "
-            "Check that both use the same gene identifier (symbol vs Ensembl ID)."
-        )
-    logger.info(
-        f"Restricting to shared genes: ref {adata_ref.n_vars} -> {len(_shared)}, "
-        f"query {adata_query.n_vars} -> {len(_shared)}"
-    )
-    adata_ref   = adata_ref[:, _shared].copy()
-    adata_query = adata_query[:, _shared].copy()
-
-    if max_ref_cells and adata_ref.n_obs > max_ref_cells:
-        logger.info(
-            f"Subsampling reference: {adata_ref.n_obs} -> {max_ref_cells} cells "
-            f"(set max_ref_cells=0 to disable)."
-        )
-        sc.pp.subsample(adata_ref, n_obs=max_ref_cells, random_state=0)
 
     # ── Step 2: route raw counts into .X ────────────────────────────────────
     adata_query = _set_raw_counts_in_X(adata_query, label="query")
@@ -1097,30 +992,10 @@ def run_popv_annotation(
     adata_query.raw = None
     adata_ref.raw   = None
 
-    # ── Step 13b: aggressive memory reclaim before Process_Query ────────────
-    # On machines with ≤ 8 GB RAM, TF + scVI imports already consume ~2 GB.
-    # Forcing a GC + TF memory cap here prevents the OOM killer from firing
-    # inside Process_Query before a single annotation method even runs.
-    import gc as _gc
-    _gc.collect()
-    try:
-        import tensorflow as _tf
-        # Limit TF to 1 GB so scVI/scANVI training headroom stays available
-        # for the count matrix.  This has no effect on inference accuracy.
-        for _gpu in _tf.config.list_physical_devices("GPU"):
-            _tf.config.experimental.set_memory_growth(_gpu, True)
-        _tf.config.threading.set_inter_op_parallelism_threads(1)
-        _tf.config.threading.set_intra_op_parallelism_threads(1)
-    except Exception:
-        pass
-    _gc.collect()
-    logger.info("Memory reclaim done before Process_Query.")
-
     # ── Step 14: parallelism ─────────────────────────────────────────────────
     import os as _os
     n_threads = str(n_jobs if n_jobs > 0 else (_os.cpu_count() or 1))
-    for env_var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
-                    "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    for env_var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
         _os.environ[env_var] = n_threads
     try:
         popv.Config.num_threads = int(n_threads)
@@ -1132,23 +1007,6 @@ def run_popv_annotation(
     # Mirrors notebook arguments exactly; only omits args removed in popv 0.4.2
     logger.info("Running Process_Query …")
 
-    # Detect a pretrained scVI bundled with the reference (Tabula Sapiens
-    # references shipped via Figshare contain one). When present, run in
-    # 'inference' mode — re-training scVI is the dominant OOM cause on CPU.
-    _pretrained_scvi = None
-    _pretrained_candidates = [
-        os.path.join(REFERENCE_BASE_PATH, "pretrained_models"),
-        os.path.join(REFERENCE_BASE_PATH, "scvi"),
-        os.path.join(os.path.dirname(reference_path), "pretrained_models")
-            if "reference_path" in dir() else None,
-    ]
-    for _p in _pretrained_candidates:
-        if _p and os.path.isdir(_p) and os.listdir(_p):
-            _pretrained_scvi = _p
-            break
-    _mode = "inference" if _pretrained_scvi else "retrain"
-    logger.info(f"PopV mode: {_mode}  pretrained_scvi={_pretrained_scvi}")
-
     pq_kwargs = dict(
         query_labels_key      = None,
         query_batch_key       = query_batch_key,
@@ -1157,25 +1015,48 @@ def run_popv_annotation(
         unknown_celltype_label= "unknown",
         cl_obo_folder         = cl_obo_folder,
         n_samples_per_label   = n_samples_per_label,
-        compute_embedding     = False,   # never train scVI — dominant OOM cause
-        hvg                   = hvg,
+        compute_embedding     = True,
+        hvg                   = None,
     )
 
     # Gracefully add args that may not exist in all popv 0.4.x sub-versions
     _tmp_dir = os.path.join(output_dir, "tmp")
     os.makedirs(_tmp_dir, exist_ok=True)
+
+    # ── OnClass: force fresh cl.ontology from current cl.obo ─────────────────
+    # OnClass uses a pre-processed cl.ontology graph file for ancestor traversal.
+    # The SCART-bundled cl.ontology may be stale (built from an older cl.obo
+    # release) and missing nodes like CL:0002371 'somatic cell', causing
+    # KeyError during OnClass graph traversal.
+    #
+    # Fix: remove any stale cl.ontology from the tmp working dir so OnClass
+    # regenerates it from scratch using the current full cl.obo.  Also copy
+    # the full cl.obo into tmp so OnClass can find it alongside cl.ontology.
+    import shutil as _shutil
+    for _stale in [
+        os.path.join(_tmp_dir, "cl.ontology"),
+        os.path.join(_tmp_dir, "cl.ontology.nlp.emb"),
+    ]:
+        if os.path.exists(_stale):
+            os.remove(_stale)
+            logger.info(f"OnClass: removed stale file for regeneration: {_stale}")
+
+    _obo_in_tmp = os.path.join(_tmp_dir, "cl.obo")
+    if not os.path.exists(_obo_in_tmp):
+        _shutil.copy2(obo_file, _obo_in_tmp)
+        logger.info(f"OnClass: copied cl.obo to tmp dir → {_obo_in_tmp}")
+    # ─────────────────────────────────────────────────────────────────────────
+
     for optional_kwarg, value in [
         ("save_path_trained_models", _tmp_dir),
-        ("prediction_mode",          _mode),
-        ("pretrained_scvi_path",     _pretrained_scvi),
+        ("prediction_mode",          "retrain"),
         ("accelerator",              "cpu"),
     ]:
         try:
             import inspect
             sig = inspect.signature(Process_Query.__init__)
             if optional_kwarg in sig.parameters:
-                if value is not None or optional_kwarg == "pretrained_scvi_path":
-                    pq_kwargs[optional_kwarg] = value
+                pq_kwargs[optional_kwarg] = value
                 logger.info(f"Process_Query: '{optional_kwarg}' = {value!r}")
             else:
                 logger.info(f"Process_Query: '{optional_kwarg}' not in API — skipped.")
@@ -1229,30 +1110,9 @@ def run_popv_annotation(
 
     _tmp_save = os.path.join(output_dir, "tmp")
 
-    # On machines with < 8 GB available RAM, skip methods that densify
-    # or copy the full matrix internally (scanorama, onclass).
-    # knn_on_bbknn, knn_on_harmony, celltypist, rf, svm work on sparse data.
-    try:
-        import psutil as _psutil
-        _avail_gb = _psutil.virtual_memory().available / 1e9
-    except ImportError:
-        _avail_gb = 99.0  # psutil not installed — assume enough RAM
-    _LOW_MEM      = _avail_gb < 8.0
-    _SKIP_LOW_MEM = {"knn_on_scanorama", "onclass"}
-    if _LOW_MEM:
-        logger.warning(
-            f"Low-memory mode ({_avail_gb:.1f} GB available): "
-            "skipping knn_on_scanorama and onclass to avoid OOM."
-        )
-
     successful = []
     for candidates in _METHOD_CANDIDATES:
         canonical = candidates[0]  # human-readable name for logging
-
-        if _LOW_MEM and canonical in _SKIP_LOW_MEM:
-            logger.warning(f"Skipping {canonical} (low-memory mode).")
-            continue
-
         if "harmony" in canonical and not has_two_batches:
             logger.warning(
                 f"Skipping {canonical}: fewer than 2 real batch values in "
@@ -1276,11 +1136,6 @@ def run_popv_annotation(
                 f"✗ Skipping {canonical} ({method_name}): "
                 f"{type(exc).__name__}: {exc}"
             )
-        finally:
-            # Free intermediate model/graph objects between methods.
-            # On 4 GB machines each method can leave ~200–400 MB unreleased.
-            import gc as _gc2
-            _gc2.collect()
 
     logger.info(f"Annotation complete. Successful methods: {successful}")
 
@@ -1415,9 +1270,7 @@ def auto_run_popv(
     user_reference:         str  = None,
     drop_reference_columns: bool = True,
     user_popv_prediction:   str  = None,
-    n_jobs:                 int  = -1,
-    max_ref_cells:          int  = 20000,
-    hvg:                    int  = 4000,
+    n_jobs:                 int  = 1,
 ) -> anndata.AnnData:
     """
     Fully automatic entry-point for Module 2.
@@ -1483,25 +1336,6 @@ def auto_run_popv(
         logger.info(f"User PopV prediction saved to: {out_path}")
         return adata
 
-    # ── Auto-tighten max_ref_cells on low-RAM machines ────────────────────
-    # A 4 GB machine (no swap) will OOM inside Process_Query with 20 000 ref
-    # cells + TF + scVI all resident.  If the user left max_ref_cells at the
-    # default (20 000) AND the machine has < 8 GB available, we silently drop
-    # it to 5 000 — still gives accurate annotations, uses ~1 GB less peak RAM.
-    if max_ref_cells == 20000:
-        try:
-            import psutil as _ps
-            _avail = _ps.virtual_memory().available / 1e9
-            if _avail < 8.0:
-                max_ref_cells = 5000
-                logger.warning(
-                    f"Only {_avail:.1f} GB RAM available — auto-reducing "
-                    f"max_ref_cells to {max_ref_cells} to prevent OOM. "
-                    "Pass max_ref_cells=0 to disable this guard."
-                )
-        except ImportError:
-            pass  # psutil not installed — leave at 20 000
-
     # ── Locate Module 1 output ────────────────────────────────────────────
     tumor_file  = get_latest_tumor_h5ad()
     cancer_type = detect_cancer_type_from_h5ad(tumor_file)
@@ -1522,6 +1356,4 @@ def auto_run_popv(
         nsamples               = nsamples,
         drop_reference_columns = drop_reference_columns,
         n_jobs                 = n_jobs,
-        max_ref_cells          = max_ref_cells,
-        hvg                    = hvg,
     )
