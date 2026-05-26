@@ -4,9 +4,7 @@ from setuptools.command.develop import develop
 import urllib.request
 import os
 import sys
-
 OBO_URL = "http://purl.obolibrary.org/obo/cl.obo"
-
 def _get_obo_path(install_lib=None):
     if install_lib:
         return os.path.join(install_lib, "SCART", "PopV", "resources", "ontology", "cl.obo")
@@ -20,14 +18,12 @@ def _get_obo_path(install_lib=None):
         pass
     here = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(here, "SCART", "PopV", "resources", "ontology", "cl.obo")
-
 def _is_lfs_stub(path):
     try:
         with open(path, "r", errors="ignore") as f:
             return f.read(30).startswith("version https://git-lfs")
     except OSError:
         return False
-
 def download_cl_obo(install_lib=None):
     obo_path = _get_obo_path(install_lib)
     os.makedirs(os.path.dirname(obo_path), exist_ok=True)
@@ -45,17 +41,14 @@ def download_cl_obo(install_lib=None):
             f"  wget {OBO_URL!r} -O {obo_path!r}",
             file=sys.stderr,
         )
-
 class PostInstall(install):
     def run(self):
         super().run()
         download_cl_obo(self.install_lib)
-
 class PostDevelop(develop):
     def run(self):
         super().run()
         download_cl_obo()
-
 setup(
     name="SCART",
     version="0.1.0",
@@ -81,6 +74,7 @@ setup(
         ]
     },
     zip_safe=False,
+    python_requires=">=3.9,<3.12",
     install_requires=[
         "numpy>=1.24,<2.0",
         "pandas>=1.5",
