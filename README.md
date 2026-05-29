@@ -85,14 +85,11 @@ conda install -c conda-forge -c bioconda \
 ```bash
 conda config --set channel_priority flexible
 
-conda install -c conda-forge -c bioconda \
-  bioconductor-annotationdbi bioconductor-go.db \
-  bioconductor-org.hs.eg.db bioconductor-biomart \
-  bioconductor-scran bioconductor-genomicfeatures \
-  bioconductor-rtracklayer \
-  bioconductor-txdb.hsapiens.ucsc.hg19.knowngene \
-  bioconductor-clusterprofiler bioconductor-enrichplot \
-  bioconductor-ggtree bioconductor-homo.sapiens \
+conda install -c conda-forge -c bioconda ^
+  bioconductor-scran bioconductor-fgsea ^
+  bioconductor-ggtree ^
+  r-paralleldist r-pheatmap r-forcats ^
+  r-cluster r-rtsne r-ape r-tidytree r-ggrepel ^
   -y
 ```
 
