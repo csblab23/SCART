@@ -6,12 +6,11 @@
 
 ---
 
-![Module 4 Workflow](SCART/external/image2.png) 
+![Module 4 Workflow](SCART/external/image2.png)
 
 ---
 
 ## Table of Contents
-
 - [Overview](#overview)
 - [Pipeline Architecture](#pipeline-architecture)
 - [Installation](#installation)
@@ -42,8 +41,6 @@ CAR-T therapy requires surface targets that are highly expressed on tumour cells
 3. Identifying malignant epithelial cells via scMalignantFinder and SCEVAN
 4. Computing differentially expressed surfaceome genes (tumour vs stromal/immune)
 5. Scoring every candidate gene — or gene pair with a logic gate — for efficacy (tumour coverage) and safety (healthy tissue sparing)
-
-
 
 ---
 
@@ -84,14 +81,24 @@ conda install -c conda-forge -c bioconda \
 
 ```bash
 conda config --set channel_priority flexible
-
-conda install -c conda-forge -c bioconda ^
-  bioconductor-scran bioconductor-fgsea ^
-  bioconductor-ggtree ^
-  r-paralleldist r-pheatmap r-forcats ^
-  r-cluster r-rtsne r-ape r-tidytree r-ggrepel ^
+conda install -c conda-forge -c bioconda \
+  bioconductor-scran bioconductor-fgsea \
+  bioconductor-ggtree \
+  r-paralleldist r-pheatmap r-forcats \
+  r-cluster r-rtsne r-ape r-tidytree r-ggrepel \
   -y
 ```
+
+> **Windows only** — use `^` instead of `\` for line continuation:
+> ```bash
+> conda config --set channel_priority flexible
+> conda install -c conda-forge -c bioconda ^
+>   bioconductor-scran bioconductor-fgsea ^
+>   bioconductor-ggtree ^
+>   r-paralleldist r-pheatmap r-forcats ^
+>   r-cluster r-rtsne r-ape r-tidytree r-ggrepel ^
+>   -y
+> ```
 
 Then inside R:
 
