@@ -905,14 +905,14 @@ class SampleAnnotator:
                 else:
                     cell_meta = pd.read_csv(meta_path, sep=sep, index_col=0)
 
-                # Find column whose values are GSM IDs overlapping tumor_samples
+                # ── Strategy 1: column contains literal GSM IDs ───────────
                 for col in cell_meta.columns:
                     vals = cell_meta[col].astype(str)
                     if vals.str.startswith("GSM").any() and vals.isin(tumor_set).any():
                         gsm_col = col
                         break
 
-                # Fallback: GSM IDs embedded in the row index
+                # ── Strategy 2: GSM IDs embedded in the row index ─────────
                 if gsm_col is None:
                     idx_vals = cell_meta.index.astype(str)
                     if idx_vals.str.startswith("GSM").any():
@@ -920,10 +920,43 @@ class SampleAnnotator:
                         if cell_meta["_gsm_col"].isin(tumor_set).any():
                             gsm_col = "_gsm_col"
 
+                # ── Strategy 3: column whose unique values are a subset of
+                #    tumor_samples (non-GSM sample labels like "Patient1") ──
+                if gsm_col is None:
+                    for col in cell_meta.columns:
+                        vals      = cell_meta[col].astype(str)
+                        uniq      = set(vals.unique())
+                        # Accept if ≥50% of unique values overlap tumor_set
+                        # OR the column name hints at sample identity
+                        name_hint = any(k in col.lower() for k in
+                                        ("sample","patient","gsm","donor","subject","id","orig"))
+                        overlap   = uniq & tumor_set
+                        if overlap and (name_hint or len(overlap) / len(uniq) >= 0.5):
+                            gsm_col = col
+                            break
+
+                # ── Strategy 4: build a mapping from unique column values
+                #    to tumor GSM IDs using GEO metadata (orig.ident style) ─
+                # If a column has the same number of unique values as tumor
+                # samples, treat its unique values as ordered sample labels
+                # and map them 1-to-1 to the sorted tumor_samples list.
+                if gsm_col is None:
+                    sorted_tumor = sorted(tumor_set)
+                    for col in cell_meta.columns:
+                        vals = cell_meta[col].astype(str)
+                        uniq = sorted(vals.unique())
+                        if len(uniq) == len(sorted_tumor):
+                            mapping = dict(zip(uniq, sorted_tumor))
+                            cell_meta["_gsm_col"] = vals.map(mapping)
+                            gsm_col = "_gsm_col"
+                            print(f"  [Tier 0] Built GSM mapping from column '{col}': "
+                                  f"{list(mapping.items())[:3]} …")
+                            break
+
                 if gsm_col:
                     print(f"  [Tier 0] GSM ID column found       : '{gsm_col}'")
                 else:
-                    print("  [Tier 0] WARNING: GSM ID column not found in metadata.")
+                    print("  [Tier 0] WARNING: GSM ID column not found — will use all cells.")
 
             except Exception as exc:
                 print(f"  [Tier 0] Metadata read failed: {exc}")
