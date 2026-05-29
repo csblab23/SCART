@@ -398,7 +398,10 @@ class SampleAnnotator:
             fl = fname.lower()
             if fl.endswith("_raw.tar") or fl.endswith(".tar") or fl.endswith(".tar.gz"):
                 return False
-            return any(kw in fl for kw in ("features","genes","barcodes","cell_types","metadata"))
+            return any(kw in fl for kw in (
+                "features", "genes", "barcodes", "cell_types", "metadata",
+                "count", "umi", "expression", "matrix", "cellinfo", "cell_info", "anno",
+            ))
 
         for fname in gse_files:
             if not _is_shared_ref(fname):
@@ -861,14 +864,23 @@ class SampleAnnotator:
         meta_kw   = ["cellinfo", "cell_info", "metadata", "meta_data",
                      "barcode", "obs", "sample", "anno", "annotation"]
 
+        # GEOparse sometimes nests files in a subdirectory named after the GSE
+        # accession (e.g. GSE_data/GSE165897/GSE165897/). Check there too.
+        search_dir = gse_dir
+        nested = os.path.join(gse_dir, gse_id)
+        if (not any(_is_gse_file(f, matrix_kw) for f in all_files)
+                and os.path.isdir(nested)):
+            search_dir = nested
+            all_files  = os.listdir(nested)
+
         matrix_file = next((f for f in all_files if _is_gse_file(f, matrix_kw)), None)
         meta_file   = next((f for f in all_files if _is_gse_file(f, meta_kw)),   None)
 
         if matrix_file is None:
             return None  # No GSE-level matrix — use per-GSM tiers
 
-        matrix_path = os.path.join(gse_dir, matrix_file)
-        meta_path   = os.path.join(gse_dir, meta_file) if meta_file else None
+        matrix_path = os.path.join(search_dir, matrix_file)
+        meta_path   = os.path.join(search_dir, meta_file) if meta_file else None
 
         print(f"\n  [Tier 0] GSE-level matrix detected : {matrix_file}")
         if meta_path:
