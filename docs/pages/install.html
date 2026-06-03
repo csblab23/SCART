@@ -182,18 +182,17 @@ conda install -c conda-forge -c bioconda \
 
     <div class="callout callout-warn">
       <span class="callout-icon">⚠️</span>
-      <div><strong>Windows only</strong> — use <code>^</code> instead of <code>\</code> for line continuation:
-        <div class="code-wrap" style="margin-top:10px;margin-bottom:0;">
-          <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
-          <pre>conda config --set channel_priority flexible
+      <div><strong>Windows only</strong> — use <code>^</code> instead of <code>\</code> for line continuation:</div>
+    </div>
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre>conda config --set channel_priority flexible
 conda install -c conda-forge -c bioconda ^
   bioconductor-scran bioconductor-fgsea ^
   bioconductor-ggtree ^
   r-paralleldist r-pheatmap r-forcats ^
   r-cluster r-rtsne r-ape r-tidytree r-ggrepel ^
   -y</pre>
-        </div>
-      </div>
     </div>
 
     <h3>3c. Install SCEVAN from R</h3>
