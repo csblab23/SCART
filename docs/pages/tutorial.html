@@ -648,7 +648,7 @@ normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = 
         <thead><tr><th>Parameter</th><th>Status</th><th>Default</th><th>What to change</th></tr></thead>
         <tbody>
           <tr><td><code>nsamples</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">300</span></td><td>Cells sampled per label from reference. Increase for better accuracy, decrease to save memory.</td></tr>
-          <tr><td><code>user_reference</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">None</span></td><td>Path to the Tabula Sapiens file you downloaded. If omitted, SCART auto-downloads (requires internet).</td></tr>
+          <tr><td><code>user_reference</code></td><td><span class="badge badge-required">required</span></td><td>—</td><td>Path to the Tabula Sapiens tissue reference file for your cancer type. Download from <a href="https://doi.org/10.6084/m9.figshare.27921984" target="_blank">Figshare</a> — see the cancer type table above for the exact filename.</td></tr>
           <tr><td><code>output_dir</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">"popv_results"</span></td><td>Where to save the annotated h5ad. Change if you want a custom location.</td></tr>
         </tbody>
       </table>
