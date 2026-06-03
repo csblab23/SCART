@@ -570,7 +570,6 @@ adata = popv_annotation.auto_run_popv(
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `input_type` | str | `"raw"` | `"raw"` for raw counts; `"log1p"` for pre-normalised data (runs CELLTYPIST only) |
 | `nsamples` | int | `300` | Cells sampled per cell-type label during reference subsampling |
 | `output_dir` | str | `"popv_results"` | Directory where `final_popv_annotated.h5ad` is saved |
 | `user_reference` | str or None | `None` | Path to Tabula Sapiens tissue h5ad. If `None`, auto-downloaded from Figshare |
