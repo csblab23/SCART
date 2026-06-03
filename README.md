@@ -120,7 +120,6 @@ Before running any module, verify SCART is installed and import the components y
 
 ```python
 import SCART
-print(SCART.__version__)   # confirm installation
 
 # ── Per-module imports (copy only what you need) ──────────────────────────
 from SCART.geo_fetcher import SampleAnnotator          # Module 1
