@@ -267,33 +267,8 @@ from SCART import popv_annotation
 # ── Option 1: User-supplied tissue reference (recommended) ───────────────
 # Module 1 prints which Tabula Sapiens file to download for your cancer type
 adata = popv_annotation.auto_run_popv(
-    nsamples       = 300,
+    nsamples       = 300, # you can choose no. of sample for you data
     user_reference = "/path/to/Ovary_TSP1_30_version2d_10X_smartseq_scvi.h5ad"
-)
-
-# ── Option 2: Auto-download reference from Figshare ──────────────────────
-adata = popv_annotation.auto_run_popv(
-    nsamples   = 300,
-)
-
-# ── Option 3: Pre-log-normalised input (runs CELLTYPIST only) ────────────
-adata = popv_annotation.auto_run_popv(
-    nsamples       = 300,
-    user_reference = "/path/to/reference.h5ad"
-)
-
-# ── Option 4: Custom output directory ────────────────────────────────────
-adata = popv_annotation.auto_run_popv(
-    nsamples       = 300,
-    output_dir     = "/path/to/my_popv_results/",
-    user_reference = "/path/to/reference.h5ad"
-)
-
-# ── Option 5: Keep Tabula Sapiens metadata columns in output ─────────────
-adata = popv_annotation.auto_run_popv(
-    nsamples               = 300,
-    user_reference         = "/path/to/reference.h5ad",
-    drop_reference_columns = False
 )
 
 # ── What you get ──────────────────────────────────────────────────────────
