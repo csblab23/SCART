@@ -57,6 +57,7 @@ conda activate scart_env
 > ```bash
 > pip install "orbax-checkpoint<0.5" "flax<0.8"
 > pip install scvi-tools==1.1.6.post2
+> pip install "jax[cpu]==0.4.23" "jaxlib==0.4.23"
 > ```
 
 ### 2. Install SCART
