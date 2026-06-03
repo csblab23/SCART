@@ -154,26 +154,6 @@ def _safe_concat(adatas: list) -> ad.AnnData:
 # ── SampleAnnotator ───────────────────────────────────────────────────────────
 
 class SampleAnnotator:
-    """
-    Downloads GEO datasets (or accepts pre-built h5ad files), classifies
-    samples as tumour / normal / unspecified, and writes a query h5ad for
-    downstream PopV annotation (Module 2).
-
-    Parameters
-    ----------
-    *inputs : str
-        GEO accession IDs (e.g. "GSE158937") or paths to existing .h5ad files.
-    cancer_type : str
-        Required. Tabula Sapiens key (e.g. "blood_cancer") or free-text label.
-        Comma-separated for multiple types.
-    min_genes : int or None
-        Min genes per cell for QC (Module 3). Stored in adata.uns['qc_params'].
-    max_mt : float or None
-        Max mitochondrial % per cell for QC (Module 3).
-    manual_annotation_col : str or None
-        obs column with cell-type labels (skips PopV). Only for h5ad inputs.
-    """
-
     def __init__(self, *inputs, cancer_type: str, min_genes=None,
                  max_mt=None, manual_annotation_col=None):
         self.inputs   = list(inputs)
@@ -216,6 +196,44 @@ class SampleAnnotator:
             adata.uns.pop("qc_params", None)
             return
         adata.uns["qc_params"] = {"min_genes": self.min_genes, "max_mt": self.max_mt}
+
+    def _apply_qc(self, adata):
+        """
+        Apply QC filtering using min_genes and max_mt if provided.
+        - min_genes  : minimum number of genes expressed per cell
+        - max_mt     : maximum mitochondrial gene % per cell
+        Modifies adata in-place and returns the filtered AnnData.
+        """
+        if self.min_genes is None and self.max_mt is None:
+            return adata
+
+        n_cells_before = adata.n_obs
+        print(f"\n========== QC Filtering ==========")
+        print(f"  Cells before QC : {n_cells_before}")
+
+        # Compute basic QC metrics (n_genes_by_counts, total_counts, pct_counts_mt)
+        adata.var["mt"] = adata.var_names.str.upper().str.startswith("MT-")
+        sc.pp.calculate_qc_metrics(
+            adata, qc_vars=["mt"], percent_top=None, log1p=False, inplace=True
+        )
+
+        mask = pd.Series([True] * adata.n_obs, index=adata.obs_names)
+
+        if self.min_genes is not None:
+            gene_mask = adata.obs["n_genes_by_counts"] >= self.min_genes
+            n_fail    = (~gene_mask).sum()
+            print(f"  Cells failing min_genes ({self.min_genes}) : {n_fail}")
+            mask = mask & gene_mask
+
+        if self.max_mt is not None:
+            mt_mask = adata.obs["pct_counts_mt"] <= self.max_mt
+            n_fail  = (~mt_mask).sum()
+            print(f"  Cells failing max_mt ({self.max_mt}%)       : {n_fail}")
+            mask = mask & mt_mask
+
+        adata = adata[mask].copy()
+        print(f"  Cells after QC  : {adata.n_obs}  (removed {n_cells_before - adata.n_obs})")
+        return adata
 
     def _store_manual_annotation(self, adata, source_file):
         col = self.manual_annotation_col
@@ -291,6 +309,7 @@ class SampleAnnotator:
                 print("\n  Manual annotation mode activated.")
                 self._store_manual_annotation(adata, file)
             self._store_qc_params(adata)
+            adata = self._apply_qc(adata)
             tumor_adatas.append(adata)
             results[file] = ([], [], [], {}, None, self._user_cancer_type)
 
@@ -314,7 +333,7 @@ class SampleAnnotator:
                     print(f"Manual annotation stored → col='{self.manual_annotation_col}', skip_popv=True")
                     print("Next step: run Module 3 (preprocessing) directly.")
                 if self.min_genes is not None or self.max_mt is not None:
-                    print(f"QC params stored → min_genes={self.min_genes}, max_mt={self.max_mt}")
+                    print(f"QC applied and params stored → min_genes={self.min_genes}, max_mt={self.max_mt}")
                 else:
                     print("QC step disabled (no min_genes / max_mt — skipped in Module 3)")
                 query_h5ad = filename
@@ -337,13 +356,14 @@ class SampleAnnotator:
                     print("\n  WARNING: 'popv_majority_vote_prediction' lost during concat.")
 
             self._store_qc_params(combined)
+            combined = self._apply_qc(combined)
             combined.write("combined_tumor.h5ad")
             print("\n========== h5ad created ==========")
             print("combined_tumor.h5ad is created successfully")
             if self.manual_annotation_col:
                 print(f"Manual annotation stored → col='{self.manual_annotation_col}', skip_popv=True")
             if self.min_genes is not None or self.max_mt is not None:
-                print(f"QC params stored → min_genes={self.min_genes}, max_mt={self.max_mt}")
+                print(f"QC applied and params stored → min_genes={self.min_genes}, max_mt={self.max_mt}")
             else:
                 print("QC step disabled (no min_genes / max_mt — skipped in Module 3)")
             query_h5ad = "combined_tumor.h5ad"
@@ -674,7 +694,6 @@ class SampleAnnotator:
                 None
             )
 
-        # Find matrix (prefer GSM-named)
         matrix_path = matrix_path_any = None
         gsm_lower   = gsm_id.lower()
         for dirpath, _, filenames in os.walk(gsm_dir):
@@ -821,32 +840,6 @@ class SampleAnnotator:
     # ── NEW: Tier 0 — GSE-level combined matrix ───────────────────────────
 
     def _find_gse_level_matrix(self, gse_id, gse_dir, tumor_samples):
-        """
-        Tier 0 — GSE-level combined matrix handler.
-
-        Some GEO datasets (e.g. GSE165897) deposit a single combined
-        expression matrix + cell metadata TSV for the entire series at the
-        GSE level instead of per-sample files.
-
-        Detection
-        ---------
-        Scans gse_dir for files whose name starts with the GSE accession ID:
-          - Expression matrix : contains any of "count", "umi", "expression",
-                                "matrix", "expr"
-          - Cell metadata     : contains any of "cellinfo", "cell_info",
-                                "metadata", "meta_data", "barcode", "obs",
-                                "sample", "anno", "annotation"
-
-        Strategy
-        --------
-        1. Read the cell metadata file and locate the column that holds GSM
-           IDs (values starting with "GSM").
-        2. Read the expression matrix with _read_generic_matrix.
-        3. Subset to cells whose GSM ID is in tumor_samples.
-        4. Return a labelled AnnData (gsm_id / gse_id in obs).
-
-        Returns AnnData or None (None → fall through to per-GSM Tiers 1-6).
-        """
         def _is_gse_file(fname, keywords):
             fl = fname.lower()
             return (
@@ -864,8 +857,6 @@ class SampleAnnotator:
         meta_kw   = ["cellinfo", "cell_info", "metadata", "meta_data",
                      "barcode", "obs", "sample", "anno", "annotation"]
 
-        # GEOparse sometimes nests files in a subdirectory named after the GSE
-        # accession (e.g. GSE_data/GSE165897/GSE165897/). Check there too.
         search_dir = gse_dir
         nested = os.path.join(gse_dir, gse_id)
         if (not any(_is_gse_file(f, matrix_kw) for f in all_files)
@@ -877,7 +868,7 @@ class SampleAnnotator:
         meta_file   = next((f for f in all_files if _is_gse_file(f, meta_kw)),   None)
 
         if matrix_file is None:
-            return None  # No GSE-level matrix — use per-GSM tiers
+            return None
 
         matrix_path = os.path.join(search_dir, matrix_file)
         meta_path   = os.path.join(search_dir, meta_file) if meta_file else None
@@ -886,7 +877,6 @@ class SampleAnnotator:
         if meta_path:
             print(f"  [Tier 0] Cell metadata file        : {meta_file}")
 
-        # ── Read cell metadata and find GSM column ────────────────────────
         cell_meta = None
         gsm_col   = None
         tumor_set = set(tumor_samples)
@@ -905,14 +895,12 @@ class SampleAnnotator:
                 else:
                     cell_meta = pd.read_csv(meta_path, sep=sep, index_col=0)
 
-                # ── Strategy 1: column contains literal GSM IDs ───────────
                 for col in cell_meta.columns:
                     vals = cell_meta[col].astype(str)
                     if vals.str.startswith("GSM").any() and vals.isin(tumor_set).any():
                         gsm_col = col
                         break
 
-                # ── Strategy 2: GSM IDs embedded in the row index ─────────
                 if gsm_col is None:
                     idx_vals = cell_meta.index.astype(str)
                     if idx_vals.str.startswith("GSM").any():
@@ -920,14 +908,10 @@ class SampleAnnotator:
                         if cell_meta["_gsm_col"].isin(tumor_set).any():
                             gsm_col = "_gsm_col"
 
-                # ── Strategy 3: column whose unique values are a subset of
-                #    tumor_samples (non-GSM sample labels like "Patient1") ──
                 if gsm_col is None:
                     for col in cell_meta.columns:
                         vals      = cell_meta[col].astype(str)
                         uniq      = set(vals.unique())
-                        # Accept if ≥50% of unique values overlap tumor_set
-                        # OR the column name hints at sample identity
                         name_hint = any(k in col.lower() for k in
                                         ("sample","patient","gsm","donor","subject","id","orig"))
                         overlap   = uniq & tumor_set
@@ -935,11 +919,6 @@ class SampleAnnotator:
                             gsm_col = col
                             break
 
-                # ── Strategy 4: build a mapping from unique column values
-                #    to tumor GSM IDs using GEO metadata (orig.ident style) ─
-                # If a column has the same number of unique values as tumor
-                # samples, treat its unique values as ordered sample labels
-                # and map them 1-to-1 to the sorted tumor_samples list.
                 if gsm_col is None:
                     sorted_tumor = sorted(tumor_set)
                     for col in cell_meta.columns:
@@ -962,7 +941,6 @@ class SampleAnnotator:
                 print(f"  [Tier 0] Metadata read failed: {exc}")
                 cell_meta = None
 
-        # ── Read the expression matrix ────────────────────────────────────
         print("  [Tier 0] Reading expression matrix (this may take a moment)…")
         adata = self._read_generic_matrix(matrix_path)
 
@@ -972,7 +950,6 @@ class SampleAnnotator:
 
         print(f"  [Tier 0] Matrix shape: {adata.shape} (cells × genes)")
 
-        # ── Subset to tumor cells and annotate obs ────────────────────────
         if cell_meta is not None and gsm_col is not None:
             common_idx = cell_meta.index.intersection(adata.obs_names)
             if len(common_idx) == 0:
@@ -991,7 +968,6 @@ class SampleAnnotator:
                     adata.obs["gsm_id"] = aligned.loc[tumor_bc, gsm_col].astype("category")
                     adata.obs["gse_id"] = gse_id
 
-                    # Carry any additional metadata columns
                     for col in aligned.columns:
                         if col not in ("_gsm_col", gsm_col):
                             try:
@@ -1015,15 +991,11 @@ class SampleAnnotator:
 
         adatas = []
 
-        # ── Tier 0: GSE-level combined matrix (e.g. GSE165897) ────────────
-        # Some datasets have no per-GSM files — data is in one series-wide
-        # matrix + a cell metadata file at the GSE level.
         gse_level_adata = self._find_gse_level_matrix(gse_id, gse_dir, tumor_samples)
         if gse_level_adata is not None:
             print("  [Tier 0] Using GSE-level matrix — skipping per-GSM file scan.")
             adatas.append(gse_level_adata)
         else:
-            # ── Per-GSM loop (Tiers 1–6) ───────────────────────────────────
             for gsm_id in tumor_samples:
 
                 gsm_dir = os.path.join(gse_dir, gsm_id)
@@ -1059,7 +1031,6 @@ class SampleAnnotator:
                 self._extract_tarballs(gsm_dir)
                 adata = None
 
-                # Tier 1: canonical layout
                 mtx_dir = self._find_mtx_dir_canonical(gsm_dir)
                 if mtx_dir:
                     try:
@@ -1069,7 +1040,6 @@ class SampleAnnotator:
                         print(f"  sc.read_10x_mtx failed — trying manual reader for {gsm_id}")
                         adata = self._read_10x_manual(mtx_dir)
 
-                # Tier 2: prefix-named layout
                 if adata is None:
                     staged = self._find_and_stage_prefix_named_mtx(gsm_dir, gsm_id)
                     if staged:
@@ -1079,7 +1049,6 @@ class SampleAnnotator:
                         except (SystemExit, Exception):
                             adata = self._read_10x_manual(staged)
 
-                # Tier 2.5: shared barcodes/features layout
                 if adata is None:
                     staged = self._find_and_stage_shared_barcodes_features(gsm_dir, gse_dir, gsm_id)
                     if staged:
@@ -1089,7 +1058,6 @@ class SampleAnnotator:
                         except (SystemExit, Exception):
                             adata = self._read_10x_manual(staged)
 
-                # Tier 3: generic CSV/TSV
                 if adata is None:
                     for f in os.listdir(gsm_dir):
                         fl = f.lower()
@@ -1104,7 +1072,6 @@ class SampleAnnotator:
                             if adata:
                                 break
 
-                # Tier 4: HDF5 / CellRanger .h5
                 if adata is None:
                     for f in sorted(os.listdir(gsm_dir)):
                         fl = f.lower()
@@ -1120,7 +1087,6 @@ class SampleAnnotator:
                             if adata:
                                 adata = _dedup_var_names(adata); break
 
-                # Tier 4.5: gzip-compressed HDF5 (.h5.gz)
                 if adata is None:
                     for f in sorted(os.listdir(gsm_dir)):
                         if f.lower().endswith(".h5.gz"):
@@ -1129,7 +1095,6 @@ class SampleAnnotator:
                             if adata:
                                 break
 
-                # Tier 5: Loom
                 if adata is None:
                     for f in os.listdir(gsm_dir):
                         if f.lower().endswith(".loom"):
@@ -1141,7 +1106,6 @@ class SampleAnnotator:
                             if adata:
                                 break
 
-                # Tier 6: H5AD
                 if adata is None:
                     for f in os.listdir(gsm_dir):
                         if f.lower().endswith(".h5ad"):
@@ -1187,8 +1151,9 @@ class SampleAnnotator:
         print(f"... stored cancer_type in h5ad: {self._user_cancer_type}")
 
         self._store_qc_params(combined)
+        combined = self._apply_qc(combined)
         if self.min_genes is not None or self.max_mt is not None:
-            print(f"... stored qc_params: min_genes={self.min_genes}, max_mt={self.max_mt}")
+            print(f"... applied and stored qc_params: min_genes={self.min_genes}, max_mt={self.max_mt}")
         else:
             print("... qc_params not stored (QC disabled — Module 3 will skip QC filtering)")
 
