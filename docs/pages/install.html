@@ -146,37 +146,54 @@ pip install -e .</pre>
       <div><strong>Windows only:</strong> Run these two lines <em>before</em> the pip install command above to avoid dependency conflicts:
         <div class="code-wrap" style="margin-top:10px;margin-bottom:0;">
           <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
-          <pre>pip install "orbax-checkpoint<0.5" "flax<0.8"
+          <pre>pip install "orbax-checkpoint&lt;0.5" "flax&lt;0.8"
 pip install scvi-tools==1.1.6.post2</pre>
         </div>
       </div>
     </div>
 
     <!-- STEP 3 -->
-    <h2 id="r-deps">Step 3 — Install R Dependencies (for SCEVAN)</h2>
-    <p>SCEVAN is required for malignant cell identification in Module 3. All R packages must be installed inside the <code>scart_env</code> environment.</p>
+    <h2 id="r-deps">Step 3 — Install R and SCEVAN Dependencies</h2>
+    <p>These are required for SCEVAN (Module 3). Run all commands inside your activated <code>scart_env</code> conda environment.</p>
 
-    <h3>3a. Install R and system libraries via conda</h3>
+    <h3>3a. Install R base and system libraries via conda</h3>
     <div class="code-wrap">
       <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
       <pre>conda install -c conda-forge -c bioconda \
   r-base r-devtools r-remotes r-ggplot2 r-data.table \
   r-igraph r-gdtools r-ragg r-dplyr \
   cairo freetype fontconfig harfbuzz fribidi \
-  libpng libtiff jpeg libwebp</pre>
+  libpng libtiff libjpeg-turbo libwebp \
+  --override-channels -c conda-forge -c bioconda -c defaults \
+  -y</pre>
     </div>
 
-    <h3>3b. Install Bioconductor packages</h3>
+    <h3>3b. Install Bioconductor and R packages</h3>
     <div class="code-wrap">
       <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
-      <pre>conda install -c conda-forge -c bioconda \
-  bioconductor-annotationdbi bioconductor-go.db \
-  bioconductor-org.hs.eg.db bioconductor-biomart \
-  bioconductor-scran bioconductor-genomicfeatures \
-  bioconductor-rtracklayer \
-  bioconductor-txdb.hsapiens.ucsc.hg19.knowngene \
-  bioconductor-clusterprofiler bioconductor-enrichplot \
-  bioconductor-ggtree bioconductor-homo.sapiens</pre>
+      <pre>conda config --set channel_priority flexible
+conda install -c conda-forge -c bioconda \
+  bioconductor-scran bioconductor-fgsea \
+  bioconductor-ggtree \
+  r-paralleldist r-pheatmap r-forcats \
+  r-cluster r-rtsne r-ape r-tidytree r-ggrepel \
+  -y</pre>
+    </div>
+
+    <div class="callout callout-warn">
+      <span class="callout-icon">⚠️</span>
+      <div><strong>Windows only</strong> — use <code>^</code> instead of <code>\</code> for line continuation:
+        <div class="code-wrap" style="margin-top:10px;margin-bottom:0;">
+          <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+          <pre>conda config --set channel_priority flexible
+conda install -c conda-forge -c bioconda ^
+  bioconductor-scran bioconductor-fgsea ^
+  bioconductor-ggtree ^
+  r-paralleldist r-pheatmap r-forcats ^
+  r-cluster r-rtsne r-ape r-tidytree r-ggrepel ^
+  -y</pre>
+        </div>
+      </div>
     </div>
 
     <h3>3c. Install SCEVAN from R</h3>
