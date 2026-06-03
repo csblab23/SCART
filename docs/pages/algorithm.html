@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CAR-T Target Discovery Algorithm — SCART</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600;9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../css/style.css">
+<style>
+.nav-logo-text { display: none !important; }
+#navbar {
+  height: 90px !important;
+  min-height: 90px !important;
+}
+#navbar .nav-inner {
+  height: 90px !important;
+  padding: 0 36px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+}
+.nav-logo-img-scart {
+  height: 62px;
+  width: auto;
+  object-fit: contain;
+  display: block;
+}
+.nav-logo-img-igib {
+  height: 80px;
+  width: auto;
+  object-fit: contain;
+  display: block;
+}
+.scart-wordmark {
+  font-family: Georgia, 'Instrument Serif', serif;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  line-height: 1;
+  color: #0d1526;
+}
+.scart-wordmark .car { color: #b41e28; }
+
+/* ── Algorithm-page specific styles ── */
+.algo-figure {
+  margin: 28px 0 8px 0;
+  border: 1px solid #e5e9ef;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #f8f9fb;
+}
+.algo-figure img {
+  width: 100%;
+  display: block;
+  max-height: 480px;
+  object-fit: contain;
+  padding: 20px;
+  box-sizing: border-box;
+}
+.algo-figure figcaption {
+  font-size: 13px;
+  color: #6b7a8d;
+  font-style: italic;
+  text-align: center;
+  padding: 10px 20px 14px;
+  border-top: 1px solid #e5e9ef;
+  background: #fff;
+}
+
+/* Gate cards inline */
+.gate-inline-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+  margin: 20px 0;
+}
+.gate-inline-card {
+  border: 1px solid #e5e9ef;
+  border-radius: 10px;
+  padding: 18px 16px 14px;
+  background: #fafbfc;
+}
+.gate-inline-card .gate-sym {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.gate-inline-card h4 {
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #0d1526;
+}
+.gate-inline-card p {
+  margin: 0;
+  font-size: 13px;
+  color: #4a5568;
+  line-height: 1.55;
+}
+.gate-and  .gate-sym { color: #1a6b3c; }
+.gate-or   .gate-sym { color: #0e5fa3; }
+.gate-nand .gate-sym { color: #b41e28; }
+.gate-and  { border-color: rgba(26,107,60,.18);  background: rgba(26,107,60,.03); }
+.gate-or   { border-color: rgba(14,95,163,.18);  background: rgba(14,95,163,.03); }
+.gate-nand { border-color: rgba(180,30,40,.18);  background: rgba(180,30,40,.03); }
+
+/* Island table badge */
+.island-badge {
+  display: inline-block;
+  font-size: 11px;
+  font-family: 'JetBrains Mono', monospace;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(180,30,40,.08);
+  color: #b41e28;
+  font-weight: 500;
+}
+
+/* Steps list */
+.algo-steps {
+  list-style: none;
+  padding: 0;
+  margin: 20px 0;
+  counter-reset: step;
+}
+.algo-steps li {
+  counter-increment: step;
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  margin-bottom: 18px;
+}
+.algo-steps li::before {
+  content: counter(step);
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #b41e28;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  font-family: 'JetBrains Mono', monospace;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 2px;
+}
+.algo-steps li p {
+  margin: 0;
+  font-size: 15px;
+  color: #2d3748;
+  line-height: 1.6;
+}
+.algo-steps li strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  color: #0d1526;
+  margin-bottom: 3px;
+}
+
+/* Param pill */
+.param-pill {
+  display: inline-block;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  background: #f0f2f5;
+  border: 1px solid #d8dde5;
+  border-radius: 4px;
+  padding: 1px 7px;
+  color: #2d3748;
+  margin: 0 2px;
+}
+
+@media (max-width: 640px) {
+  .gate-inline-grid { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<nav id="navbar">
+  <div class="nav-inner">
+    <a href="../../index.html" class="nav-logo" style="line-height:0;text-decoration:none;flex-shrink:0;">
+      <img src="../../SCART/external/scart_logo.png" alt="SCART" class="nav-logo-img-scart"
+           onerror="this.outerHTML='<span class=\'scart-wordmark\' style=\'font-size:32px;\'>S<span class=\'car\'>CAR</span>T</span>'">
+    </a>
+
+    <ul class="nav-links" style="margin:0 auto;">
+      <li><a href="../../index.html">Home</a></li>
+      <li><a href="overview.html">Overview</a></li>
+      <li><a href="install.html">Installation</a></li>
+      <li><a href="tutorial.html">Tutorial</a></li>
+      <li><a href="algorithm.html" class="active">CAR-T Target Discovery Algorithm</a></li>
+      <li><a href="authors.html">Authors</a></li>
+    </ul>
+
+    <div style="display:flex;align-items:center;gap:16px;flex-shrink:0;">
+      <a href="https://github.com/csblab23/SCART" class="nav-github" target="_blank">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        GitHub
+      </a>
+      <img src="../../SCART/external/igib_logo.jpeg" alt="CSIR-IGIB" class="nav-logo-img-igib"
+           onerror="this.style.display='none'">
+    </div>
+  </div>
+</nav>
+
+<div class="page-header">
+  <div class="page-header-inner">
+    <div class="page-header-tag">How It Works</div>
+    <h1>CAR-T Target Discovery Algorithm</h1>
+    <p>Logic gates, objective scoring, and the genetic algorithm behind SCART's two-gene CAR-T target discovery</p>
+  </div>
+</div>
+
+<div class="content-layout">
+  <aside class="sidebar">
+    <ul class="sidebar-nav">
+      <li class="sidebar-group">Logic &amp; Scoring</li>
+      <li><a href="#logic-gates">Logic Gates &amp; Circuits</a></li>
+      <li><a href="#not-gate">Handling the NOT Gate</a></li>
+      <li><a href="#objective-score">Objective Score</a></li>
+      <li class="sidebar-group">Genetic Algorithm</li>
+      <li><a href="#ga-overview">GA Overview</a></li>
+      <li><a href="#initialization">Initialization</a></li>
+      <li><a href="#population-quota">Population Quota</a></li>
+      <li><a href="#islands">Islands &amp; Ring Migration</a></li>
+      <li><a href="#selection">Selection &amp; Crossover</a></li>
+      <li><a href="#mutation">Mutation &amp; Ggap</a></li>
+      <li><a href="#hof">Hall of Fame Output</a></li>
+      <li class="sidebar-group">Reference</li>
+      <li><a href="#ga-params">GA Parameters</a></li>
+    </ul>
+  </aside>
+
+  <div class="content-body">
+
+    <!-- ── LOGIC GATES ─────────────────────────────────────────────── -->
+    <h2 id="logic-gates">Logic Gates &amp; Circuits</h2>
+    <p>To systematically define two-gene combinations for CAR-T therapy target identification, SCART encodes gene expression parameters with Boolean logic gates. Each gene is labelled <strong>ON</strong> if its expression value is 1 (expressed) or <strong>OFF</strong> if its expression value is 0 (not expressed). The logical operators AND, OR, and NOT are then applied to generate all possible two-gene regulatory configurations.</p>
+
+    <p>The combination of two genes and three logic gates results in <strong>3 unique logic gate gene combinations</strong>:</p>
+
+    <div class="gate-inline-grid">
+      <div class="gate-inline-card gate-and">
+        <div class="gate-sym">A &amp; B</div>
+        <h4>AND Gate</h4>
+        <p>Both genes are ON. CAR-T activates only when both antigens are co-expressed on the same cell — the safest selectivity profile.</p>
+      </div>
+      <div class="gate-inline-card gate-or">
+        <div class="gate-sym">A | B</div>
+        <h4>OR Gate</h4>
+        <p>At least one gene is ON. CAR-T activates when either antigen is present, maximising tumour coverage.</p>
+      </div>
+      <div class="gate-inline-card gate-nand">
+        <div class="gate-sym">A &amp;! B</div>
+        <h4>NAND Gate</h4>
+        <p>Gene A is ON <em>and</em> Gene B is OFF. Exploits loss-of-expression patterns unique to tumour cells.</p>
+      </div>
+    </div>
+
+    <p>Collectively, these logical configurations cover the full range of binary gene-expression relationships, providing the means to determine how distinct ON/OFF patterns can be leveraged for logic-based CAR-T target design.</p>
+
+    <!-- ── NOT GATE ─────────────────────────────────────────────────── -->
+    <h2 id="not-gate">Handling the NOT Gate (A &amp;! B)</h2>
+    <p>Python booleans are used to handle the <code>!</code> NOT operation precisely. Consider the following worked example with <code>A &amp;! B</code>:</p>
+
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre><span class="kw">import</span> numpy <span class="kw">as</span> np
+
+A = np.array([<span class="num">1</span>, <span class="num">0</span>, <span class="num">1</span>, <span class="num">0</span>])
+B = np.array([<span class="num">0</span>, <span class="num">1</span>, <span class="num">1</span>, <span class="num">0</span>])
+
+<span class="c"># Step 1 — convert B to boolean</span>
+B_bool = B.astype(bool)          <span class="c"># [False, True, True, False]</span>
+
+<span class="c"># Step 2 — apply bitwise NOT</span>
+not_B = ~B_bool                  <span class="c"># [True, False, False, True]</span>
+
+<span class="c"># Step 3 — convert back to int</span>
+not_B_int = not_B.astype(int)    <span class="c"># [1, 0, 0, 1]</span>
+
+<span class="c"># Step 4 — apply AND</span>
+result = A &amp; not_B_int           <span class="c"># [1, 0, 0, 0]</span>
+<span class="c"># 1 = Gene A is ON and Gene B is OFF ✓</span></pre>
+    </div>
+
+    <p>In the result, <code>1</code> means Gene A is ON and Gene B is OFF — exactly the condition required. This pipeline uses Boolean conversion and bitwise NOT operations to precisely execute the <code>A &amp;! B</code> logic gate, empowering SCART to identify samples where Gene A is expressed and Gene B is absent.</p>
+
+    <!-- ── OBJECTIVE SCORE ──────────────────────────────────────────── -->
+    <h2 id="objective-score">Objective Score Calculation</h2>
+    <p>The objective score evaluates the efficacy of targeting tumour cells while maintaining a predetermined safety threshold. Two metrics are computed for every logic gate + gene combination:</p>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Metric</th><th>Definition</th><th>Threshold</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>Efficacy</strong></td>
+            <td>Fraction of tumour cells where the circuit evaluates to <code>1</code> (expressed). <br><em>sum(1s) / total tumour cells</em></td>
+            <td>Maximised</td>
+          </tr>
+          <tr>
+            <td><strong>Safety</strong></td>
+            <td>Fraction of healthy cells where the circuit evaluates to <code>0</code> (not expressed). <br><em>sum(0s) / total healthy cells</em></td>
+            <td>≥ 90% required</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p><strong>Scoring rule:</strong> if the safety score is ≥ 90%, the efficacy score is used as the final objective score. If safety falls below 90%, the objective score is set to <strong>0</strong> — the combination is disqualified regardless of its tumour coverage.</p>
+
+    <div class="callout callout-tip">
+      <span class="callout-icon">💡</span>
+      <div><strong>Example:</strong> for a GeneA array in tumour cells <code>[1, 0, 1, 1, 0, 1, 0, 1, 1, 1]</code>, the sum of 1s is 7 and the total is 10, giving an efficacy of <strong>0.7 (70%)</strong>. Safety is computed symmetrically using the count of 0s in the healthy cell array.</div>
+    </div>
+
+    <!-- ── GA OVERVIEW ──────────────────────────────────────────────── -->
+    <h2 id="ga-overview">Genetic Algorithm Overview</h2>
+    <p>SCART uses a <strong>DEAP</strong> (Distributed Evolutionary Algorithms in Python, v1.4.3) genetic algorithm to search the space of two-gene + logic gate combinations. The algorithm mimics natural evolution — initialisation, selection, crossover, and mutation — to iteratively discover high-scoring CAR-T targets.</p>
+
+    <figure class="algo-figure">
+      <img src="../../SCART/external/image4.png"
+           alt="One iteration of the genetic algorithm in SCART"
+           onerror="this.style.display='none'">
+      <figcaption>Figure 1. Diagrammatic representation of one iteration of the genetic algorithm in SCART.</figcaption>
+    </figure>
+
+    <p>Key global parameters for one full SCART run:</p>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Parameter</th><th>Value</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>n_runs</code></td><td>10</td><td>Number of independent seeds (seed 42 → seed 51)</td></tr>
+          <tr><td><code>Gmax</code></td><td>100</td><td>Max generations per seed (Gen 0 – Gen 99)</td></tr>
+          <tr><td><code>pop_size</code></td><td>1000</td><td>Individuals per generation</td></tr>
+          <tr><td><code>patience</code></td><td>50</td><td>Early stopping: terminate seed if no improvement for 50 consecutive generations</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- ── INITIALIZATION ───────────────────────────────────────────── -->
+    <h2 id="initialization">Initialization of Individuals</h2>
+    <p>Each <strong>individual (ind)</strong> encodes a single two-gene + logic gate candidate in the format:</p>
+
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">text</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre>ind = [GA, GB, LogicGate]
+
+GA         — index of Gene A in the binary expression matrix
+GB         — index of Gene B in the binary expression matrix
+LogicGate  — index of the logic gate (0 = A&amp;B, 1 = A|B, 2 = A&amp;!B)
+
+Example: [10, 32, 2]  →  gene index 10  AND NOT  gene index 32</pre>
+    </div>
+
+    <p>In the first generation, 1000 individuals are randomly generated. Gene A and Gene B indices are drawn uniformly from the available genes in the expression binary matrix; the logic gate index is drawn uniformly from {0, 1, 2}. Each randomly assigned pair is then evaluated by the objective score function.</p>
+
+    <!-- ── POPULATION QUOTA ─────────────────────────────────────────── -->
+    <h2 id="population-quota">Population Quota</h2>
+    <p>Without intervention, the OR gate dominates the genetic algorithm because <code>A | B</code> almost always achieves higher raw tumour coverage than AND or NAND. This dominance suppresses rare but potentially valuable NAND combinations. SCART resolves this with a <strong>population quota</strong>:</p>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Partition</th><th>Gate</th><th>Reserved slots</th></tr></thead>
+        <tbody>
+          <tr><td>Part 1</td><td><code>A &amp; B</code></td><td>250 (25%)</td></tr>
+          <tr><td>Part 2</td><td><code>A | B</code></td><td>250 (25%)</td></tr>
+          <tr><td>Part 3 (open)</td><td>All gates</td><td>500 (50%)</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>The 20% floor for AND and NAND does not rigidly preserve the 250 / 250 / 500 split — it only guarantees that no gate type completely disappears from the population. This allows OR gate dominance to occur naturally in the open partition while still giving rare gate combinations equal representation.</p>
+
+    <!-- ── ISLANDS ───────────────────────────────────────────────────── -->
+    <h2 id="islands">Islands &amp; Ring Migration</h2>
+    <p>Even with a large population, genetic algorithms can miss rare gene combinations in a high-dimensional gene space. SCART introduces an <strong>island model</strong> to improve gene coverage:</p>
+
+    <ul style="margin:12px 0 16px 18px;line-height:1.8;">
+      <li>The 1000-individual population is divided into <strong>4 islands of 250</strong> each.</li>
+      <li>Each island receives a different quarter of the tumour expression matrix.</li>
+      <li>Islands are partitioned <strong>once at the start of each seed</strong>.</li>
+    </ul>
+
+    <p>Each island is biased toward different logic gates to prevent any single gate from dominating within an island:</p>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Island</th><th>AND quota</th><th>NAND quota</th><th>Open quota</th><th>Bias</th></tr></thead>
+        <tbody>
+          <tr><td><span class="island-badge">Island 0</span></td><td>125</td><td>62</td><td>63</td><td>AND-heavy</td></tr>
+          <tr><td><span class="island-badge">Island 1</span></td><td>62</td><td>125</td><td>63</td><td>NAND-heavy</td></tr>
+          <tr><td><span class="island-badge">Island 2</span></td><td>32</td><td>32</td><td>186</td><td>Open</td></tr>
+          <tr><td><span class="island-badge">Island 3</span></td><td>31</td><td>31</td><td>188</td><td>Open</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p><strong>Ring migration</strong> maintains diversity between islands. Every 10 generations, the top 10 individuals from each island are transferred to the next island in a ring:</p>
+
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">text</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre>Migration direction (top 10 transferred):
+  Island 0 → Island 1 → Island 2 → Island 3 → Island 0</pre>
+    </div>
+
+    <!-- ── SELECTION & CROSSOVER ────────────────────────────────────── -->
+    <h2 id="selection">Selection &amp; Crossover</h2>
+
+    <ol class="algo-steps">
+      <li>
+        <strong>Tournament Selection (<code>selTournament</code>, tournsize = 2)</strong>
+        <p>Two individuals are randomly drawn from the current population. The one with the higher objective score is selected as a parent. This process is repeated twice to obtain two independent parents for crossover. Uses Python's <code>random()</code> function.</p>
+      </li>
+      <li>
+        <strong>Simulated Binary Bounded Crossover (<code>cxSimulatedBinaryBounded</code>, cxpb = 0.5)</strong>
+        <p>The two selected parents undergo crossover with probability <span class="param-pill">cxpb = 0.5</span>. Random breakpoints are assigned in the individual circuits and gene segments are exchanged, producing two new offspring. Uses Python's <code>randint()</code> function.</p>
+      </li>
+    </ol>
+
+    <!-- ── MUTATION & GGAP ──────────────────────────────────────────── -->
+    <h2 id="mutation">Mutation &amp; Generational Gap (Ggap)</h2>
+
+    <h3>Mutation</h3>
+    <p>The <code>mutUniformInt</code> DEAP operator introduces genetic variance. Each gene index in an offspring can be randomly replaced with a new index drawn from the full gene list with probability <span class="param-pill">mutpb = 0.2</span>. This mimics natural point mutations and prevents premature convergence.</p>
+
+    <h3>Generational Gap (Ggap)</h3>
+    <p>To maintain genetic diversity across generations, SCART introduces a generational replacement step every <span class="param-pill">Ggap = 10</span> generations:</p>
+
+    <ul style="margin:10px 0 10px 18px;line-height:1.8;">
+      <li>All individuals in the population are ranked by efficacy score in descending order.</li>
+      <li>The bottom <span class="param-pill">Rrep = 10%</span> (100 individuals) are replaced with freshly randomised individuals.</li>
+      <li>This prevents the population from becoming entirely composed of near-identical high-scoring clones.</li>
+    </ul>
+
+    <!-- ── HALL OF FAME ──────────────────────────────────────────────── -->
+    <h2 id="hof">Hall of Fame &amp; Final Output</h2>
+    <p>At the end of each seed, the best-scoring individual is recorded. After all 10 seeds complete, the top candidates from every seed — the <strong>Hall of Fame (hof)</strong> — are merged and ranked in descending order by efficacy score with the constraint that <strong>safety ≥ 90%</strong>.</p>
+
+    <p>Both output files contain the following columns:</p>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Column</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>Seed</code></td><td>Which random seed (42–51) produced this candidate</td></tr>
+          <tr><td><code>Generation</code></td><td>Generation number within that seed</td></tr>
+          <tr><td><code>LogicGate</code></td><td>Gate type: <code>A &amp; B</code>, <code>A | B</code>, or <code>A &amp;! B</code></td></tr>
+          <tr><td><code>GeneA</code> / <code>GeneB</code></td><td>Gene names for the two-gene combination</td></tr>
+          <tr><td><code>Efficacy</code></td><td>Fraction of tumour cells targeted (0 – 1)</td></tr>
+          <tr><td><code>Safety</code></td><td>Fraction of healthy cells spared (0 – 1)</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout callout-tip">
+      <span class="callout-icon">✅</span>
+      <div>The <code>two_gene_hof.csv</code> file contains the best candidates shortlisted across all seeds. The <code>two_gene_complete.csv</code> file contains every evaluated individual across every generation and run, useful for post-hoc analysis.</div>
+    </div>
+
+    <!-- ── GA PARAMS ─────────────────────────────────────────────────── -->
+    <h2 id="ga-params">GA Parameters Reference</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>pop_size</code></td><td>1000</td><td>Number of individuals per generation</td></tr>
+          <tr><td><code>Gmax</code></td><td>100</td><td>Maximum generations per seed</td></tr>
+          <tr><td><code>patience</code></td><td>50</td><td>Early stopping threshold (generations without improvement)</td></tr>
+          <tr><td><code>n_runs</code></td><td>10</td><td>Number of independent seeds (seed 42 to seed 51)</td></tr>
+          <tr><td><code>n_cpus</code></td><td>1</td><td>CPU cores for parallel evaluation</td></tr>
+          <tr><td><code>safety_threshold</code></td><td>0.9</td><td>Minimum safety score for a combination to be shortlisted</td></tr>
+          <tr><td><code>cxpb</code></td><td>0.5</td><td>Crossover probability</td></tr>
+          <tr><td><code>mutpb</code></td><td>0.2</td><td>Mutation probability per gene</td></tr>
+          <tr><td><code>Ggap</code></td><td>10</td><td>Generations between diversity replacement steps</td></tr>
+          <tr><td><code>Rrep</code></td><td>0.1</td><td>Replacement rate (10% of worst individuals replaced every Ggap)</td></tr>
+          <tr><td><code>tournsize</code></td><td>2</td><td>Tournament size for parent selection</td></tr>
+          <tr><td>Islands</td><td>4</td><td>Number of sub-populations (250 individuals each)</td></tr>
+          <tr><td>Ring migration interval</td><td>10 generations</td><td>Frequency of top-10 individual exchange between islands</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+  </div>
+</div>
+
+<footer>
+  <div class="footer-inner">
+    <div class="footer-brand">
+      <a href="../../index.html" style="margin-bottom:10px;display:inline-block;text-decoration:none;">
+        <span style="font-family:Georgia,serif;font-size:22px;font-weight:700;color:white;">S<span style="color:#ff7070;">CAR</span>T</span>
+      </a>
+      <p>End-to-end CAR-T target discovery from single-cell RNA-seq data. Developed at CSIR-IGIB, New Delhi, India.</p>
+    </div>
+    <div class="footer-col">
+      <h5>Documentation</h5>
+      <a href="overview.html">Overview</a>
+      <a href="install.html">Installation</a>
+      <a href="tutorial.html">Tutorial</a>
+      <a href="algorithm.html">CAR-T Target Discovery Algorithm</a>
+    </div>
+    <div class="footer-col">
+      <h5>Links</h5>
+      <a href="https://github.com/csblab23/SCART" target="_blank">GitHub</a>
+      <a href="https://www.igib.res.in" target="_blank">CSIR-IGIB</a>
+      <a href="authors.html">Authors</a>
+    </div>
+  </div>
+  <div class="footer-bottom">
+    <span>© 2025 S<span style="color:#ff7070;">CAR</span>T · CSIR-IGIB · MIT License</span>
+    <a href="https://github.com/csblab23/SCART" target="_blank">GitHub</a>
+  </div>
+</footer>
+
+<script src="../js/main.js"></script>
+</body>
+</html>
