@@ -12,14 +12,63 @@ Full installation sequence:
     Step 0  (Windows only) : Install VC++ Redistributable manually
     Step 1  (all)          : conda create -n scart_env python=3.10 -y
                              conda activate scart_env
-    Step 2  (Windows only) : Pre-install JAX stubs + annoy binary wheel
+    Step 2  (Windows only) : Pre-install JAX stubs + annoy via conda
     Step 3  (all)          : pip install git+https://github.com/csblab23/SCART.git
+                             (PostInstall auto-fixes torch on Windows)
     Step 4  (all)          : python -m SCART.install   <- interactive, asks your OS
 """
+
+import subprocess
+import sys
+import platform
 
 from setuptools import setup, find_packages
 from setuptools.command.install import install
 from setuptools.command.develop import develop
+
+
+# ---------------------------------------------------------------------------
+# Windows torch auto-fix
+# ---------------------------------------------------------------------------
+
+def _fix_torch_windows():
+    """
+    Fix the torch DLL error on Windows immediately after pip install SCART.
+
+    Why here (PostInstall) and not in install.py
+    --------------------------------------------
+    `python -m SCART.install` imports SCART/__init__.py on startup, which
+    chains into scanpy -> anndata -> torch.  If torch has the DLL error,
+    the installer is completely unreachable.
+
+    Running the fix here (in setup.py's PostInstall hook) solves it before
+    the user ever tries to run `python -m SCART.install`.  No SCART import
+    happens in this file — only subprocess calls.
+    """
+    print("\n[SCART:setup] Windows detected — auto-fixing PyTorch CPU wheel ...")
+    print("[SCART:setup] Uninstalling existing torch ...")
+    subprocess.run(
+        [sys.executable, "-m", "pip", "uninstall", "torch", "-y"],
+        check=False,
+    )
+    print("[SCART:setup] Installing torch==2.2.2 (CPU wheel, no DLL issues) ...")
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "pip", "install",
+            "torch==2.2.2",
+            "--index-url", "https://download.pytorch.org/whl/cpu",
+        ],
+        check=False,
+    )
+    if result.returncode == 0:
+        print("[SCART:setup] torch==2.2.2 CPU wheel installed successfully.")
+    else:
+        print(
+            "[SCART:setup] WARNING: torch auto-fix failed. Run manually:\n"
+            "  pip uninstall torch -y\n"
+            "  pip install torch==2.2.2 --index-url https://download.pytorch.org/whl/cpu",
+            file=sys.stderr,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +95,8 @@ class PostInstall(install):
     """Triggered by: pip install ."""
     def run(self):
         super().run()
+        if platform.system() == "Windows":
+            _fix_torch_windows()
         print(POSTINSTALL_MSG)
 
 
@@ -53,6 +104,8 @@ class PostDevelop(develop):
     """Triggered by: pip install -e ."""
     def run(self):
         super().run()
+        if platform.system() == "Windows":
+            _fix_torch_windows()
         print(POSTINSTALL_MSG)
 
 
@@ -108,11 +161,10 @@ setup(
         # once it sees annoy already registered.
 
         # Deep-learning back-ends
-        # torch: on Windows the install script replaces this with
-        #        torch==2.2.2 from the PyTorch CPU wheel index
+        # torch: PostInstall auto-replaces this with torch==2.2.2 CPU wheel on Windows.
+        # Linux/Mac: default torch (GPU/CPU as available).
         "torch",
-        # tensorflow: on Windows the install script pins to
-        #             tensorflow-cpu==2.10.0 (last version without CUDA on Win)
+        # tensorflow: on Windows install.py pins to tensorflow-cpu==2.10.0
         # Linux/Mac: user controls TF version (GPU builds etc.)
 
         # Genomics / enrichment
