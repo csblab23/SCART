@@ -279,88 +279,117 @@ def _run_linux_mac(os_name: str):
 # Windows: annoy pre-install / repair helper
 # ---------------------------------------------------------------------------
 
+def _register_annoy_with_pip() -> bool:
+    """
+    After conda installs python-annoy, pip has no dist-info for it and will
+    try to rebuild annoy from source when resolving SCART's dependencies.
+    This function creates a minimal dist-info record so pip treats annoy as
+    already satisfied — no source build, no C++ compiler needed.
+    """
+    try:
+        import site
+        annoy_version = "1.17.3"
+        for sp in site.getsitepackages():
+            dist_info = os.path.join(sp, f"annoy-{annoy_version}.dist-info")
+            try:
+                os.makedirs(dist_info, exist_ok=True)
+                with open(os.path.join(dist_info, "METADATA"), "w") as f:
+                    f.write(
+                        f"Metadata-Version: 2.1\n"
+                        f"Name: annoy\n"
+                        f"Version: {annoy_version}\n"
+                    )
+                with open(os.path.join(dist_info, "RECORD"), "w") as f:
+                    f.write("")
+                with open(os.path.join(dist_info, "INSTALLER"), "w") as f:
+                    f.write("conda\n")
+                print(f"[SCART:annoy] Registered annoy {annoy_version} with pip at:\n  {dist_info}")
+                return True
+            except OSError:
+                continue
+    except Exception as exc:
+        print(f"[SCART:annoy] WARNING: Could not register annoy with pip: {exc}", file=sys.stderr)
+    return False
+
+
 def _ensure_annoy_windows() -> bool:
     """
-    Ensure annoy is installed from a pre-built binary wheel (no C++ compiler needed).
+    Ensure annoy is installed and pip-visible (no C++ compiler needed).
 
     Why this matters
     ----------------
-    annoy is a transitive dependency (SCART → popv → annoy).  When pip tries to
-    install annoy it builds from source, which requires Microsoft C++ Build Tools
-    (NOT just the VC++ Redistributable).  On machines without Build Tools, the
-    build fails with "Microsoft Visual C++ 14.0 or greater is required."
+    annoy is a transitive dependency (SCART → popv → annoy). PyPI has NO
+    pre-built Windows wheel for annoy — only a source tarball. So pip always
+    tries to build from source, which requires Microsoft C++ Build Tools.
 
-    Fix: annoy ≥ 1.17.0 ships pre-built win_amd64 wheels on PyPI — no compiler
-    needed.  We pin ≥ 1.17.0 and use --prefer-binary so pip always grabs the wheel.
+    Fix
+    ---
+    1. conda install -c conda-forge python-annoy   ← pre-built binary, no compiler
+    2. Create a pip dist-info record for it        ← so pip sees annoy as satisfied
+                                                      and skips the source build
 
-    Strategy (tried in order)
-    -------------------------
-    1. pip install annoy>=1.17.0 --prefer-binary   ← uses PyPI win_amd64 wheel
-    2. conda install -c conda-forge python-annoy   ← fallback, also pre-built
-
-    Call this BEFORE pip install SCART so pip sees annoy as already satisfied
-    and does not attempt a source build.
+    Call this BEFORE pip install SCART so pip does not attempt a source build.
     """
-    # Already importable → nothing to do
+    # ── Already importable AND pip-visible → nothing to do ───────────────────
+    check = subprocess.run(
+        [sys.executable, "-m", "pip", "show", "annoy"],
+        capture_output=True, check=False,
+    )
+    if check.returncode == 0:
+        print("[SCART:annoy] annoy already pip-visible — OK")
+        return True
+
+    # ── Try importing (conda-installed but not yet pip-registered) ───────────
     try:
         import importlib
         importlib.import_module("annoy")
-        print("[SCART:annoy] annoy already installed — OK")
+        print("[SCART:annoy] annoy importable but not pip-registered. Registering ...")
+        _register_annoy_with_pip()
         return True
     except ImportError:
         pass
 
     print(
-        "\n[SCART:annoy] annoy not found (or not pip-visible).\n"
-        "  Installing pre-built binary — no C++ compiler required ..."
+        "\n[SCART:annoy] annoy not found. Installing via conda-forge (no compiler needed) ..."
     )
 
-    # ── Try 1: pip binary wheel ──────────────────────────────────────────────
+    # ── conda install ─────────────────────────────────────────────────────────
+    conda_exe = shutil.which("conda")
+    if not conda_exe:
+        print(
+            "[SCART:annoy] ERROR: conda not found. Activate scart_env first:\n"
+            "  conda activate scart_env",
+            file=sys.stderr,
+        )
+        return False
+
     result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "annoy>=1.17.0", "--prefer-binary"],
+        [conda_exe, "install", "-c", "conda-forge", "python-annoy", "-y"],
         check=False,
     )
-    if result.returncode == 0:
-        # Verify the import works in a fresh subprocess (avoids stale sys.modules)
-        check = subprocess.run(
-            [sys.executable, "-c", "import annoy; print('annoy', annoy.__version__)"],
-            check=False,
+    if result.returncode != 0:
+        print(
+            "[SCART:annoy] ERROR: conda install failed. Run manually:\n"
+            "  conda install -c conda-forge python-annoy -y",
+            file=sys.stderr,
         )
-        if check.returncode == 0:
-            print("[SCART:annoy] annoy installed via pip binary wheel — OK")
-            return True
+        return False
 
-    print(
-        "[SCART:annoy] pip binary wheel unavailable for this Python/platform.\n"
-        "  Falling back to conda-forge ...",
-        file=sys.stderr,
+    print("[SCART:annoy] conda install succeeded. Registering with pip ...")
+    _register_annoy_with_pip()
+
+    # ── Final verification ────────────────────────────────────────────────────
+    verify = subprocess.run(
+        [sys.executable, "-c", "import annoy; print('annoy OK')"],
+        check=False,
     )
+    if verify.returncode == 0:
+        print("[SCART:annoy] annoy installed and verified — OK")
+        return True
 
-    # ── Try 2: conda-forge ──────────────────────────────────────────────────
-    conda_exe = shutil.which("conda")
-    if conda_exe:
-        result = subprocess.run(
-            [conda_exe, "install", "-c", "conda-forge", "python-annoy", "-y"],
-            check=False,
-        )
-        if result.returncode == 0:
-            print("[SCART:annoy] annoy installed via conda-forge — OK")
-            return True
-
-    # ── Both failed ──────────────────────────────────────────────────────────
     print(
-        "\n[SCART:annoy] ERROR: Could not install annoy automatically.\n"
-        "  Run ONE of these manually, then retry:\n"
-        "\n"
-        "    pip install \"annoy>=1.17.0\" --prefer-binary\n"
-        "\n"
-        "  Or:\n"
-        "\n"
-        "    conda install -c conda-forge python-annoy -y\n"
-        "\n"
-        "  If both fail, install Microsoft C++ Build Tools from:\n"
-        "    https://visualstudio.microsoft.com/visual-cpp-build-tools/\n"
-        "  (choose 'Desktop development with C++', then restart your terminal)",
+        "[SCART:annoy] ERROR: annoy installed but import failed. "
+        "Try restarting your terminal and re-running.",
         file=sys.stderr,
     )
     return False
@@ -544,14 +573,21 @@ def _show_manual_steps(os_choice: str):
          pip install scvi-tools==1.1.6.post2
          pip install "jax[cpu]==0.4.23" "jaxlib==0.4.23" "optax==0.1.7" "flax==0.7.5" "orbax-checkpoint<0.5" "numpyro<=0.13.2" "numpy>=1.24,<2.0" "scipy==1.12.0" --force-reinstall
 
-   [3] Install annoy binary wheel — NO C++ compiler needed
-       (annoy 1.17+ ships pre-built win_amd64 wheels on PyPI):
-         pip install "annoy>=1.17.0" --prefer-binary
-       If that fails, use conda instead:
+   [3] Install annoy via conda (NO C++ compiler needed — PyPI has no Windows wheel):
          conda install -c conda-forge python-annoy -y
+         python -c "
+import site, os
+sp = site.getsitepackages()[0]
+di = os.path.join(sp, 'annoy-1.17.3.dist-info')
+os.makedirs(di, exist_ok=True)
+open(os.path.join(di, 'METADATA'), 'w').write('Metadata-Version: 2.1\nName: annoy\nVersion: 1.17.3\n')
+open(os.path.join(di, 'RECORD'), 'w').write('')
+open(os.path.join(di, 'INSTALLER'), 'w').write('conda\n')
+print('annoy registered with pip')
+"
        NOTE: Do NOT skip this step. pip will try to build annoy from source
        when installing SCART (via popv dependency), which requires C++ Build Tools.
-       Pre-installing the binary wheel prevents that build attempt entirely.
+       The conda install + pip registration prevents that entirely.
 
    [4] Install SCART (annoy is now pre-installed — no source build triggered):
          pip install git+https://github.com/csblab23/SCART.git
