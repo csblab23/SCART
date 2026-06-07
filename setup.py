@@ -97,13 +97,15 @@ setup(
         "scvi-tools==1.1.6.post2",
         "popv==0.4.2",
 
-        # annoy — listed explicitly so pip resolves it BEFORE popv's transitive
-        # dependency triggers a source build.  annoy >=1.17.0 ships pre-built
-        # win_amd64 wheels on PyPI, so no C++ compiler is required on Windows.
-        # On Windows, pre-install with:
-        #   pip install "annoy>=1.17.0" --prefer-binary
-        # before running pip install SCART to guarantee the wheel is used.
-        "annoy>=1.17.0",
+        # annoy — NOT listed here intentionally.
+        # PyPI has no pre-built Windows wheel for annoy (source-only tarball).
+        # Listing it here would cause pip to build from source on Windows,
+        # requiring C++ Build Tools. Instead, install it via conda BEFORE
+        # pip install SCART:
+        #   conda install -c conda-forge python-annoy -y
+        # Then register it with pip (see install.py _ensure_annoy_windows).
+        # annoy is pulled in transitively via popv — pip will skip the build
+        # once it sees annoy already registered.
 
         # Deep-learning back-ends
         # torch: on Windows the install script replaces this with
