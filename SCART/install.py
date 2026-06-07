@@ -276,24 +276,119 @@ def _run_linux_mac(os_name: str):
 
 
 # ---------------------------------------------------------------------------
-# Windows: automated pip fixes  (mirrors original Windows guide Step 3 exactly)
+# Windows: annoy pre-install / repair helper
+# ---------------------------------------------------------------------------
+
+def _ensure_annoy_windows() -> bool:
+    """
+    Ensure annoy is installed from a pre-built binary wheel (no C++ compiler needed).
+
+    Why this matters
+    ----------------
+    annoy is a transitive dependency (SCART → popv → annoy).  When pip tries to
+    install annoy it builds from source, which requires Microsoft C++ Build Tools
+    (NOT just the VC++ Redistributable).  On machines without Build Tools, the
+    build fails with "Microsoft Visual C++ 14.0 or greater is required."
+
+    Fix: annoy ≥ 1.17.0 ships pre-built win_amd64 wheels on PyPI — no compiler
+    needed.  We pin ≥ 1.17.0 and use --prefer-binary so pip always grabs the wheel.
+
+    Strategy (tried in order)
+    -------------------------
+    1. pip install annoy>=1.17.0 --prefer-binary   ← uses PyPI win_amd64 wheel
+    2. conda install -c conda-forge python-annoy   ← fallback, also pre-built
+
+    Call this BEFORE pip install SCART so pip sees annoy as already satisfied
+    and does not attempt a source build.
+    """
+    # Already importable → nothing to do
+    try:
+        import importlib
+        importlib.import_module("annoy")
+        print("[SCART:annoy] annoy already installed — OK")
+        return True
+    except ImportError:
+        pass
+
+    print(
+        "\n[SCART:annoy] annoy not found (or not pip-visible).\n"
+        "  Installing pre-built binary — no C++ compiler required ..."
+    )
+
+    # ── Try 1: pip binary wheel ──────────────────────────────────────────────
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "annoy>=1.17.0", "--prefer-binary"],
+        check=False,
+    )
+    if result.returncode == 0:
+        # Verify the import works in a fresh subprocess (avoids stale sys.modules)
+        check = subprocess.run(
+            [sys.executable, "-c", "import annoy; print('annoy', annoy.__version__)"],
+            check=False,
+        )
+        if check.returncode == 0:
+            print("[SCART:annoy] annoy installed via pip binary wheel — OK")
+            return True
+
+    print(
+        "[SCART:annoy] pip binary wheel unavailable for this Python/platform.\n"
+        "  Falling back to conda-forge ...",
+        file=sys.stderr,
+    )
+
+    # ── Try 2: conda-forge ──────────────────────────────────────────────────
+    conda_exe = shutil.which("conda")
+    if conda_exe:
+        result = subprocess.run(
+            [conda_exe, "install", "-c", "conda-forge", "python-annoy", "-y"],
+            check=False,
+        )
+        if result.returncode == 0:
+            print("[SCART:annoy] annoy installed via conda-forge — OK")
+            return True
+
+    # ── Both failed ──────────────────────────────────────────────────────────
+    print(
+        "\n[SCART:annoy] ERROR: Could not install annoy automatically.\n"
+        "  Run ONE of these manually, then retry:\n"
+        "\n"
+        "    pip install \"annoy>=1.17.0\" --prefer-binary\n"
+        "\n"
+        "  Or:\n"
+        "\n"
+        "    conda install -c conda-forge python-annoy -y\n"
+        "\n"
+        "  If both fail, install Microsoft C++ Build Tools from:\n"
+        "    https://visualstudio.microsoft.com/visual-cpp-build-tools/\n"
+        "  (choose 'Desktop development with C++', then restart your terminal)",
+        file=sys.stderr,
+    )
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Windows: automated pip fixes + R + SCEVAN
 # ---------------------------------------------------------------------------
 
 def _run_windows():
     print(f"\n{SEP}")
-    print("  Running automated pip fixes for Windows")
+    print("  Running automated setup for Windows")
     print(SEP)
 
+    # Step 0: ensure annoy binary wheel is installed (no C++ compiler needed)
+    print("\n[Step 0/11] Ensuring annoy binary wheel is installed ...")
+    _ensure_annoy_windows()
+
     # Step 1: ontology
-    print("\n[Step 1/5] Downloading cl.obo ontology ...")
+    print("\n[Step 1/11] Downloading cl.obo ontology ...")
     download_cl_obo()
 
-    # Step 2: re-pin numpy + scipy  (mirrors guide Step 3 line 1-2)
-    print("\n[Step 2/5] Re-pinning numpy + scipy ...")
+    # Step 2: re-pin numpy + scipy
+    print("\n[Step 2/11] Re-pinning numpy + scipy ...")
     _pip("numpy>=1.24,<2.0", "scipy==1.12.0", "--force-reinstall")
 
-    # Step 3: re-pin full JAX stack  (mirrors guide Step 3 line 5 — the big force-reinstall)
-    print("\n[Step 3/5] Re-pinning full JAX stack ...")
+    # Step 3: re-pin full JAX stack
+    print("\n[Step 3/11] Re-pinning full JAX stack ...")
     _pip(
         "jax[cpu]==0.4.23",
         "jaxlib==0.4.23",
@@ -306,49 +401,89 @@ def _run_windows():
         "--force-reinstall",
     )
 
-    # Step 4: fix PyTorch DLL issue  (mirrors guide Step 3 PyTorch fix)
-    print("\n[Step 4/5] Fixing PyTorch DLL issue (CPU wheel) ...")
+    # Step 4: fix PyTorch DLL issue
+    print("\n[Step 4/11] Fixing PyTorch DLL issue (CPU wheel) ...")
     _pip_uninstall(*WIN_TORCH_UNINSTALL)
     _pip(*WIN_TORCH_INSTALL)
 
-    # Step 5: pin TensorFlow  (mirrors guide Step 3 TensorFlow fix)
-    print("\n[Step 5/5] Pinning TensorFlow CPU to 2.10.0 ...")
+    # Step 5: pin TensorFlow
+    print("\n[Step 5/11] Pinning TensorFlow CPU to 2.10.0 ...")
     _pip_uninstall(*WIN_TF_UNINSTALL)
     _pip(*WIN_TF_INSTALL)
 
+    # Step 6: re-ensure annoy after all the force-reinstalls above
+    print("\n[Step 6/11] Re-checking annoy after force-reinstalls ...")
+    _ensure_annoy_windows()
+
     _verify_python()
 
+    # ── R + SCEVAN (automated, same pattern as Linux) ────────────────────────
+
+    # Step 7: r-base first
+    print("\n[Step 7/11] Installing r-base via conda ...")
+    ok = _conda("install", "-c", "conda-forge", "r-base", "-y")
+    if not ok:
+        print("[SCART] Step 7 failed. Fix conda issue above and re-run.", file=sys.stderr)
+        return
+
+    # Step 8: R base + graphics stack
+    print("\n[Step 8/11] Installing R base packages + graphics stack via conda ...")
+    ok = _conda(
+        "install",
+        "--override-channels",
+        "-c", "conda-forge",
+        "-c", "bioconda",
+        "-c", "defaults",
+        "-y",
+        *CONDA_R_BASE,
+    )
+    if not ok:
+        print("[SCART] Step 8 failed. Fix conda issue above and re-run.", file=sys.stderr)
+        return
+
+    # Step 9: CRAN packages (no bioconductor — not available for win-64 via conda)
+    print("\n[Step 9/11] Installing R CRAN packages via conda ...")
+    _conda("config", "--set", "channel_priority", "flexible")
+    ok = _conda(
+        "install",
+        "-c", "conda-forge",
+        "-y",
+        "r-paralleldist", "r-pheatmap", "r-forcats",
+        "r-cluster", "r-rtsne", "r-ape", "r-tidytree", "r-ggrepel",
+    )
+    if not ok:
+        print("[SCART] Step 9 failed. Fix conda issue above and re-run.", file=sys.stderr)
+        return
+
+    # Step 10: Bioconductor packages via Rscript + BiocManager
+    # (bioconductor-scran/fgsea/ggtree are NOT available for win-64 via conda)
+    print("\n[Step 10/11] Installing Bioconductor packages via BiocManager ...")
+    ok = _rscript(
+        "install.packages('BiocManager', repos='https://cran.r-project.org'); "
+        "BiocManager::install(c('scran', 'fgsea', 'ggtree'))",
+        label="BiocManager",
+    )
+    if not ok:
+        print("[SCART] Step 10 failed. See error above.", file=sys.stderr)
+        return
+
+    # Step 11: SCEVAN
+    print("\n[Step 11/11] Installing SCEVAN via Rscript ...")
+    ok = _rscript(
+        "library(devtools); "
+        "install_github('miccec/yaGST'); "
+        "install_github('AntonioDeFalco/SCEVAN')",
+        label="SCEVAN",
+    )
+    if not ok:
+        print("[SCART] Step 11 failed. See error above.", file=sys.stderr)
+        return
+
+    _verify_r()
+
     print(f"\n{SEP}")
-    print("  Windows automated pip fixes complete!")
+    print("  Windows setup complete!")
     print(SEP)
-
-    # Print the remaining manual R + SCEVAN steps (Step 4 of Windows guide).
-    # All commands are single-line — backslash continuation does NOT work in PowerShell.
-    print("""
-REMAINING MANUAL STEPS — run these in order inside scart_env:
-(Use single-line commands in PowerShell — no backslash continuation)
-
-  Step 4a — Install r-base first:
-    conda install -c conda-forge r-base -y
-
-  Step 4b — Install R base packages + graphics stack:
-    conda install -c conda-forge r-base r-devtools r-remotes r-ggplot2 r-data.table r-igraph r-gdtools r-ragg r-dplyr cairo freetype fontconfig harfbuzz fribidi libpng libtiff libjpeg-turbo libwebp --override-channels -c conda-forge -c bioconda -c defaults -y
-
-  Step 4c — Install R CRAN packages:
-    conda config --set channel_priority flexible
-    conda install -c conda-forge r-paralleldist r-pheatmap r-forcats r-cluster r-rtsne r-ape r-tidytree r-ggrepel -y
-
-  Step 4d — Install Bioconductor packages via Rscript:
-    (bioconductor-scran/fgsea/ggtree are NOT available for win-64 via conda)
-    Rscript -e "install.packages('BiocManager', repos='https://cran.r-project.org')"
-    Rscript -e "BiocManager::install(c('scran', 'fgsea', 'ggtree'))"
-
-  Step 4e — Install SCEVAN via Rscript:
-    Rscript -e "library(devtools); install_github('miccec/yaGST'); install_github('AntonioDeFalco/SCEVAN')"
-
-  Step 5 — Verify R/SCEVAN:
-    Rscript -e "library(SCEVAN); cat('SCEVAN OK')"
-""")
 
 
 # ---------------------------------------------------------------------------
@@ -395,7 +530,7 @@ def _show_manual_steps(os_choice: str):
        (required for TensorFlow + PyTorch — needs admin rights)
        In PowerShell:
          Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile "vc_redist.exe"
-         .\vc_redist.exe /install /quiet /norestart
+         .\\vc_redist.exe /install /quiet /norestart
        Then RESTART your terminal.
 
    [1] Create and activate conda environment:
@@ -409,21 +544,35 @@ def _show_manual_steps(os_choice: str):
          pip install scvi-tools==1.1.6.post2
          pip install "jax[cpu]==0.4.23" "jaxlib==0.4.23" "optax==0.1.7" "flax==0.7.5" "orbax-checkpoint<0.5" "numpyro<=0.13.2" "numpy>=1.24,<2.0" "scipy==1.12.0" --force-reinstall
 
-   [3] Install python-annoy via conda (no Windows wheel on PyPI):
+   [3] Install annoy binary wheel — NO C++ compiler needed
+       (annoy 1.17+ ships pre-built win_amd64 wheels on PyPI):
+         pip install "annoy>=1.17.0" --prefer-binary
+       If that fails, use conda instead:
          conda install -c conda-forge python-annoy -y
+       NOTE: Do NOT skip this step. pip will try to build annoy from source
+       when installing SCART (via popv dependency), which requires C++ Build Tools.
+       Pre-installing the binary wheel prevents that build attempt entirely.
 
-   [4] Install SCART:
+   [4] Install SCART (annoy is now pre-installed — no source build triggered):
          pip install git+https://github.com/csblab23/SCART.git
 
  AUTOMATED by this script:
+   [auto] Ensure annoy binary wheel (repair if needed)
    [auto] Download cl.obo ontology
    [auto] Re-pin numpy + scipy
    [auto] Re-pin full JAX stack (force-reinstall)
    [auto] Fix PyTorch DLL issue (CPU wheel)
    [auto] Pin TensorFlow CPU to 2.10.0
+   [auto] Re-check annoy after force-reinstalls
    [auto] Verify Python packages
+   [auto] conda install r-base
+   [auto] conda install R base packages + graphics stack
+   [auto] conda install R CRAN packages
+   [auto] Rscript BiocManager install scran + fgsea + ggtree
+   [auto] Rscript install_github SCEVAN
+   [auto] Verify R / SCEVAN
 
- AFTER this script — R + SCEVAN steps will be printed at the end.
+ Nothing else required — everything above is automated.
 {SEP2}""")
 
     elif os_choice == "3":  # Mac
