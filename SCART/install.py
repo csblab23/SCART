@@ -486,9 +486,12 @@ def _run_windows():
 
     # Step 10: Bioconductor packages via Rscript + BiocManager
     # (bioconductor-scran/fgsea/ggtree are NOT available for win-64 via conda)
+    # BiocManager version 3.22 is pinned to match R 4.5 — without this pin,
+    # BiocManager defaults to 3.20 which requires R 4.4 and throws a version error.
     print("\n[Step 10/11] Installing Bioconductor packages via BiocManager ...")
     ok = _rscript(
         "install.packages('BiocManager', repos='https://cran.r-project.org'); "
+        "BiocManager::install(version='3.22'); "
         "BiocManager::install(c('scran', 'fgsea', 'ggtree'))",
         label="BiocManager",
     )
