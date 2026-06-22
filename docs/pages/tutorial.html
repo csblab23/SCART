@@ -269,6 +269,7 @@
       <li><a href="#module4b">Module 4b — Two Gene</a></li>
       <li class="sidebar-group">Running Environments</li>
       <li><a href="#jupyter-nb">Jupyter Notebook</a></li>
+
       <li><a href="#hpc-run">HPC / Cluster</a></li>
       <li><a href="#sbatch">Full SBATCH Script</a></li>
     </ul>
@@ -813,19 +814,6 @@ print(nand_pairs.head(<span class="num">10</span>))
 <span class="c"># Outputs: two_gene_hof.csv (best pairs) and two_gene_complete.csv (all evaluated pairs)</span></pre>
     </div>
 
-    <p>Recommended settings based on available hardware:</p>
-    <div class="code-wrap">
-      <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
-      <pre><span class="c"># Laptop / quick test</span>
-two_gene_combination.run(pop_size=<span class="num">200</span>, Gmax=<span class="num">20</span>, patience=<span class="num">10</span>, n_cpus=<span class="num">4</span>, n_runs=<span class="num">2</span>, hpa_path=<span class="str">"..."</span>)
-
-<span class="c"># Standard workstation</span>
-two_gene_combination.run(pop_size=<span class="num">1000</span>, Gmax=<span class="num">100</span>, patience=<span class="num">50</span>, n_cpus=<span class="num">8</span>, n_runs=<span class="num">10</span>, hpa_path=<span class="str">"..."</span>)
-
-<span class="c"># HPC node</span>
-two_gene_combination.run(pop_size=<span class="num">2000</span>, Gmax=<span class="num">200</span>, patience=<span class="num">100</span>, n_cpus=<span class="num">40</span>, n_runs=<span class="num">10</span>, hpa_path=<span class="str">"..."</span>)</pre>
-    </div>
-
     <!-- ═══════════════════════════════════════════════════════════════════
          COMPLETE EXAMPLE SCRIPT
     ════════════════════════════════════════════════════════════════════════ -->
@@ -835,6 +823,64 @@ two_gene_combination.run(pop_size=<span class="num">2000</span>, Gmax=<span clas
     <div class="callout callout-info">
       <span class="callout-icon">ℹ️</span>
       <div><strong>How to use this script</strong> — You can paste it into a <strong>Jupyter notebook</strong> (one module per cell is easiest for inspecting results), save it as a <strong>.py file and run with <code>python my_script.py</code></strong>, or embed it in an <strong>HPC/SLURM batch script</strong>. The Python code itself is identical in all three cases. See the <a href="install.html#jupyter-notebook">Installation page</a> for Jupyter and HPC/SLURM setup details.</div>
+    </div>
+
+    <!-- ── QUICK START ── -->
+    <h3 style="margin-top:32px;">Quick Start — Full pipeline in one script</h3>
+    <p>Paste all modules into a single cell and execute at once. Useful for automated runs or re-running end-to-end. For running each module in its own Jupyter cell and inspecting intermediate outputs, see the <a href="https://csblab23.github.io/SCART/docs/pages/install.html#jupyter-notebook">Jupyter Notebook section on the Installation page</a>. [This is an example dataset]</p>
+
+    <div class="callout callout-tip">
+      <span class="callout-icon">💡</span>
+      <div>Make sure you have completed <a href="https://csblab23.github.io/SCART/docs/pages/install.html#jupyter">Step 4 (Jupyter Setup)</a> and selected the <strong>Python (scart_env)</strong> kernel before running the cells below.</div>
+    </div>
+
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">python — Full SCART pipeline · Quick Start</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre><span class="c"># ── Full SCART pipeline — single cell ──────────────────────────────────────</span>
+
+<span class="kw">import</span> SCART
+<span class="kw">from</span> SCART.geo_fetcher <span class="kw">import</span> SampleAnnotator
+
+annotator = SampleAnnotator(<span class="str">"GSE158937"</span>, cancer_type=<span class="str">"ovary_cancer"</span>, min_genes=<span class="num">200</span>, max_mt=<span class="num">40</span>)
+normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = annotator.run()
+
+<span class="kw">from</span> SCART <span class="kw">import</span> popv_annotation
+adata = popv_annotation.auto_run_popv(
+    nsamples=<span class="num">300</span>,
+    user_reference=<span class="str">"/path/to/Ovary_TSP1_30_version2d_10X_smartseq_scvi_Nov262024.h5ad"</span>,
+)
+
+<span class="kw">from</span> SCART <span class="kw">import</span> preprocessing
+adata_preprocessed = preprocessing.run_preprocessing_pipeline(
+    adata              = <span class="kw">None</span>,
+    log2fc_threshold   = <span class="num">2.0</span>,
+    pval_adj_threshold = <span class="num">0.05</span>,
+    reference_h5ad     = <span class="str">"/path/to/Ovary_TSP1_30_version2d_10X_smartseq_scvi_Nov262024.h5ad"</span>,
+    malignant_strategy = <span class="str">"intersection"</span>,
+    scevan_ref_max_cells = <span class="num">100</span>,
+    scevan_sample_name   = <span class="str">"SCEVAN_run"</span>,
+    scevan_organism      = <span class="str">"human"</span>,
+    scevan_par_cores     = <span class="num">1</span>,
+    scevan_subclones     = <span class="kw">False</span>,
+    scevan_batch_size    = <span class="num">3000</span>,
+)
+
+<span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> one_gene_combination
+df = one_gene_combination.run(
+    hpa_path         = <span class="str">"/path/to/HPA_updated.h5ad"</span>,
+    safety_threshold = <span class="num">0.9</span>,
+)
+
+<span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> two_gene_combination
+df_hof, df_all = two_gene_combination.run(
+    hpa_path         = <span class="str">"/path/to/HPA_updated.h5ad"</span>,
+    safety_threshold = <span class="num">0.9</span>,
+    pop_size         = <span class="num">1000</span>,
+    Gmax             = <span class="num">100</span>,
+    patience         = <span class="num">50</span>,
+    n_cpus           = <span class="num">8</span>,
+    n_runs           = <span class="num">10</span>,
+)</pre>
     </div>
 
     <!-- ── STEP 1 ── -->
