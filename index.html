@@ -185,36 +185,6 @@ body { background: #ffffff !important; }
   .hero-phase-pill { right: 16px; }
   .hero-anim-caption { right: 16px; }
 }
-
-/* ═══════════════════════════════════════════
-   VISITOR COUNTER STAT ITEM
-═══════════════════════════════════════════ */
-.stat-item-visitors {
-  position: relative;
-}
-.stat-item-visitors .stat-value {
-  color: #b41e28 !important;
-  font-variant-numeric: tabular-nums;
-}
-.stat-item-visitors .stat-label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  justify-content: center;
-}
-.visitor-live-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #b41e28;
-  display: inline-block;
-  animation: visitorPulse 1.8s ease-in-out infinite;
-  flex-shrink: 0;
-}
-@keyframes visitorPulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50%       { opacity: 0.4; transform: scale(0.7); }
-}
 </style>
 </head>
 <body>
@@ -277,110 +247,6 @@ body { background: #ffffff !important; }
         </a>
         <a href="docs/pages/overview.html" class="btn-secondary">Read the Docs →</a>
       </div>
-
-      <!-- ── Visitor counter (shared global, unique per day via cookie) ── -->
-      <div style="margin-top:22px;display:flex;align-items:center;gap:10px;">
-        <span class="visitor-live-dot"></span>
-        <span style="font-family:'DM Sans',sans-serif;font-size:13px;color:#6b7a8d;">Website Visits:</span>
-        <span id="gc-visit-count" style="font-family:'JetBrains Mono',monospace;font-size:15px;font-weight:600;color:#b41e28;letter-spacing:0.04em;">—</span>
-      </div>
-
-      <!-- Cookie consent banner -->
-      <div id="cookie-banner" style="display:none;position:fixed;bottom:0;left:0;right:0;z-index:9999;
-        background:#0d1526;color:#e2e8f0;padding:20px 32px;
-        box-shadow:0 -4px 24px rgba(0,0,0,0.22);font-family:'DM Sans',sans-serif;">
-        <div style="max-width:960px;margin:0 auto;display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:16px;">
-          <div style="flex:1;min-width:260px;">
-            <div style="font-weight:600;font-size:13px;color:#fff;margin-bottom:6px;letter-spacing:0.03em;">
-              🔬 SCART — Cookie Usage Notice
-            </div>
-            <div style="font-size:12px;color:#94a3b8;line-height:1.7;">
-              SCART is an open-source bioinformatics tool developed at <strong style="color:#cbd5e1;">CSIR-IGIB, New Delhi</strong>, 
-              released under the <strong style="color:#cbd5e1;">MIT License</strong>. 
-              This site uses a single session cookie 
-              solely to count unique daily visitors for research impact assessment — 
-              analogous to citation metrics used in academic publishing. 
-              <strong style="color:#cbd5e1;">No personal data, IP addresses, or identifiers are stored.</strong> 
-              You may decline without any loss of functionality.
-            </div>
-          </div>
-          <div style="display:flex;gap:10px;align-items:center;flex-shrink:0;padding-top:4px;">
-            <button onclick="handleCookieChoice(true)" style="background:#b41e28;color:#fff;border:none;
-              padding:9px 22px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;letter-spacing:0.02em;">
-              Accept
-            </button>
-            <button onclick="handleCookieChoice(false)" style="background:transparent;color:#8896a8;border:1px solid #334155;
-              padding:9px 22px;border-radius:6px;cursor:pointer;font-size:13px;">
-              Decline
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <script>
-      (function () {
-        var COUNT_URL_HIT  = 'https://api.counterapi.dev/v1/csblab23-scart/visits/up';
-        var COUNT_URL_GET  = 'https://api.counterapi.dev/v1/csblab23-scart/visits';
-        var el = document.getElementById('gc-visit-count');
-        var banner = document.getElementById('cookie-banner');
-
-        function getCookie(name) {
-          var m = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
-          return m ? m[1] : null;
-        }
-        function setCookieTillMidnight(name, val) {
-          var midnight = new Date(); midnight.setDate(midnight.getDate()+1);
-          midnight.setHours(0,0,0,0);
-          document.cookie = name+'='+val+'; expires='+midnight.toUTCString()+'; path=/; SameSite=Lax';
-        }
-        function setCookieYear(name, val) {
-          var d = new Date(); d.setFullYear(d.getFullYear()+1);
-          document.cookie = name+'='+val+'; expires='+d.toUTCString()+'; path=/; SameSite=Lax';
-        }
-
-        function animateTo(num) {
-          var start = 0, step = 16, inc = num / (900/step);
-          var t = setInterval(function(){
-            start += inc;
-            if (start >= num) { start = num; clearInterval(t); }
-            el.textContent = Math.floor(start).toLocaleString();
-          }, step);
-        }
-
-        function hitAndShow() {
-          // Only increment if not visited today
-          var url = getCookie('scart_visited_today') ? COUNT_URL_GET : COUNT_URL_HIT;
-          fetch(url)
-            .then(function(r){ return r.json(); })
-            .then(function(d){
-              if (!getCookie('scart_visited_today')) setCookieTillMidnight('scart_visited_today','1');
-              animateTo(d.count || 0);
-            })
-            .catch(function(){ el.textContent = '—'; });
-        }
-
-        window.handleCookieChoice = function(accepted) {
-          banner.style.display = 'none';
-          setCookieYear('scart_cookie_consent', accepted ? '1' : '0');
-          if (accepted) hitAndShow();
-          else el.textContent = '—';
-        };
-
-        // Check existing consent
-        var consent = getCookie('scart_cookie_consent');
-        if (consent === '1') {
-          hitAndShow();
-        } else if (consent === '0') {
-          el.textContent = '—';
-        } else {
-          // Show banner once — fetch current count to display while waiting
-          fetch(COUNT_URL_GET).then(function(r){return r.json();}).then(function(d){
-            animateTo(d.count || 0);
-          }).catch(function(){});
-          banner.style.display = 'flex';
-        }
-      })();
-      </script>
     </div>
   </div>
 
@@ -402,7 +268,6 @@ body { background: #ffffff !important; }
     <div class="stat-item"><div class="stat-value">36</div><div class="stat-label">HPA healthy tissue types</div></div>
     <div class="stat-item"><div class="stat-value">5</div><div class="stat-label">Pipeline modules</div></div>
     <div class="stat-item"><div class="stat-value">3</div><div class="stat-label">Logic gate types</div></div>
-
   </div>
 </div>
 
@@ -466,7 +331,6 @@ body { background: #ffffff !important; }
   <div class="section-inner">
     <div class="section-label">Built-in Surfaceome Reference</div>
     <h2 class="section-title">Four curated databases</h2>
-    <p class="section-desc">All reference databases are either bundled or auto-downloaded at runtime. No manual setup required.</p>
     <div class="db-grid">
       <div class="db-card"><div class="db-icon">🧫</div><div><h4>CSPA — Cell Surface Protein Atlas</h4><p>Curated atlas of human cell surface proteins used for surfaceome DE filtering in Module 3.</p><div class="db-meta">3,568 genes · Module 3</div><br><a href="http://wlab.ethz.ch/cspa/" target="_blank" class="db-link">cspa.ethz.ch →</a></div></div>
       <div class="db-card"><div class="db-icon">🫀</div><div><h4>HPA — Human Protein Atlas</h4><p>36-tissue healthy expression reference for off-tumour safety scoring in Modules 4a and 4b.</p><div class="db-meta">36 tissue types · Module 4</div><br><a href="https://www.proteinatlas.org/" target="_blank" class="db-link">proteinatlas.org →</a></div></div>
@@ -531,7 +395,6 @@ body { background: #ffffff !important; }
 </footer>
 
 <script src="docs/js/main.js"></script>
-
 
 <!-- ═══════════════════════════════════════════════════════════════
      CAR-T ANIMATION v5
