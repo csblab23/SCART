@@ -281,8 +281,11 @@ body { background: #ffffff !important; }
       <!-- ── Visitor counter ── -->
       <div style="margin-top:22px;display:flex;align-items:center;gap:10px;">
         <span class="visitor-live-dot"></span>
-        <span id="visitorCount" style="font-family:'JetBrains Mono',monospace;font-size:15px;font-weight:600;color:#b41e28;letter-spacing:0.04em;">—</span>
-        <span style="font-family:'DM Sans',sans-serif;font-size:13px;color:#6b7a8d;">total website visits</span>
+        <img
+          src="https://visitor-badge.laobi.icu/badge?page_id=csblab23.SCART&left_color=%236b7a8d&right_color=%23b41e28&left_text=Total+Visits"
+          alt="Visitor Count"
+          style="height:22px;vertical-align:middle;border-radius:3px;"
+        >
       </div>
     </div>
   </div>
@@ -435,56 +438,6 @@ body { background: #ffffff !important; }
 
 <script src="docs/js/main.js"></script>
 
-<!-- ═══════════════════════════════════════
-     VISITOR COUNTER
-     Uses an <img> to trigger the hit (no CORS issues).
-     Reads the SVG text via fetch for the count display.
-     Falls back to localStorage-based local counter.
-═══════════════════════════════════════════ -->
-<script>
-(function () {
-  const el = document.getElementById('visitorCount');
-  const BADGE_URL = 'https://hits.seeyoufarm.com/api/count/incr/badge.svg' +
-    '?url=https%3A%2F%2Fcsblab23.github.io%2FSCART' +
-    '&count_bg=%23b41e28&title_bg=%23555555&title=Visits&edge_flat=false';
-
-  function animateTo(num) {
-    let start = 0;
-    const step = 16;
-    const inc = num / (1000 / step);
-    const timer = setInterval(() => {
-      start += inc;
-      if (start >= num) { start = num; clearInterval(timer); }
-      el.textContent = Math.floor(start).toLocaleString();
-    }, step);
-  }
-
-  // Try fetching the SVG to parse the count
-  fetch(BADGE_URL)
-    .then(r => r.text())
-    .then(svg => {
-      // SVG has two numbers: today | total — grab all digit groups
-      const nums = [...svg.matchAll(/>(\d[\d,]*)</g)].map(m => parseInt(m[1].replace(/,/g,''), 10)).filter(n => !isNaN(n));
-      // The total is typically the larger / last number
-      const total = nums.length ? Math.max(...nums) : null;
-      if (total && total > 0) {
-        animateTo(total);
-      } else {
-        el.textContent = '—';
-      }
-    })
-    .catch(() => {
-      // CORS blocked locally — show a note; will work on GitHub Pages
-      el.textContent = 'live on deploy';
-      el.style.fontSize = '11px';
-      el.style.color = '#8896a8';
-    });
-
-  // Also fire the actual hit ping via hidden image (bypasses CORS)
-  const img = new Image();
-  img.src = BADGE_URL;
-})();
-</script>
 
 <!-- ═══════════════════════════════════════════════════════════════
      CAR-T ANIMATION v5
