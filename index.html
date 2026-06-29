@@ -278,15 +278,45 @@ body { background: #ffffff !important; }
         <a href="docs/pages/overview.html" class="btn-secondary">Read the Docs →</a>
       </div>
 
-      <!-- ── Visitor counter ── -->
+      <!-- ── Visitor counter (cookie-based, unique per day) ── -->
       <div style="margin-top:22px;display:flex;align-items:center;gap:10px;">
         <span class="visitor-live-dot"></span>
-        <img
-          src="https://visitor-badge.laobi.icu/badge?page_id=csblab23.SCART&left_color=%236b7a8d&right_color=%23b41e28&left_text=Website+Visits"
-          alt="Visitor Count"
-          style="height:22px;vertical-align:middle;border-radius:3px;"
-        >
+        <span style="font-family:'DM Sans',sans-serif;font-size:13px;color:#6b7a8d;">Website Visits:</span>
+        <span id="gc-visit-count" style="font-family:'JetBrains Mono',monospace;font-size:15px;font-weight:600;color:#b41e28;letter-spacing:0.04em;">—</span>
       </div>
+      <script>
+      (function () {
+        // ── Cookie helpers ──
+        function getCookie(name) {
+          var match = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
+          return match ? match[1] : null;
+        }
+        function setCookieTillMidnight(name, value) {
+          var now = new Date();
+          var midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0);
+          document.cookie = name + '=' + value + '; expires=' + midnight.toUTCString() + '; path=/; SameSite=Lax';
+        }
+
+        // ── Get or init stored count ──
+        var stored = parseInt(localStorage.getItem('scart_visit_count') || '0', 10);
+
+        // ── Only count if no cookie for today ──
+        if (!getCookie('scart_visited_today')) {
+          stored += 1;
+          localStorage.setItem('scart_visit_count', stored);
+          setCookieTillMidnight('scart_visited_today', '1');
+        }
+
+        // ── Show with count-up animation ──
+        var el = document.getElementById('gc-visit-count');
+        var start = 0, step = 16, inc = stored / (900 / step);
+        var timer = setInterval(function () {
+          start += inc;
+          if (start >= stored) { start = stored; clearInterval(timer); }
+          el.textContent = Math.floor(start).toLocaleString();
+        }, step);
+      })();
+      </script>
     </div>
   </div>
 
