@@ -185,6 +185,36 @@ body { background: #ffffff !important; }
   .hero-phase-pill { right: 16px; }
   .hero-anim-caption { right: 16px; }
 }
+
+/* ═══════════════════════════════════════════
+   VISITOR COUNTER STAT ITEM
+═══════════════════════════════════════════ */
+.stat-item-visitors {
+  position: relative;
+}
+.stat-item-visitors .stat-value {
+  color: #b41e28 !important;
+  font-variant-numeric: tabular-nums;
+}
+.stat-item-visitors .stat-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: center;
+}
+.visitor-live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #b41e28;
+  display: inline-block;
+  animation: visitorPulse 1.8s ease-in-out infinite;
+  flex-shrink: 0;
+}
+@keyframes visitorPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.4; transform: scale(0.7); }
+}
 </style>
 </head>
 <body>
@@ -268,6 +298,10 @@ body { background: #ffffff !important; }
     <div class="stat-item"><div class="stat-value">36</div><div class="stat-label">HPA healthy tissue types</div></div>
     <div class="stat-item"><div class="stat-value">5</div><div class="stat-label">Pipeline modules</div></div>
     <div class="stat-item"><div class="stat-value">3</div><div class="stat-label">Logic gate types</div></div>
+    <div class="stat-item stat-item-visitors">
+      <div class="stat-value" id="visitorCount">—</div>
+      <div class="stat-label"><span class="visitor-live-dot"></span>Website visits</div>
+    </div>
   </div>
 </div>
 
@@ -392,11 +426,52 @@ body { background: #ffffff !important; }
   <div class="footer-bottom">
     <span>© 2025 S<span style="color:#ff7070;">CAR</span>T · CSIR-IGIB · MIT License</span>
     <a href="https://github.com/csblab23/SCART" target="_blank">GitHub</a>
-    <img src="https://hits.seeyoufarm.com/api/count/incr/badge.svg?url=https%3A%2F%2Fcsblab23.github.io%2FSCART&count_bg=%23b41e28&title_bg=%23555555&icon=&title=Visitors&edge_flat=false" alt="Visitor Count" style="vertical-align:middle;margin-left:16px;">
   </div>
 </footer>
 
 <script src="docs/js/main.js"></script>
+
+<!-- ═══════════════════════════════════════
+     VISITOR COUNTER
+     Fetches live count from hits.seeyoufarm.com SVG,
+     parses the total number, and displays it in the stats row.
+═══════════════════════════════════════════ -->
+<script>
+(function () {
+  const el = document.getElementById('visitorCount');
+  const BADGE_URL = 'https://hits.seeyoufarm.com/api/count/incr/badge.svg' +
+    '?url=https%3A%2F%2Fcsblab23.github.io%2FSCART' +
+    '&count_bg=%23b41e28&title_bg=%23555555&title=Visitors&edge_flat=false';
+
+  fetch(BADGE_URL)
+    .then(r => r.text())
+    .then(svg => {
+      // The SVG contains two numbers: today / total
+      // We want the total — it's the last standalone number in the SVG text nodes
+      const matches = svg.match(/>(\d[\d,]*)</g);
+      if (matches && matches.length >= 2) {
+        // Last match is the total count
+        const raw = matches[matches.length - 1].replace(/[><,]/g, '');
+        const num = parseInt(raw, 10);
+        if (!isNaN(num)) {
+          // Animate count-up
+          let start = 0;
+          const duration = 1200;
+          const step = 16;
+          const increment = num / (duration / step);
+          const timer = setInterval(() => {
+            start += increment;
+            if (start >= num) { start = num; clearInterval(timer); }
+            el.textContent = Math.floor(start).toLocaleString();
+          }, step);
+          return;
+        }
+      }
+      el.textContent = '—';
+    })
+    .catch(() => { el.textContent = '—'; });
+})();
+</script>
 
 <!-- ═══════════════════════════════════════════════════════════════
      CAR-T ANIMATION v5
