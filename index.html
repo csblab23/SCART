@@ -278,43 +278,107 @@ body { background: #ffffff !important; }
         <a href="docs/pages/overview.html" class="btn-secondary">Read the Docs →</a>
       </div>
 
-      <!-- ── Visitor counter (cookie-based, unique per day) ── -->
+      <!-- ── Visitor counter (shared global, unique per day via cookie) ── -->
       <div style="margin-top:22px;display:flex;align-items:center;gap:10px;">
         <span class="visitor-live-dot"></span>
         <span style="font-family:'DM Sans',sans-serif;font-size:13px;color:#6b7a8d;">Website Visits:</span>
         <span id="gc-visit-count" style="font-family:'JetBrains Mono',monospace;font-size:15px;font-weight:600;color:#b41e28;letter-spacing:0.04em;">—</span>
       </div>
+
+      <!-- Cookie consent banner -->
+      <div id="cookie-banner" style="display:none;position:fixed;bottom:0;left:0;right:0;z-index:9999;
+        background:#0d1526;color:#e2e8f0;padding:20px 32px;
+        box-shadow:0 -4px 24px rgba(0,0,0,0.22);font-family:'DM Sans',sans-serif;">
+        <div style="max-width:960px;margin:0 auto;display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:16px;">
+          <div style="flex:1;min-width:260px;">
+            <div style="font-weight:600;font-size:13px;color:#fff;margin-bottom:6px;letter-spacing:0.03em;">
+              🔬 SCART — Cookie Usage Notice
+            </div>
+            <div style="font-size:12px;color:#94a3b8;line-height:1.7;">
+              SCART is an open-source bioinformatics tool developed at <strong style="color:#cbd5e1;">CSIR-IGIB, New Delhi</strong>, 
+              released under the <strong style="color:#cbd5e1;">MIT License</strong>. 
+              This site uses a single session cookie (<code style="background:#1e293b;padding:1px 5px;border-radius:3px;font-size:11px;">scart_visited_today</code>) 
+              solely to count unique daily visitors for research impact assessment — 
+              analogous to citation metrics used in academic publishing. 
+              <strong style="color:#cbd5e1;">No personal data, IP addresses, or identifiers are stored.</strong>  
+              You may decline without any loss of functionality.
+            </div>
+          </div>
+          <div style="display:flex;gap:10px;align-items:center;flex-shrink:0;padding-top:4px;">
+            <button onclick="handleCookieChoice(true)" style="background:#b41e28;color:#fff;border:none;
+              padding:9px 22px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;letter-spacing:0.02em;">
+              Accept
+            </button>
+            <button onclick="handleCookieChoice(false)" style="background:transparent;color:#8896a8;border:1px solid #334155;
+              padding:9px 22px;border-radius:6px;cursor:pointer;font-size:13px;">
+              Decline
+            </button>
+          </div>
+        </div>
+      </div>
+
       <script>
       (function () {
-        // ── Cookie helpers ──
-        function getCookie(name) {
-          var match = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
-          return match ? match[1] : null;
-        }
-        function setCookieTillMidnight(name, value) {
-          var now = new Date();
-          var midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0);
-          document.cookie = name + '=' + value + '; expires=' + midnight.toUTCString() + '; path=/; SameSite=Lax';
-        }
-
-        // ── Get or init stored count ──
-        var stored = parseInt(localStorage.getItem('scart_visit_count') || '0', 10);
-
-        // ── Only count if no cookie for today ──
-        if (!getCookie('scart_visited_today')) {
-          stored += 1;
-          localStorage.setItem('scart_visit_count', stored);
-          setCookieTillMidnight('scart_visited_today', '1');
-        }
-
-        // ── Show with count-up animation ──
+        var COUNT_URL_HIT  = 'https://api.countapi.xyz/hit/csblab23-scart/visits';
+        var COUNT_URL_GET  = 'https://api.countapi.xyz/get/csblab23-scart/visits';
         var el = document.getElementById('gc-visit-count');
-        var start = 0, step = 16, inc = stored / (900 / step);
-        var timer = setInterval(function () {
-          start += inc;
-          if (start >= stored) { start = stored; clearInterval(timer); }
-          el.textContent = Math.floor(start).toLocaleString();
-        }, step);
+        var banner = document.getElementById('cookie-banner');
+
+        function getCookie(name) {
+          var m = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
+          return m ? m[1] : null;
+        }
+        function setCookieTillMidnight(name, val) {
+          var midnight = new Date(); midnight.setDate(midnight.getDate()+1);
+          midnight.setHours(0,0,0,0);
+          document.cookie = name+'='+val+'; expires='+midnight.toUTCString()+'; path=/; SameSite=Lax';
+        }
+        function setCookieYear(name, val) {
+          var d = new Date(); d.setFullYear(d.getFullYear()+1);
+          document.cookie = name+'='+val+'; expires='+d.toUTCString()+'; path=/; SameSite=Lax';
+        }
+
+        function animateTo(num) {
+          var start = 0, step = 16, inc = num / (900/step);
+          var t = setInterval(function(){
+            start += inc;
+            if (start >= num) { start = num; clearInterval(t); }
+            el.textContent = Math.floor(start).toLocaleString();
+          }, step);
+        }
+
+        function hitAndShow() {
+          // Only increment if not visited today
+          var url = getCookie('scart_visited_today') ? COUNT_URL_GET : COUNT_URL_HIT;
+          fetch(url)
+            .then(function(r){ return r.json(); })
+            .then(function(d){
+              if (!getCookie('scart_visited_today')) setCookieTillMidnight('scart_visited_today','1');
+              animateTo(d.value || 0);
+            })
+            .catch(function(){ el.textContent = '—'; });
+        }
+
+        window.handleCookieChoice = function(accepted) {
+          banner.style.display = 'none';
+          setCookieYear('scart_cookie_consent', accepted ? '1' : '0');
+          if (accepted) hitAndShow();
+          else el.textContent = '—';
+        };
+
+        // Check existing consent
+        var consent = getCookie('scart_cookie_consent');
+        if (consent === '1') {
+          hitAndShow();
+        } else if (consent === '0') {
+          el.textContent = '—';
+        } else {
+          // Show banner once — fetch current count to display while waiting
+          fetch(COUNT_URL_GET).then(function(r){return r.json();}).then(function(d){
+            animateTo(d.value || 0);
+          }).catch(function(){});
+          banner.style.display = 'flex';
+        }
       })();
       </script>
     </div>
