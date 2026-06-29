@@ -297,10 +297,10 @@ body { background: #ffffff !important; }
             <div style="font-size:12px;color:#94a3b8;line-height:1.7;">
               SCART is an open-source bioinformatics tool developed at <strong style="color:#cbd5e1;">CSIR-IGIB, New Delhi</strong>, 
               released under the <strong style="color:#cbd5e1;">MIT License</strong>. 
-              This site uses a single session cookie (<code style="background:#1e293b;padding:1px 5px;border-radius:3px;font-size:11px;">scart_visited_today</code>) 
+              This site uses a single session cookie 
               solely to count unique daily visitors for research impact assessment — 
               analogous to citation metrics used in academic publishing. 
-              <strong style="color:#cbd5e1;">No personal data, IP addresses, or identifiers are stored.</strong>  
+              <strong style="color:#cbd5e1;">No personal data, IP addresses, or identifiers are stored.</strong> 
               You may decline without any loss of functionality.
             </div>
           </div>
@@ -319,8 +319,8 @@ body { background: #ffffff !important; }
 
       <script>
       (function () {
-        var COUNT_URL_HIT  = 'https://api.countapi.xyz/hit/csblab23-scart/visits';
-        var COUNT_URL_GET  = 'https://api.countapi.xyz/get/csblab23-scart/visits';
+        var COUNT_URL_HIT  = 'https://api.counterapi.dev/v1/csblab23-scart/visits/up';
+        var COUNT_URL_GET  = 'https://api.counterapi.dev/v1/csblab23-scart/visits';
         var el = document.getElementById('gc-visit-count');
         var banner = document.getElementById('cookie-banner');
 
@@ -354,7 +354,7 @@ body { background: #ffffff !important; }
             .then(function(r){ return r.json(); })
             .then(function(d){
               if (!getCookie('scart_visited_today')) setCookieTillMidnight('scart_visited_today','1');
-              animateTo(d.value || 0);
+              animateTo(d.count || 0);
             })
             .catch(function(){ el.textContent = '—'; });
         }
@@ -375,7 +375,7 @@ body { background: #ffffff !important; }
         } else {
           // Show banner once — fetch current count to display while waiting
           fetch(COUNT_URL_GET).then(function(r){return r.json();}).then(function(d){
-            animateTo(d.value || 0);
+            animateTo(d.count || 0);
           }).catch(function(){});
           banner.style.display = 'flex';
         }
