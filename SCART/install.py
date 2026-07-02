@@ -405,19 +405,19 @@ def _run_windows():
     print(SEP)
 
     # Step 0: ensure annoy binary wheel is installed (no C++ compiler needed)
-    print("\n[Step 0/11] Ensuring annoy binary wheel is installed ...")
+    print("\n[Step 0/9] Ensuring annoy binary wheel is installed ...")
     _ensure_annoy_windows()
 
     # Step 1: ontology
-    print("\n[Step 1/11] Downloading cl.obo ontology ...")
+    print("\n[Step 1/9] Downloading cl.obo ontology ...")
     download_cl_obo()
 
     # Step 2: re-pin numpy + scipy
-    print("\n[Step 2/11] Re-pinning numpy + scipy ...")
+    print("\n[Step 2/9] Re-pinning numpy + scipy ...")
     _pip("numpy>=1.24,<2.0", "scipy==1.12.0", "--force-reinstall")
 
     # Step 3: re-pin full JAX stack
-    print("\n[Step 3/11] Re-pinning full JAX stack ...")
+    print("\n[Step 3/9] Re-pinning full JAX stack ...")
     _pip(
         "jax[cpu]==0.4.23",
         "jaxlib==0.4.23",
@@ -431,32 +431,32 @@ def _run_windows():
     )
 
     # Step 4: fix PyTorch DLL issue
-    print("\n[Step 4/11] Fixing PyTorch DLL issue (CPU wheel) ...")
+    print("\n[Step 4/9] Fixing PyTorch DLL issue (CPU wheel) ...")
     _pip_uninstall(*WIN_TORCH_UNINSTALL)
     _pip(*WIN_TORCH_INSTALL)
 
     # Step 5: pin TensorFlow
-    print("\n[Step 5/11] Pinning TensorFlow CPU to 2.10.0 ...")
+    print("\n[Step 5/9] Pinning TensorFlow CPU to 2.10.0 ...")
     _pip_uninstall(*WIN_TF_UNINSTALL)
     _pip(*WIN_TF_INSTALL)
 
     # Step 6: re-ensure annoy after all the force-reinstalls above
-    print("\n[Step 6/11] Re-checking annoy after force-reinstalls ...")
+    print("\n[Step 6/9] Re-checking annoy after force-reinstalls ...")
     _ensure_annoy_windows()
 
     _verify_python()
 
-    # ── R + SCEVAN (automated, same pattern as Linux) ────────────────────────
+    # ── R (automated, same pattern as Linux) ─────────────────────────────────
 
     # Step 7: r-base first
-    print("\n[Step 7/11] Installing r-base via conda ...")
+    print("\n[Step 7/9] Installing r-base via conda ...")
     ok = _conda("install", "-c", "conda-forge", "r-base", "-y")
     if not ok:
         print("[SCART] Step 7 failed. Fix conda issue above and re-run.", file=sys.stderr)
         return
 
     # Step 8: R base + graphics stack
-    print("\n[Step 8/11] Installing R base packages + graphics stack via conda ...")
+    print("\n[Step 8/9] Installing R base packages + graphics stack via conda ...")
     ok = _conda(
         "install",
         "--override-channels",
@@ -471,7 +471,7 @@ def _run_windows():
         return
 
     # Step 9: CRAN packages (no bioconductor — not available for win-64 via conda)
-    print("\n[Step 9/11] Installing R CRAN packages via conda ...")
+    print("\n[Step 9/9] Installing R CRAN packages via conda ...")
     _conda("config", "--set", "channel_priority", "flexible")
     ok = _conda(
         "install",
@@ -483,10 +483,6 @@ def _run_windows():
     if not ok:
         print("[SCART] Step 9 failed. Fix conda issue above and re-run.", file=sys.stderr)
         return
-
-    
-
-    _verify_r()
 
     print(f"\n{SEP}")
     print("  Windows setup complete!")
@@ -582,9 +578,6 @@ print('annoy registered with pip')
    [auto] conda install r-base
    [auto] conda install R base packages + graphics stack
    [auto] conda install R CRAN packages
-   [auto] Rscript BiocManager install scran + fgsea + ggtree
-   [auto] Rscript install_github SCEVAN
-   [auto] Verify R / SCEVAN
 
  Nothing else required — everything above is automated.
 {SEP2}""")
