@@ -484,32 +484,7 @@ def _run_windows():
         print("[SCART] Step 9 failed. Fix conda issue above and re-run.", file=sys.stderr)
         return
 
-    # Step 10: Bioconductor packages via Rscript + BiocManager
-    # (bioconductor-scran/fgsea/ggtree are NOT available for win-64 via conda)
-    # BiocManager version 3.22 is pinned to match R 4.5 — without this pin,
-    # BiocManager defaults to 3.20 which requires R 4.4 and throws a version error.
-    print("\n[Step 10/11] Installing Bioconductor packages via BiocManager ...")
-    ok = _rscript(
-        "install.packages('BiocManager', repos='https://cran.r-project.org'); "
-        "BiocManager::install(version='3.22'); "
-        "BiocManager::install(c('scran', 'fgsea', 'ggtree'))",
-        label="BiocManager",
-    )
-    if not ok:
-        print("[SCART] Step 10 failed. See error above.", file=sys.stderr)
-        return
-
-    # Step 11: SCEVAN
-    print("\n[Step 11/11] Installing SCEVAN via Rscript ...")
-    ok = _rscript(
-        "library(devtools); "
-        "install_github('miccec/yaGST'); "
-        "install_github('AntonioDeFalco/SCEVAN')",
-        label="SCEVAN",
-    )
-    if not ok:
-        print("[SCART] Step 11 failed. See error above.", file=sys.stderr)
-        return
+    
 
     _verify_r()
 
