@@ -44,10 +44,15 @@ CONDA_R_BASE = [
 # Linux / Mac: Step 3b — Bioconductor + CRAN (available via conda on Linux/Mac only)
 # NOTE: On Windows, bioconductor-scran/fgsea/ggtree are NOT available for
 #       win-64 via conda — must use BiocManager/Rscript instead.
+# NOTE: r-robustrankaggreg (CRAN) IS available for win-64 via conda-forge,
+#       so it also appears in the Windows CRAN list below (WIN_R_CRAN).
 CONDA_R_BIO = [
     "bioconductor-scran", "bioconductor-fgsea", "bioconductor-ggtree",
     "r-paralleldist", "r-pheatmap", "r-forcats",
     "r-cluster", "r-rtsne", "r-ape", "r-tidytree", "r-ggrepel",
+    # NEW: required by two_gene_combination.py's atlas="both" Robust Rank
+    # Aggregation step (RobustRankAggreg::aggregateRanks, called via rpy2).
+    "r-robustrankaggreg",
 ]
 
 # Windows pip fixes (Step 3 of Windows guide — runs AFTER pip install SCART)
@@ -55,6 +60,14 @@ WIN_TORCH_UNINSTALL = ["torch"]
 WIN_TORCH_INSTALL   = ["torch==2.2.2", "--index-url", "https://download.pytorch.org/whl/cpu"]
 WIN_TF_UNINSTALL    = ["tensorflow", "tensorflow-cpu", "tensorflow-intel"]
 WIN_TF_INSTALL      = ["tensorflow-cpu==2.10.0"]
+
+# Windows: R CRAN-only packages (no bioconductor via conda on win-64)
+WIN_R_CRAN = [
+    "r-paralleldist", "r-pheatmap", "r-forcats",
+    "r-cluster", "r-rtsne", "r-ape", "r-tidytree", "r-ggrepel",
+    # NEW: same reason as CONDA_R_BIO above.
+    "r-robustrankaggreg",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -199,10 +212,27 @@ def _verify_python():
 
 def _verify_r():
     print(f"\n{SEP2}")
-    print("Verifying R / SCEVAN ...")
+    print("Verifying R / SCEVAN / RobustRankAggreg ...")
     print(SEP2)
     # Matches: Rscript -e "library(SCEVAN); cat('SCEVAN OK\n')"
     _rscript("library(SCEVAN); cat('SCEVAN OK\\n')", label="verify")
+    _verify_rra()
+
+
+def _verify_rra():
+    # NEW: verify RobustRankAggreg is importable — required by
+    # two_gene_combination.py's atlas="both" RRA step (called via rpy2).
+    # Split out from _verify_r() because Windows installs
+    # RobustRankAggreg but does NOT install SCEVAN (no automated step
+    # for it on Windows), so Windows only calls this helper, not the
+    # full _verify_r().
+    print(f"\n{SEP2}")
+    print("Verifying RobustRankAggreg ...")
+    print(SEP2)
+    _rscript(
+        "library(RobustRankAggreg); cat('RobustRankAggreg OK\\n')",
+        label="verify",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +271,7 @@ def _run_linux_mac(os_name: str):
         return
 
     # Step 4: flexible channel priority + Bioconductor + CRAN  (mirrors guide Step 4c)
+    # (now also installs r-robustrankaggreg — see CONDA_R_BIO above)
     print("\n[Step 4/5] Setting flexible channel priority ...")
     _conda("config", "--set", "channel_priority", "flexible")
 
@@ -471,18 +502,20 @@ def _run_windows():
         return
 
     # Step 9: CRAN packages (no bioconductor — not available for win-64 via conda)
+    # (now also installs r-robustrankaggreg — see WIN_R_CRAN above)
     print("\n[Step 9/9] Installing R CRAN packages via conda ...")
     _conda("config", "--set", "channel_priority", "flexible")
     ok = _conda(
         "install",
         "-c", "conda-forge",
         "-y",
-        "r-paralleldist", "r-pheatmap", "r-forcats",
-        "r-cluster", "r-rtsne", "r-ape", "r-tidytree", "r-ggrepel",
+        *WIN_R_CRAN,
     )
     if not ok:
         print("[SCART] Step 9 failed. Fix conda issue above and re-run.", file=sys.stderr)
         return
+
+    _verify_rra()
 
     print(f"\n{SEP}")
     print("  Windows setup complete!")
@@ -513,10 +546,11 @@ def _show_manual_steps(os_choice: str):
    [auto] Download cl.obo ontology
    [auto] conda install r-base
    [auto] conda install R base packages + graphics stack
-   [auto] conda install Bioconductor + CRAN packages
+   [auto] conda install Bioconductor + CRAN packages (incl. r-robustrankaggreg,
+          needed for the atlas="both" Robust Rank Aggregation search)
    [auto] Rscript install_github SCEVAN
    [auto] Verify Python packages
-   [auto] Verify SCEVAN
+   [auto] Verify SCEVAN + RobustRankAggreg
 
  Nothing else required on Linux — everything above is automated.
 {SEP2}""")
@@ -577,7 +611,11 @@ print('annoy registered with pip')
    [auto] Verify Python packages
    [auto] conda install r-base
    [auto] conda install R base packages + graphics stack
-   [auto] conda install R CRAN packages
+   [auto] conda install R CRAN packages (incl. r-robustrankaggreg, needed
+          for the atlas="both" Robust Rank Aggregation search)
+   [auto] Verify RobustRankAggreg
+          (SCEVAN is not auto-installed on Windows — no automated
+          install_github step for it exists in this script for Windows)
 
  Nothing else required — everything above is automated.
 {SEP2}""")
@@ -600,10 +638,11 @@ print('annoy registered with pip')
    [auto] Download cl.obo ontology
    [auto] conda install r-base
    [auto] conda install R base packages + graphics stack
-   [auto] conda install Bioconductor + CRAN packages
+   [auto] conda install Bioconductor + CRAN packages (incl. r-robustrankaggreg,
+          needed for the atlas="both" Robust Rank Aggregation search)
    [auto] Rscript install_github SCEVAN
    [auto] Verify Python packages
-   [auto] Verify SCEVAN
+   [auto] Verify SCEVAN + RobustRankAggreg
 
  Nothing else required on Mac — everything above is automated.
 {SEP2}""")
