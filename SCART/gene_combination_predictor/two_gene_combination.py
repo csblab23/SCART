@@ -13,10 +13,29 @@ Logic gates:
   A | B   — either gene expressed         (OR)
   A & !B  — A expressed, B NOT expressed  (NOT-B gate)
 
-Healthy matrix source (priority order):
-  1. User-supplied HPA file  (hpa_path=)  .h5ad or .tsv/.tsv.gz
-  2. Auto-downloaded HPA single-cell TSV from proteinatlas.org
-  3. Legacy final_healthy.h5ad
+Healthy reference atlases
+--------------------------
+SCART ships two ready-to-use healthy single-cell reference atlases:
+
+  "hpa"    -> hpa_alltissues_geosketch_10k.h5ad
+  "tabula" -> tabula_sapiens_alltissues_10k.h5ad
+
+The user selects which one(s) to score safety against via the `atlas`
+argument of run():
+
+  atlas="hpa"    -> GA search scored against HPA only
+  atlas="tabula" -> GA search scored against Tabula Sapiens only
+  atlas="both"   -> GA search run independently against EACH atlas,
+                     individual per-atlas results are saved, and the two
+                     ranked candidate lists are then combined with Robust
+                     Rank Aggregation (RRA) into a single consensus ranking.
+
+Custom healthy matrix source is still supported per-atlas via hpa_path=/
+tabula_path= (priority order, same as before):
+  1. User-supplied file (.h5ad or .tsv/.tsv.gz)
+  2. Bundled atlas file shipped with SCART (default)
+  3. (legacy fallback, only reachable if hpa_path is not resolvable to a
+     bundled file and is left unset — see _load_healthy_matrix)
 
 Fix applied
 -----------
@@ -26,6 +45,7 @@ _load_h5ad_subset: same h5py sorted-indices fix as one_gene_combination.py.
 import os
 import zipfile
 import urllib.request
+import importlib.util
 import logging
 import random
 import multiprocessing as mp
@@ -244,6 +264,61 @@ def _load_healthy_matrix(hpa_path=None, target_genes=None):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Bundled healthy reference atlases  (NEW)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Filenames of the two ready-made healthy reference atlases SCART ships.
+# These must be packaged inside the installed SCART package at:
+#   <SCART package root>/healthy_atlases/<filename>
+# (see setup.py package_data — both filenames are listed there explicitly).
+ATLAS_FILES = {
+    "hpa":    "hpa_alltissues_geosketch_10k.h5ad",
+    "tabula": "tabula_sapiens_alltissues_10k.h5ad",
+}
+
+ATLAS_LABELS = {
+    "hpa":    "HPA (all-tissues, geosketch 10k)",
+    "tabula": "Tabula Sapiens (all-tissues, 10k)",
+}
+
+
+def _get_bundled_atlas_path(atlas_key: str) -> str:
+    """
+    Locate a bundled healthy-reference h5ad shipped inside the SCART
+    package: <SCART package root>/healthy_atlases/<filename>.
+
+    Falls back to <this module's directory>/healthy_atlases/<filename> so
+    the search command also works when running from an SCART source
+    checkout (not yet pip-installed).
+    """
+    fname = ATLAS_FILES[atlas_key]
+
+    try:
+        spec = importlib.util.find_spec("SCART")
+        if spec and spec.submodule_search_locations:
+            pkg_root  = list(spec.submodule_search_locations)[0]
+            candidate = os.path.join(pkg_root, "healthy_atlases", fname)
+            if os.path.exists(candidate):
+                return candidate
+    except Exception:
+        pass
+
+    here      = os.path.dirname(os.path.abspath(__file__))
+    candidate = os.path.join(here, "healthy_atlases", fname)
+    if os.path.exists(candidate):
+        return candidate
+
+    raise FileNotFoundError(
+        f"Could not locate the bundled healthy atlas '{fname}'.\n"
+        f"Expected it inside the installed SCART package at:\n"
+        f"  <SCART package root>/healthy_atlases/{fname}\n"
+        f"If running from a source checkout, place it at:\n"
+        f"  {os.path.join(here, 'healthy_atlases', fname)}\n"
+        f"Alternatively pass an explicit path via hpa_path= / tabula_path=."
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Logic gates
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -260,7 +335,7 @@ def evaluate_gate(expression: str, A: np.ndarray, B: np.ndarray) -> np.ndarray:
     raise ValueError(f"Unsupported logic expression: {expression}")
 
 
-# Module-level matrices (set inside run() before multiprocessing starts)
+# Module-level matrices (set inside _run_single_atlas() before multiprocessing starts)
 _tumor_matrix   = None
 _healthy_matrix = None
 _gene_names     = None
@@ -399,75 +474,62 @@ def _run_ga(seed, pop_size, Gmax, Ggap, Rrep, patience, n_cpus):
     return hof, all_results
 
 
-def run(
-    hpa_path: str = None,
-    tumor_path: str = None,
-    safety_threshold: float = 0.9,
-    pop_size: int  = 1000,
-    Gmax: int      = 100,
-    Ggap: int      = 10,
-    Rrep: float    = 0.1,
-    patience: int  = 50,
-    n_cpus: int    = 1,
-    n_runs: int    = 10,
+# ─────────────────────────────────────────────────────────────────────────────
+# Single-atlas GA run  (NEW: factored out of run() so it can be executed once
+# per atlas when atlas="both")
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _run_single_atlas(
+    atlas_label: str,
+    healthy_path: str,
+    adata_tumor,
+    tumor_genes: list,
+    safety_threshold: float,
+    pop_size: int,
+    Gmax: int,
+    Ggap: int,
+    Rrep: float,
+    patience: int,
+    n_cpus: int,
+    n_runs: int,
+    output_dir: str,
 ):
     """
-    Run two-gene logic-gate CAR-T target search via Genetic Algorithm.
+    Run the full GA search (all n_runs) against a single healthy atlas.
 
-    Parameters
-    ----------
-    hpa_path : str or None
-        Path to user-supplied healthy/HPA file (.h5ad or .tsv/.tsv.gz).
-        If None, auto-downloaded from proteinatlas.org.
-    tumor_path : str or None
-        Path to tumour h5ad (Module 3 output). Auto-detected if None.
-    safety_threshold : float
-        Fraction of healthy samples NOT expressing the combination. Default 0.9.
-    pop_size : int   GA population per generation. Default 1000.
-    Gmax : int       Max generations. Default 100.
-    Ggap : int       Interval for random immigrant injection. Default 10.
-    Rrep : float     Fraction replaced at each Ggap. Default 0.1.
-    patience : int   Early-stop if no improvement for N generations. Default 50.
-    n_cpus : int     CPU cores for parallel evaluation. Default 1.
-    n_runs : int     Independent GA runs. Default 10.
+    Output CSVs are suffixed with the atlas label so that atlas="both" runs
+    do not overwrite each other:
+      two_gene_complete_<atlas_label>.csv
+      two_gene_hof_<atlas_label>.csv
 
-    Returns
-    -------
-    df_hof : pd.DataFrame   Hall-of-Fame results (best unique pairs)
-    df_all : pd.DataFrame   Complete results across all runs
+    Returns (df_hof, df_all) for this atlas.
     """
     global _tumor_matrix, _healthy_matrix, _gene_names, _n_genes, _safety_thresh
 
-    output_dir = os.getcwd()
-
-    t_path = tumor_path or _auto_tumor_h5ad()
-    print(f"Loading tumour matrix: {t_path}")
-    adata_tumor = sc.read_h5ad(t_path)
-    tumor_genes = list(adata_tumor.var_names)
-
+    print(f"\nLoading healthy matrix for atlas '{atlas_label}': {healthy_path}")
     healthy_matrix_full, healthy_genes, healthy_source = _load_healthy_matrix(
-        hpa_path, target_genes=tumor_genes
+        healthy_path, target_genes=tumor_genes
     )
-    print(f"Healthy matrix source: {healthy_source}")
+    print(f"Healthy matrix source ({atlas_label}): {healthy_source}")
 
     common_genes = sorted(set(tumor_genes) & set(healthy_genes))
     if len(common_genes) == 0:
         raise ValueError(
-            "No common genes between tumour and healthy matrices.\n"
+            f"No common genes between tumour and healthy ({atlas_label}) matrices.\n"
             "Check both datasets use HGNC gene symbols."
         )
-    print(f"Common genes: {len(common_genes)}")
+    print(f"Common genes ({atlas_label}): {len(common_genes)}")
 
-    adata_tumor = adata_tumor[:, common_genes].copy()
-    X_tumor     = adata_tumor.X.toarray() if not isinstance(adata_tumor.X, np.ndarray) else adata_tumor.X
-    tumor_mat   = (X_tumor > 0).astype(np.int8)
+    adata_sub = adata_tumor[:, common_genes].copy()
+    X_tumor   = adata_sub.X.toarray() if not isinstance(adata_sub.X, np.ndarray) else adata_sub.X
+    tumor_mat = (X_tumor > 0).astype(np.int8)
 
     hg_idx      = {g: i for i, g in enumerate(healthy_genes)}
     col_idx     = np.array([hg_idx[g] for g in common_genes])
     healthy_mat = healthy_matrix_full[:, col_idx]
 
-    print(f"Tumour matrix  : {tumor_mat.shape[0]} cells x {len(common_genes)} genes")
-    print(f"Healthy matrix : {healthy_mat.shape[0]} samples x {len(common_genes)} genes")
+    print(f"Tumour matrix  ({atlas_label}): {tumor_mat.shape[0]} cells x {len(common_genes)} genes")
+    print(f"Healthy matrix ({atlas_label}): {healthy_mat.shape[0]} samples x {len(common_genes)} genes")
 
     _tumor_matrix   = tumor_mat
     _healthy_matrix = healthy_mat
@@ -482,7 +544,7 @@ def run(
 
     for run_id in range(n_runs):
         seed = 42 + run_id
-        print(f"\nStarting run {run_id + 1}/{n_runs}  (seed={seed})")
+        print(f"\n[{atlas_label}] Starting run {run_id + 1}/{n_runs}  (seed={seed})")
 
         hof, results = _run_ga(
             seed=seed, pop_size=pop_size, Gmax=Gmax,
@@ -499,9 +561,9 @@ def run(
 
     df_all       = pd.concat(all_results, ignore_index=True)
     df_all       = _postprocess_results(df_all)
-    complete_csv = os.path.join(output_dir, "two_gene_complete.csv")
+    complete_csv = os.path.join(output_dir, f"two_gene_complete_{atlas_label}.csv")
     df_all.to_csv(complete_csv, index=False)
-    print(f"\nComplete results saved to: {complete_csv}")
+    print(f"\n[{atlas_label}] Complete results saved to: {complete_csv}")
 
     hof_data = []
     for ind in all_hof:
@@ -516,18 +578,395 @@ def run(
                 getattr(ind, "safety", None),
             ])
         except Exception as e:
-            logger.warning(f"Skipping HOF individual: {e}")
+            logger.warning(f"[{atlas_label}] Skipping HOF individual: {e}")
 
-    df_hof   = pd.DataFrame(
+    df_hof  = pd.DataFrame(
         hof_data,
         columns=["seed_value", "generation", "LogicGates", "Genes", "Efficacy", "Safety"]
     )
-    df_hof   = _postprocess_results(df_hof)
-    hof_csv  = os.path.join(output_dir, "two_gene_hof.csv")
+    df_hof  = _postprocess_results(df_hof)
+    hof_csv = os.path.join(output_dir, f"two_gene_hof_{atlas_label}.csv")
     df_hof.to_csv(hof_csv, index=False)
-    print(f"Hall of Fame saved to: {hof_csv}")
+    print(f"[{atlas_label}] Hall of Fame saved to: {hof_csv}")
 
-    print("\nTop 10 from Hall of Fame:")
+    print(f"\n[{atlas_label}] Top 10 from Hall of Fame:")
     print(df_hof.head(10).to_string(index=False))
 
     return df_hof, df_all
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Robust Rank Aggregation across the two atlases  (NEW)
+#
+# Ported from the user's standalone RRA R script (Robust_Rank_Aggregation_
+# Three_Atlas_FIXED.R), reduced from 3 atlases (HPA/HCA/Tabula) to 2
+# (HPA/Tabula) since only two healthy atlases are used in this module.
+# Same steps, same fixes:
+#   - candidates must pass efficacy > threshold & safety > threshold in
+#     BOTH atlases (strict "all atlases" filter)
+#   - each atlas ranks candidates by a COMBINED score (efficacy * safety)
+#     before aggregation, so both efficacy and safety inform the final rank
+#   - "___" ID separator (avoids collision with the literal "|" inside the
+#     "A | B" gate string)
+#   - the actual RRA rho-scoring is delegated to R's RobustRankAggreg
+#     package (aggregateRanks(method="RRA")) via rpy2, so the statistics are
+#     identical to the reference implementation.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SYMMETRIC_GATES = {"A | B", "A & B"}
+
+
+def _prepare_rra_input(df_all: pd.DataFrame, atlas_key: str) -> pd.DataFrame:
+    """
+    Convert a two-gene GA df_all table (seed_value, generation, LogicGates,
+    Genes, Efficacy, Safety) into the geneA / geneB / gate /
+    <atlas>_efficacy / <atlas>_safety layout used by the RRA logic.
+    """
+    df = df_all.copy()
+    if isinstance(df.iloc[0]["Genes"], str):
+        df["Genes"] = df["Genes"].apply(eval)
+
+    df["geneA"] = df["Genes"].apply(lambda g: g[0])
+    df["geneB"] = df["Genes"].apply(lambda g: g[1])
+    df = df.rename(columns={
+        "LogicGates": "gate",
+        "Efficacy":   f"{atlas_key}_efficacy",
+        "Safety":     f"{atlas_key}_safety",
+    })
+    df = df[["geneA", "geneB", "gate", f"{atlas_key}_efficacy", f"{atlas_key}_safety"]]
+    df = df.sort_values(by=f"{atlas_key}_efficacy", ascending=False)
+    df = df.drop_duplicates(subset=["geneA", "geneB", "gate"], keep="first")
+    return df.reset_index(drop=True)
+
+
+def _normalize_gene_order_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Sort geneA/geneB alphabetically for symmetric gates only (A|B, A&B),
+    so the same unordered pair merges to one row regardless of GA draw order.
+    Directional gates (A & !B) are left untouched."""
+    df = df.copy()
+
+    def _swap(row):
+        if row["gate"] in _SYMMETRIC_GATES:
+            a, b = sorted([row["geneA"], row["geneB"]])
+            return pd.Series([a, b])
+        return pd.Series([row["geneA"], row["geneB"]])
+
+    df[["geneA", "geneB"]] = df.apply(_swap, axis=1)
+    return df
+
+
+def _run_rra_via_r(*rank_lists) -> dict:
+    """
+    Call R's RobustRankAggreg::aggregateRanks(method="RRA") via rpy2 to
+    combine the per-atlas rank lists into a single robust rank score per
+    candidate ID. Requires the R package 'RobustRankAggreg' (installed by
+    `python -m SCART.install`, see install.py).
+    """
+    try:
+        import rpy2.robjects as ro
+        from rpy2.robjects import StrVector
+        from rpy2.robjects.packages import importr
+    except ImportError as exc:
+        raise ImportError(
+            "rpy2 is required for Robust Rank Aggregation (atlas='both'). "
+            "It is one of SCART's core dependencies — if missing, run:\n"
+            "  pip install rpy2>=3.5"
+        ) from exc
+
+    try:
+        rra_pkg = importr("RobustRankAggreg")
+    except Exception as exc:
+        raise RuntimeError(
+            "The R package 'RobustRankAggreg' is required for Robust Rank "
+            "Aggregation (atlas='both') but was not found in your R "
+            "environment.\n"
+            "Install it with:\n"
+            "  conda install -c conda-forge r-robustrankaggreg -y\n"
+            "or from an R console:\n"
+            "  install.packages('RobustRankAggreg')\n"
+            "This is also installed automatically by: python -m SCART.install"
+        ) from exc
+
+    r_glist = ro.ListVector({
+        f"list{i + 1}": StrVector(rl) for i, rl in enumerate(rank_lists)
+    })
+
+    r_result = rra_pkg.aggregateRanks(glist=r_glist, method="RRA")
+
+    names  = [str(n) for n in r_result.rx2("Name")]
+    scores = [float(s) for s in r_result.rx2("Score")]
+    return dict(zip(names, scores))
+
+
+def _plot_top_rra_candidates(df_ranked: pd.DataFrame, output_dir: str, top_n: int = 20):
+    """Grouped bar chart of the top-N RRA-ranked candidates (efficacy +
+    per-atlas safety), mirroring the ggplot2 plot in the reference R script."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    top = df_ranked.sort_values(by="RRA_Rank").head(top_n).copy()
+    if top.empty:
+        print("No RRA-ranked candidates to plot — skipping plot.")
+        return
+
+    def _combo_label(row):
+        gate_symbol = row["gate"].replace("A", "").replace("B", "")
+        if row["geneA"] == "MSLN":
+            return f"{row['geneA']}{gate_symbol}{row['geneB']}"
+        if row["geneB"] == "MSLN":
+            return f"{row['geneB']}{gate_symbol}{row['geneA']}"
+        return f"{row['geneA']}{gate_symbol}{row['geneB']}"
+
+    top["Combo"] = top.apply(_combo_label, axis=1)
+
+    # efficacy is atlas-invariant by construction (same GA fitness definition
+    # in both runs), hpa_efficacy is used as the single "Efficacy" series.
+    metrics = {
+        "Efficacy":      top["hpa_efficacy"],
+        "HPA Safety":    top["hpa_safety"],
+        "Tabula Safety": top["tabula_safety"],
+    }
+    colors = {
+        "Efficacy":      "#0072B2",
+        "HPA Safety":    "#009E73",
+        "Tabula Safety": "#CC79A7",
+    }
+
+    x     = np.arange(len(top))
+    width = 0.25
+    fig, ax = plt.subplots(figsize=(16, 8))
+
+    for i, (label, values) in enumerate(metrics.items()):
+        bars = ax.bar(x + (i - 1) * width, values, width, label=label,
+                       color=colors[label], edgecolor="black", linewidth=0.4)
+        ax.bar_label(bars, fmt="%.2f", rotation=90, padding=3, fontsize=8)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(top["Combo"], rotation=45, ha="right")
+    ax.set_ylabel("Score")
+    ax.set_title("Top 20 RRA-Ranked Dual Candidates (HPA + Tabula Sapiens)")
+    ax.legend()
+    fig.tight_layout()
+
+    pdf_path = os.path.join(output_dir, "Top20_RRA_Dual_Candidates_HPA_Tabula.pdf")
+    png_path = os.path.join(output_dir, "Top20_RRA_Dual_Candidates_HPA_Tabula.png")
+    fig.savefig(pdf_path, dpi=600)
+    fig.savefig(png_path, dpi=600)
+    plt.close(fig)
+
+    print(f"Top-20 RRA plot saved to:\n  {pdf_path}\n  {png_path}")
+
+
+def _robust_rank_aggregation(
+    df_all_hpa: pd.DataFrame,
+    df_all_tabula: pd.DataFrame,
+    efficacy_threshold: float,
+    safety_threshold: float,
+    output_dir: str,
+) -> pd.DataFrame:
+    print("\n" + "=" * 70)
+    print("  Robust Rank Aggregation — combining HPA + Tabula Sapiens results")
+    print("=" * 70)
+
+    hpa_df    = _normalize_gene_order_df(_prepare_rra_input(df_all_hpa,    "hpa"))
+    tabula_df = _normalize_gene_order_df(_prepare_rra_input(df_all_tabula, "tabula"))
+
+    hpa_candidates = hpa_df[
+        (hpa_df["hpa_efficacy"] > efficacy_threshold) &
+        (hpa_df["hpa_safety"]   > safety_threshold)
+    ]
+    tabula_candidates = tabula_df[
+        (tabula_df["tabula_efficacy"] > efficacy_threshold) &
+        (tabula_df["tabula_safety"]   > safety_threshold)
+    ]
+
+    candidate_combos = pd.concat([
+        hpa_candidates[["geneA", "geneB", "gate"]],
+        tabula_candidates[["geneA", "geneB", "gate"]],
+    ]).drop_duplicates()
+
+    combined = candidate_combos.merge(hpa_df,    on=["geneA", "geneB", "gate"], how="left")
+    combined = combined.merge(tabula_df, on=["geneA", "geneB", "gate"], how="left")
+    combined = combined.drop_duplicates().reset_index(drop=True)
+    print(f"unique_candidates dim: {combined.shape}")
+
+    # Sanity check — efficacy should be identical across atlases for the
+    # same combo (same GA fitness definition, different safety only).
+    both_present = combined["hpa_efficacy"].notna() & combined["tabula_efficacy"].notna()
+    equal_mask   = combined.loc[both_present, "hpa_efficacy"] == combined.loc[both_present, "tabula_efficacy"]
+    print(f"Matching rows: {int(equal_mask.sum())} / {int(both_present.sum())}")
+    print(f"Mismatching rows: {int((~equal_mask).sum())}")
+    print(f"Rows present in only one atlas: {int((~both_present).sum())}")
+
+    # STRICT FILTER: keep only candidates passing efficacy > threshold AND
+    # safety > threshold in BOTH atlases (mirrors the reference script's
+    # "ALL atlases" strict filter, reduced from 3 atlases to 2).
+    strict = combined[
+        (combined["hpa_efficacy"]    > efficacy_threshold) & (combined["hpa_safety"]    > safety_threshold) &
+        (combined["tabula_efficacy"] > efficacy_threshold) & (combined["tabula_safety"] > safety_threshold)
+    ].copy()
+    print(f"Candidates passing efficacy>{efficacy_threshold} & safety>{safety_threshold} "
+          f"in BOTH atlases: {len(strict)}")
+
+    out_csv = os.path.join(output_dir, "final_candidates_RRA_HPA_Tabula.csv")
+
+    if strict.empty:
+        print("No candidates passed the strict dual-atlas filter — "
+              "skipping RRA aggregation and plot.")
+        strict.to_csv(out_csv, index=False)
+        return strict
+
+    ID_SEP = "___"
+    strict["hpa_combined"]    = strict["hpa_efficacy"]    * strict["hpa_safety"]
+    strict["tabula_combined"] = strict["tabula_efficacy"] * strict["tabula_safety"]
+    strict["ID"] = strict["geneA"] + ID_SEP + strict["geneB"] + ID_SEP + strict["gate"]
+
+    hpa_rank    = strict.sort_values(by="hpa_combined",    ascending=False)["ID"].tolist()
+    tabula_rank = strict.sort_values(by="tabula_combined", ascending=False)["ID"].tolist()
+
+    rra_scores = _run_rra_via_r(hpa_rank, tabula_rank)
+
+    strict["RRA_Score"] = strict["ID"].map(rra_scores)
+    n_missing = strict["RRA_Score"].isna().sum()
+    if n_missing > 0:
+        logger.warning(f"{n_missing} candidate(s) missing an RRA score after aggregation.")
+
+    strict = strict.sort_values(by="RRA_Score", ascending=True).reset_index(drop=True)
+    strict["RRA_Rank"] = np.arange(1, len(strict) + 1)
+    strict = strict.drop(columns=["ID"])
+
+    strict.to_csv(out_csv, index=False)
+    print(f"\nRRA-ranked dual-atlas candidates saved to: {out_csv}")
+
+    print("\nTop 10 RRA-ranked candidates:")
+    print(strict.head(10).to_string(index=False))
+
+    _plot_top_rra_candidates(strict, output_dir)
+
+    return strict
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public entry point
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run(
+    atlas: str = "both",
+    hpa_path: str = None,
+    tabula_path: str = None,
+    tumor_path: str = None,
+    safety_threshold: float = 0.9,
+    rra_efficacy_threshold: float = 0.7,
+    rra_safety_threshold: float = 0.9,
+    pop_size: int  = 1000,
+    Gmax: int      = 100,
+    Ggap: int      = 10,
+    Rrep: float    = 0.1,
+    patience: int  = 50,
+    n_cpus: int    = 1,
+    n_runs: int    = 10,
+):
+    """
+    Run two-gene logic-gate CAR-T target search via Genetic Algorithm,
+    against one or both bundled healthy reference atlases.
+
+    Parameters
+    ----------
+    atlas : str
+        Which healthy reference atlas(es) to score safety against:
+          "hpa"    - HPA all-tissues (geosketch 10k) only.
+          "tabula" - Tabula Sapiens all-tissues (10k) only.
+          "both"   - run independently against EACH atlas, save individual
+                     per-atlas results, then combine the two ranked
+                     candidate lists via Robust Rank Aggregation (RRA).
+                     Default.
+    hpa_path : str or None
+        Optional override path to a custom HPA-style healthy .h5ad/.tsv
+        file. If None and atlas is "hpa" or "both", the bundled
+        hpa_alltissues_geosketch_10k.h5ad shipped with SCART is used.
+    tabula_path : str or None
+        Optional override path to a custom Tabula Sapiens healthy .h5ad
+        file. If None and atlas is "tabula" or "both", the bundled
+        tabula_sapiens_alltissues_10k.h5ad shipped with SCART is used.
+    tumor_path : str or None
+        Path to tumour h5ad (Module 3 output). Auto-detected if None.
+    safety_threshold : float
+        Fraction of healthy samples NOT expressing the combination — used
+        as the GA fitness cutoff *inside* each atlas's search. Default 0.9.
+    rra_efficacy_threshold, rra_safety_threshold : float
+        Per-atlas thresholds a candidate must clear in BOTH atlases to be
+        eligible for Robust Rank Aggregation. Only used when atlas="both".
+        Defaults 0.7 / 0.9 (matches the reference RRA script).
+    pop_size, Gmax, Ggap, Rrep, patience, n_cpus, n_runs :
+        Genetic-algorithm parameters (unchanged from previous versions).
+
+    Returns
+    -------
+    If atlas == "hpa" or "tabula":
+        (df_hof, df_all) — unchanged behaviour, for that single atlas.
+    If atlas == "both":
+        dict with keys:
+          "hpa"    -> (df_hof_hpa, df_all_hpa)
+          "tabula" -> (df_hof_tabula, df_all_tabula)
+          "rra"    -> df_rra   (RRA-combined, ranked candidate table)
+    """
+    atlas = (atlas or "both").strip().lower()
+    if atlas not in ("hpa", "tabula", "both"):
+        raise ValueError(f"atlas must be one of 'hpa', 'tabula', 'both' — got {atlas!r}")
+
+    output_dir = os.getcwd()
+
+    t_path = tumor_path or _auto_tumor_h5ad()
+    print(f"Loading tumour matrix: {t_path}")
+    adata_tumor = sc.read_h5ad(t_path)
+    tumor_genes = list(adata_tumor.var_names)
+
+    ga_kwargs = dict(
+        safety_threshold=safety_threshold, pop_size=pop_size, Gmax=Gmax,
+        Ggap=Ggap, Rrep=Rrep, patience=patience, n_cpus=n_cpus, n_runs=n_runs,
+        output_dir=output_dir,
+    )
+
+    if atlas == "hpa":
+        healthy_path = hpa_path or _get_bundled_atlas_path("hpa")
+        print(f"\nAtlas selection: HPA only ({ATLAS_LABELS['hpa']})")
+        return _run_single_atlas("hpa", healthy_path, adata_tumor, tumor_genes, **ga_kwargs)
+
+    if atlas == "tabula":
+        healthy_path = tabula_path or _get_bundled_atlas_path("tabula")
+        print(f"\nAtlas selection: Tabula Sapiens only ({ATLAS_LABELS['tabula']})")
+        return _run_single_atlas("tabula", healthy_path, adata_tumor, tumor_genes, **ga_kwargs)
+
+    # atlas == "both"
+    hpa_healthy_path    = hpa_path    or _get_bundled_atlas_path("hpa")
+    tabula_healthy_path = tabula_path or _get_bundled_atlas_path("tabula")
+
+    print("\nAtlas selection: BOTH (independent runs + Robust Rank Aggregation)")
+
+    print("\n" + "=" * 70)
+    print(f"  Running GA search — ATLAS 1/2: {ATLAS_LABELS['hpa']}")
+    print("=" * 70)
+    df_hof_hpa, df_all_hpa = _run_single_atlas(
+        "hpa", hpa_healthy_path, adata_tumor, tumor_genes, **ga_kwargs
+    )
+
+    print("\n" + "=" * 70)
+    print(f"  Running GA search — ATLAS 2/2: {ATLAS_LABELS['tabula']}")
+    print("=" * 70)
+    df_hof_tabula, df_all_tabula = _run_single_atlas(
+        "tabula", tabula_healthy_path, adata_tumor, tumor_genes, **ga_kwargs
+    )
+
+    df_rra = _robust_rank_aggregation(
+        df_all_hpa, df_all_tabula,
+        efficacy_threshold=rra_efficacy_threshold,
+        safety_threshold=rra_safety_threshold,
+        output_dir=output_dir,
+    )
+
+    return {
+        "hpa":    (df_hof_hpa,    df_all_hpa),
+        "tabula": (df_hof_tabula, df_all_tabula),
+        "rra":    df_rra,
+    }
