@@ -3,8 +3,8 @@ SCART setup.py
 ==============
 Handles Python package metadata and installation only.
 
-Post-installation setup (R, SCEVAN, ontology, Windows pip fixes)
-is handled by a separate interactive script. Run ONCE after pip install:
+Post-installation setup (R, SCEVAN, RobustRankAggreg, ontology, Windows pip
+fixes) is handled by a separate interactive script. Run ONCE after pip install:
 
     python -m SCART.install
 
@@ -16,6 +16,8 @@ Full installation sequence:
     Step 3  (all)          : pip install git+https://github.com/csblab23/SCART.git
                              (PostInstall auto-fixes torch on Windows)
     Step 4  (all)          : python -m SCART.install   <- interactive, asks your OS
+                             (now also installs r-robustrankaggreg, needed by
+                             the two_gene_combination dual-atlas RRA search)
 """
 
 import subprocess
@@ -81,7 +83,7 @@ POSTINSTALL_MSG = """
 ================================================================
 
   NEXT STEP — run the interactive setup to install
-  R, SCEVAN, and OS-specific dependencies:
+  R, SCEVAN, RobustRankAggreg, and OS-specific dependencies:
 
       python -m SCART.install
 
@@ -126,6 +128,14 @@ setup(
             "**/*.yaml", "**/*.yml", "**/*.joblib", "**/*.gmt", "**/*.tsv",
             "PopV/resources/ontology/cl.obo",
             "PopV/resources/ontology/cl.ontology",
+            # NEW: bundled healthy reference atlases used by
+            # gene_combination_predictor/two_gene_combination.py (atlas=
+            # "hpa" / "tabula" / "both"). "**/*.h5ad" above already matches
+            # these, but they are also listed explicitly (same pattern as
+            # cl.obo above) to guarantee inclusion regardless of how the
+            # glob is resolved by the build backend in use.
+            "healthy_atlases/hpa_alltissues_geosketch_10k.h5ad",
+            "healthy_atlases/tabula_sapiens_alltissues_10k.h5ad",
         ]
     },
     zip_safe=False,
@@ -136,6 +146,11 @@ setup(
         "scipy==1.12.0",            # pinned: jax==0.4.23 breaks with scipy>=1.13
         "pandas>=1.5",
         "scikit-learn",
+
+        # NEW: used directly by two_gene_combination.py's RRA plotting
+        # (_plot_top_rra_candidates). Already pulled in transitively via
+        # scanpy, but listed explicitly since it is now a direct import.
+        "matplotlib",
 
         # JAX ecosystem — pinned for scvi-tools 1.1.6 + Windows compat
         "jax[cpu]==0.4.23",
@@ -172,7 +187,8 @@ setup(
         "geofetch",
         "deap==1.4",
 
-        # R bridge
+        # R bridge — also used to call RobustRankAggreg::aggregateRanks()
+        # for two_gene_combination.py's atlas="both" RRA step.
         "rpy2>=3.5",
 
         # CLI
