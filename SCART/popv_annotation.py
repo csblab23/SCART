@@ -544,11 +544,45 @@ def _prefix_ref_obs_columns(adata_ref: anndata.AnnData) -> tuple:
 # 7. Auto-detect query batch key — notebook uses 'sample'
 # ---------------------------------------------------------------------------
 
-_BATCH_KEY_CANDIDATES = ["sample", "batch", "Sample", "Batch", "patient",
-                          "donor", "library", "Run", "run"]
+_BATCH_KEY_CANDIDATES = ["gsm_id", "sample", "batch", "Sample", "Batch", "patient",
+                          "donor", "library", "Run", "run", "gse_id"]
 
 
-def _detect_query_batch_key(adata_query: anndata.AnnData) -> str | None:
+def _detect_query_batch_key(adata_query: anndata.AnnData,
+                             user_batch_key: str = None) -> str | None:
+    """
+    Determine the column in adata_query.obs to use as PopV's batch key.
+
+    Resolution order:
+      1. user_batch_key, if explicitly supplied — lets a user with their
+         own h5ad point to whatever sample/donor column they actually have,
+         even if its name isn't in _BATCH_KEY_CANDIDATES.
+      2. 'gsm_id' — written by Module 1 (geo_fetcher.SampleAnnotator) into
+         every GEO-derived tumor h5ad (single GSE or multi-GSE combined),
+         so GEO-sourced runs are batch-corrected automatically with no
+         extra argument needed.
+      3. Remaining candidates in _BATCH_KEY_CANDIDATES, 'gse_id' checked
+         last since GSE-level grouping is coarser than GSM-level.
+    """
+    if user_batch_key is not None:
+        if user_batch_key not in adata_query.obs.columns:
+            raise ValueError(
+                f"query_batch_key='{user_batch_key}' not found in query h5ad obs.\n"
+                f"Available columns: {list(adata_query.obs.columns)}"
+            )
+        n_unique = adata_query.obs[user_batch_key].nunique()
+        if n_unique < 2:
+            logger.warning(
+                f"query_batch_key='{user_batch_key}' has only {n_unique} unique "
+                "value(s) — running without batch correction."
+            )
+            return None
+        logger.info(
+            f"query_batch_key user-specified: '{user_batch_key}' "
+            f"({n_unique} unique values)."
+        )
+        return user_batch_key
+
     for key in _BATCH_KEY_CANDIDATES:
         if key in adata_query.obs.columns:
             n_unique = adata_query.obs[key].nunique()
@@ -878,6 +912,7 @@ def run_popv_annotation(
     nsamples:               int  = 300,
     drop_reference_columns: bool = True,
     n_jobs:                 int  = 1,
+    query_batch_key:        str  = None,
 ) -> anndata.AnnData:
     """
     Run PopV cell-type annotation following the logic of PopV_GSE173682.ipynb.
@@ -902,6 +937,14 @@ def run_popv_annotation(
         Remove Tabula Sapiens metadata columns from output.
     n_jobs : int
         CPU threads (-1 = all cores).
+    query_batch_key : str, optional
+        Column in adata_query.obs to use as the batch key for PopV's
+        batch-corrected methods (knn_on_harmony, knn_on_scanorama).
+        If not supplied, auto-detected — 'gsm_id' (written automatically
+        by Module 1 for GEO-derived data) is checked first, then other
+        common names, falling back to 'gse_id'. Required only if you're
+        supplying your own h5ad with a batch column under a name PopV
+        wouldn't otherwise recognize.
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -966,7 +1009,7 @@ def run_popv_annotation(
     adata_ref.var_names_make_unique()
 
     # ── Step 8: auto-detect query batch key (notebook uses 'sample') ─────────
-    query_batch_key = _detect_query_batch_key(adata_query)
+    query_batch_key = _detect_query_batch_key(adata_query, user_batch_key=query_batch_key)
 
     # ── Step 9: compute n_samples_per_label dynamically (notebook formula) ───
     # Notebook: min_celltype_size computed on ref_labels_key AFTER prefixing
@@ -1288,6 +1331,7 @@ def auto_run_popv(
     drop_reference_columns: bool = True,
     user_popv_prediction:   str  = None,
     n_jobs:                 int  = 1,
+    query_batch_key:        str  = None,
 ) -> anndata.AnnData:
     """
     Fully automatic entry-point for Module 2.
@@ -1311,6 +1355,11 @@ def auto_run_popv(
         Path to an already-annotated h5ad.  Skips the entire PopV pipeline.
     n_jobs : int
         CPU threads (-1 = all cores).
+    query_batch_key : str, optional
+        Column in your query h5ad's .obs to use as the PopV batch key.
+        Only needed if you're passing a custom h5ad (not produced by
+        Module 1) whose sample/donor column isn't auto-detected —
+        e.g. query_batch_key="patient_id".
 
     Usage
     -----
@@ -1324,6 +1373,13 @@ def auto_run_popv(
 
     # Auto-download reference from Figshare
     adata = popv_annotation.auto_run_popv(nsamples=300)
+
+    # Custom h5ad with a non-standard batch column name
+    adata = popv_annotation.auto_run_popv(
+        nsamples         = 300,
+        user_reference   = "/data/Ovary_TSP1_30_version2d_10X_smartseq_scvi.h5ad",
+        query_batch_key  = "patient_id"
+    )
 
     # Skip pipeline — use pre-computed PopV result
     adata = popv_annotation.auto_run_popv(
@@ -1369,8 +1425,9 @@ def auto_run_popv(
     return run_popv_annotation(
         adata_query            = adata_query,
         adata_ref              = adata_ref,
-        output_dir             = output_dir,
-        nsamples               = nsamples,
-        drop_reference_columns = drop_reference_columns,
-        n_jobs                 = n_jobs,
+        output_dir              = output_dir,
+        nsamples                = nsamples,
+        drop_reference_columns  = drop_reference_columns,
+        n_jobs                  = n_jobs,
+        query_batch_key         = query_batch_key,
     )
