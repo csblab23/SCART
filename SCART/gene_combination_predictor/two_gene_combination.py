@@ -15,12 +15,29 @@ Logic gates:
 
 Healthy reference atlases
 --------------------------
-SCART ships two ready-to-use healthy single-cell reference atlases:
+Two ready-to-use healthy single-cell reference atlases are used to score
+safety:
 
   "hpa"    -> hpa_alltissues_geosketch_10k.h5ad
   "tabula" -> tabula_sapiens_alltissues_10k.h5ad
 
-The user selects which one(s) to score safety against via the `atlas`
+These are NOT bundled in the SCART package or GitHub repo — they are
+distributed separately via Zenodo (see the SCART documentation for the
+record link). Download them yourself and tell SCART where you put them:
+
+  1. Pass an explicit path per atlas:
+       run(atlas="both", hpa_path="/path/to/hpa_alltissues_geosketch_10k.h5ad",
+                          tabula_path="/path/to/tabula_sapiens_alltissues_10k.h5ad")
+  2. OR place the files (using their original filenames, unchanged) in
+     one of these auto-detected locations and omit hpa_path/tabula_path:
+       <current working directory>/hpa_alltissues_geosketch_10k.h5ad
+       <current working directory>/healthy_atlases/hpa_alltissues_geosketch_10k.h5ad
+       (same pattern for the Tabula Sapiens file)
+
+If a file can't be found, run() raises a FileNotFoundError with these same
+instructions.
+
+The user selects which atlas(es) to score safety against via the `atlas`
 argument of run():
 
   atlas="hpa"    -> GA search scored against HPA only
@@ -30,12 +47,23 @@ argument of run():
                      ranked candidate lists are then combined with Robust
                      Rank Aggregation (RRA) into a single consensus ranking.
 
-Custom healthy matrix source is still supported per-atlas via hpa_path=/
-tabula_path= (priority order, same as before):
-  1. User-supplied file (.h5ad or .tsv/.tsv.gz)
-  2. Bundled atlas file shipped with SCART (default)
-  3. (legacy fallback, only reachable if hpa_path is not resolvable to a
-     bundled file and is left unset — see _load_healthy_matrix)
+GA modes
+--------
+run(..., ga_mode=...) selects the search strategy:
+
+  "standard" (default) — the module's original single-population GA
+      (_run_ga / _init_deap / _evaluate_fitness), completely unchanged.
+
+  "island" — an alternative strategy ported from a later, more elaborate
+      CAR-T GA script: gate-quota population seeding (a fixed share of the
+      starting population is pre-seeded as A&B / A&!B / open-gate
+      individuals), a 4-island model with periodic ring migration,
+      gate-quota tournament selection (guarantees a minimum share of each
+      gate type survives selection), SBX (simulated binary bounded)
+      crossover in place of one-point crossover, rare-gene immigrant
+      injection during the periodic diversity-injection step, and
+      per-seed parallelism via joblib (rather than per-generation
+      multiprocessing). See _run_ga_island() below.
 
 Fix applied
 -----------
@@ -45,7 +73,6 @@ _load_h5ad_subset: same h5py sorted-indices fix as one_gene_combination.py.
 import os
 import zipfile
 import urllib.request
-import importlib.util
 import logging
 import random
 import multiprocessing as mp
@@ -54,6 +81,7 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 from deap import base, creator, tools, algorithms
+from joblib import Parallel, delayed
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -264,13 +292,11 @@ def _load_healthy_matrix(hpa_path=None, target_genes=None):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Bundled healthy reference atlases  (NEW)
+# Healthy reference atlases — distributed via Zenodo (NOT bundled with SCART)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Filenames of the two ready-made healthy reference atlases SCART ships.
-# These must be packaged inside the installed SCART package at:
-#   <SCART package root>/healthy_atlases/<filename>
-# (see setup.py package_data — both filenames are listed there explicitly).
+# Canonical filenames of the two Zenodo-hosted healthy reference atlases.
+# Users download these themselves; SCART never ships them.
 ATLAS_FILES = {
     "hpa":    "hpa_alltissues_geosketch_10k.h5ad",
     "tabula": "tabula_sapiens_alltissues_10k.h5ad",
@@ -282,39 +308,56 @@ ATLAS_LABELS = {
 }
 
 
-def _get_bundled_atlas_path(atlas_key: str) -> str:
-    """
-    Locate a bundled healthy-reference h5ad shipped inside the SCART
-    package: <SCART package root>/healthy_atlases/<filename>.
+def _default_atlas_search_dirs() -> list:
+    """Local directories auto-searched for a Zenodo-downloaded atlas file
+    when the user does not pass an explicit hpa_path=/tabula_path=."""
+    cwd = os.getcwd()
+    return [
+        cwd,
+        os.path.join(cwd, "healthy_atlases"),
+    ]
 
-    Falls back to <this module's directory>/healthy_atlases/<filename> so
-    the search command also works when running from an SCART source
-    checkout (not yet pip-installed).
+
+def _resolve_atlas_path(atlas_key: str, explicit_path: str = None) -> str:
     """
+    Resolve the local path to a healthy reference atlas.
+
+      - If explicit_path is given, it is used as-is (must exist).
+      - Otherwise, the canonical filename for `atlas_key` is searched for in
+        _default_atlas_search_dirs().
+      - If not found anywhere, raises FileNotFoundError with download +
+        placement instructions (the files are distributed via Zenodo, not
+        bundled with SCART).
+    """
+    if explicit_path:
+        if not os.path.exists(explicit_path):
+            raise FileNotFoundError(
+                f"Provided {atlas_key} atlas path does not exist: {explicit_path}"
+            )
+        return explicit_path
+
     fname = ATLAS_FILES[atlas_key]
+    for d in _default_atlas_search_dirs():
+        candidate = os.path.join(d, fname)
+        if os.path.exists(candidate):
+            print(f"Auto-detected {atlas_key} atlas file: {candidate}")
+            return candidate
 
-    try:
-        spec = importlib.util.find_spec("SCART")
-        if spec and spec.submodule_search_locations:
-            pkg_root  = list(spec.submodule_search_locations)[0]
-            candidate = os.path.join(pkg_root, "healthy_atlases", fname)
-            if os.path.exists(candidate):
-                return candidate
-    except Exception:
-        pass
-
-    here      = os.path.dirname(os.path.abspath(__file__))
-    candidate = os.path.join(here, "healthy_atlases", fname)
-    if os.path.exists(candidate):
-        return candidate
-
+    search_dirs_str = "\n".join(f"    {os.path.join(d, fname)}" for d in _default_atlas_search_dirs())
     raise FileNotFoundError(
-        f"Could not locate the bundled healthy atlas '{fname}'.\n"
-        f"Expected it inside the installed SCART package at:\n"
-        f"  <SCART package root>/healthy_atlases/{fname}\n"
-        f"If running from a source checkout, place it at:\n"
-        f"  {os.path.join(here, 'healthy_atlases', fname)}\n"
-        f"Alternatively pass an explicit path via hpa_path= / tabula_path=."
+        f"Could not find the '{atlas_key}' healthy reference atlas "
+        f"('{fname}').\n\n"
+        f"This file is not bundled with SCART — it is distributed "
+        f"separately via Zenodo (see the SCART documentation for the "
+        f"record link).\n\n"
+        f"To use it:\n"
+        f"  1. Download '{fname}' from Zenodo.\n"
+        f"  2. Either:\n"
+        f"       a) pass its path explicitly, e.g.:\n"
+        f"            run(atlas=..., {atlas_key}_path='/path/to/{fname}')\n"
+        f"       b) OR save it (keeping the exact filename above) into one "
+        f"of these auto-detected locations:\n"
+        f"{search_dirs_str}"
     )
 
 
@@ -345,6 +388,10 @@ _logic_gates    = LOGIC_GATES
 
 toolbox = None
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STANDARD GA (original — unchanged)
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _init_deap(n_genes: int, safety_threshold: float):
     global toolbox
@@ -475,8 +522,308 @@ def _run_ga(seed, pop_size, Gmax, Ggap, Rrep, patience, n_cpus):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Single-atlas GA run  (NEW: factored out of run() so it can be executed once
-# per atlas when atlas="both")
+# ISLAND-MODEL GA  (NEW, optional — ga_mode="island")
+#
+# Ported from a later, more elaborate CAR-T GA script that added: gate-quota
+# population seeding, a multi-island model with ring migration, gate-quota
+# tournament selection, SBX crossover, and rare-gene immigrant injection
+# during diversity-injection steps. This is a self-contained alternative to
+# _run_ga() above — nothing in the "STANDARD GA" section above was touched.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_island_toolbox = None
+
+# Per-gene contiguous column caches (island mode only). Precomputing these
+# avoids the strided-slice cache-miss penalty seen on very large matrices
+# when indexing _tumor_matrix[:, i] repeatedly inside the GA's hot loop.
+_tumor_cols   = None
+_healthy_cols = None
+
+
+def _init_deap_island(n_genes: int):
+    global _island_toolbox
+
+    if "FitnessMax" not in creator.__dict__:
+        creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    if "Individual" not in creator.__dict__:
+        creator.create("Individual", list, fitness=creator.FitnessMax)
+
+    tb = base.Toolbox()
+    tb.register("geneA",      random.randrange, n_genes)
+    tb.register("geneB",      random.randrange, n_genes)
+    tb.register("gate",       random.randrange, len(LOGIC_GATES))
+    tb.register("individual", tools.initCycle, creator.Individual,
+                 (tb.geneA, tb.geneB, tb.gate), n=1)
+    tb.register("population", tools.initRepeat, list, tb.individual)
+    tb.register("evaluate",   _evaluate_fitness_island)
+    tb.register("mutate",     tools.mutUniformInt,
+                 low=[0, 0, 0],
+                 up=[n_genes - 1, n_genes - 1, len(LOGIC_GATES) - 1],
+                 indpb=0.2)
+
+    _island_toolbox = tb
+    return tb
+
+
+def _evaluate_fitness_island(individual):
+    geneA_idx, geneB_idx, gate_type_idx = individual
+    gate_type = LOGIC_GATES[gate_type_idx]
+
+    A_tumor   = _tumor_cols[geneA_idx]
+    B_tumor   = _tumor_cols[geneB_idx]
+    A_healthy = _healthy_cols[geneA_idx]
+    B_healthy = _healthy_cols[geneB_idx]
+
+    output_tumor   = evaluate_gate(gate_type, A_tumor,   B_tumor)
+    output_healthy = evaluate_gate(gate_type, A_healthy, B_healthy)
+
+    efficacy = np.sum(output_tumor)        / len(output_tumor)
+    safety   = np.sum(output_healthy == 0) / len(output_healthy)
+
+    individual.safety = safety
+    return (efficacy if safety >= _safety_thresh else 0,)
+
+
+def _evaluate_individual_island(ind):
+    ind.fitness.values = _island_toolbox.evaluate(ind)
+    return ind
+
+
+def _round_back_island(ind, low, up):
+    """Clamp and round SBX's float outputs back to valid integer gene/gate
+    indices, in-place."""
+    for i in range(3):
+        ind[i] = int(round(max(low[i], min(up[i], ind[i]))))
+
+
+def _cx_simulated_binary_bounded(ind1, ind2, low, up, eta=2.0):
+    """SBX crossover with hard index bounds, rounded back to valid ints."""
+    tools.cxSimulatedBinaryBounded(ind1, ind2, eta=eta, low=low, up=up)
+    _round_back_island(ind1, low, up)
+    _round_back_island(ind2, low, up)
+    return ind1, ind2
+
+
+def _init_islands(n_genes, n_islands, and_quota, nand_quota, open_quota):
+    """Gate-quota, region-seeded island population initializer: each island
+    is seeded with a fixed share of A&B, A&!B, and open-gate individuals,
+    with geneA drawn from that island's private gene-index region (so each
+    island starts exploring a different slice of gene space)."""
+    region_size  = n_genes // n_islands
+    gene_regions = [
+        range(i * region_size,
+              (i + 1) * region_size if i < n_islands - 1 else n_genes)
+        for i in range(n_islands)
+    ]
+
+    islands = []
+    for isl_idx in range(n_islands):
+        region     = list(gene_regions[isl_idx])
+        island_pop = []
+
+        def make_ind(gate_idx, region=region):
+            ind = _island_toolbox.individual()
+            ind[0] = random.choice(region)
+            ind[1] = random.randrange(n_genes)
+            while ind[1] == ind[0]:
+                ind[1] = random.randrange(n_genes)
+            ind[2] = gate_idx
+            return ind
+
+        for _ in range(and_quota // n_islands):
+            island_pop.append(make_ind(gate_idx=0))    # "A & B"
+        for _ in range(nand_quota // n_islands):
+            island_pop.append(make_ind(gate_idx=2))    # "A & !B"
+        for _ in range(open_quota // n_islands):
+            ind = _island_toolbox.individual()
+            ind[0] = random.choice(region)
+            ind[1] = random.randrange(n_genes)
+            while ind[1] == ind[0]:
+                ind[1] = random.randrange(n_genes)
+            island_pop.append(ind)
+
+        random.shuffle(island_pop)
+        islands.append(island_pop)
+
+    return islands
+
+
+def _select_with_gate_quota(population, k, tournsize=2, gate_min_frac=0.2):
+    """Tournament selection that guarantees at least `gate_min_frac` of the
+    `k` selected individuals carry each gate type (prevents any one gate
+    type from being selected out of existence)."""
+    min_per_gate = int(k * gate_min_frac)
+
+    gate_pools = {i: [] for i in range(len(LOGIC_GATES))}
+    for ind in population:
+        gate_pools[ind[2]].append(ind)
+
+    selected = []
+    for gate_idx in range(len(LOGIC_GATES)):
+        pool     = gate_pools[gate_idx]
+        n_select = min(min_per_gate, len(pool))
+        for _ in range(n_select):
+            aspirants = random.choices(pool, k=min(tournsize, len(pool)))
+            selected.append(max(aspirants, key=lambda x: x.fitness.values[0]))
+
+    remaining = k - len(selected)
+    for _ in range(remaining):
+        aspirants = random.choices(population, k=tournsize)
+        selected.append(max(aspirants, key=lambda x: x.fitness.values[0]))
+
+    random.shuffle(selected)
+    return selected
+
+
+def _migrate_islands(islands, n_islands, migrate_k):
+    """Ring-topology migration: the top `migrate_k` individuals from each
+    island replace the bottom `migrate_k` of the next island in the ring."""
+    migrants = []
+    for island in islands:
+        island.sort(key=lambda ind: ind.fitness.values[0], reverse=True)
+        migrants.append([_island_toolbox.clone(ind) for ind in island[:migrate_k]])
+
+    for i, island in enumerate(islands):
+        incoming = migrants[(i - 1) % n_islands]
+        island[-migrate_k:] = incoming
+
+    return islands
+
+
+def _run_ga_island(
+    seed, n_genes, island_size, n_islands,
+    and_quota, nand_quota, open_quota,
+    Gmax, Ggap, Rrep, patience,
+    gate_min_frac, mutpb, sbx_eta,
+    migrate_interval, migrate_k,
+):
+    """
+    Single-seed island-model GA run: gate-quota init, ring migration,
+    gate-quota selection, SBX crossover, rare-gene immigrant injection.
+
+    Meant to be called once per seed — parallelised ACROSS seeds via joblib
+    in _run_single_atlas() (each seed runs single-process; unlike the
+    standard GA's per-generation multiprocessing, this is per-generation
+    single-threaded, per-seed parallel).
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+
+    low = [0, 0, 0]
+    up  = [n_genes - 1, n_genes - 1, len(LOGIC_GATES) - 1]
+    _island_toolbox.register("mate", _cx_simulated_binary_bounded, low=low, up=up, eta=sbx_eta)
+
+    islands = _init_islands(n_genes, n_islands, and_quota, nand_quota, open_quota)
+
+    hof   = tools.HallOfFame(100)
+    stats = tools.Statistics(lambda ind: ind.fitness.values)
+    stats.register("avg", np.mean)
+    stats.register("max", np.max)
+
+    max_fitness                 = 0
+    generations_without_improve = 0
+    logbook                     = []
+    all_results                 = []
+
+    for gen in range(Gmax):
+
+        for isl_idx, island in enumerate(islands):
+
+            offspring = algorithms.varAnd(island, _island_toolbox, cxpb=0.5, mutpb=mutpb)
+            offspring = list(map(_evaluate_individual_island, offspring))
+
+            for ind in offspring:
+                gA, gB, gT = ind
+                all_results.append([
+                    gen, LOGIC_GATES[gT],
+                    [_gene_names[gA], _gene_names[gB]],
+                    ind.fitness.values[0],
+                    getattr(ind, "safety", None),
+                    seed,
+                ])
+                ind.generation = gen
+                ind.seed_value = seed
+
+            if gen > 0 and gen % Ggap == 0:
+                num_replace = max(1, int(Rrep * island_size))
+                offspring.sort(key=lambda ind: ind.fitness.values[0])
+
+                hof_genes = set()
+                for h in hof:
+                    hof_genes.add(h[0]); hof_genes.add(h[1])
+
+                rare_genes    = list(set(range(n_genes)) - hof_genes)
+                hof_gene_list = list(hof_genes) if hof_genes else list(range(n_genes))
+
+                num_rare = num_replace // 2
+
+                for i in range(num_replace):
+                    new_ind = _island_toolbox.individual()
+
+                    if i < num_rare and rare_genes:
+                        forced_gene = random.choice(rare_genes)
+                        gate_idx    = new_ind[2]
+                        if gate_idx == 2:  # "A & !B" — forced gene goes in slot B
+                            new_ind[1] = forced_gene
+                            hof_a = random.choice(hof_gene_list)
+                            while hof_a == forced_gene:
+                                hof_a = random.choice(hof_gene_list)
+                            new_ind[0] = hof_a
+                        else:
+                            if random.random() < 0.5:
+                                new_ind[0] = forced_gene
+                                new_ind[1] = random.randrange(n_genes)
+                                while new_ind[1] == new_ind[0]:
+                                    new_ind[1] = random.randrange(n_genes)
+                            else:
+                                new_ind[1] = forced_gene
+                                new_ind[0] = random.randrange(n_genes)
+                                while new_ind[0] == new_ind[1]:
+                                    new_ind[0] = random.randrange(n_genes)
+
+                    new_ind.fitness.values = _island_toolbox.evaluate(new_ind)
+                    gA, gB, gT = new_ind
+                    all_results.append([
+                        gen, LOGIC_GATES[gT],
+                        [_gene_names[gA], _gene_names[gB]],
+                        new_ind.fitness.values[0],
+                        getattr(new_ind, "safety", None),
+                        seed,
+                    ])
+                    new_ind.generation = gen
+                    new_ind.seed_value = seed
+                    offspring[i] = new_ind
+
+            islands[isl_idx] = _select_with_gate_quota(
+                offspring, k=island_size, tournsize=2, gate_min_frac=gate_min_frac
+            )
+
+        if gen > 0 and gen % migrate_interval == 0:
+            islands = _migrate_islands(islands, n_islands, migrate_k)
+
+        combined_pop = [ind for island in islands for ind in island]
+        hof.update(combined_pop)
+        record = stats.compile(combined_pop)
+        logbook.append(record)
+
+        current_best = record["max"]
+        if current_best > max_fitness:
+            max_fitness                 = current_best
+            generations_without_improve = 0
+        else:
+            generations_without_improve += 1
+
+        if generations_without_improve >= patience:
+            print(f"  [island] Early stopping at generation {gen} for seed {seed}")
+            break
+
+    return hof, logbook, all_results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Single-atlas GA run  (factored out of run() so it can be executed once per
+# atlas when atlas="both"; dispatches to _run_ga (standard) or _run_ga_island
+# depending on ga_mode)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _run_single_atlas(
@@ -493,6 +840,16 @@ def _run_single_atlas(
     n_cpus: int,
     n_runs: int,
     output_dir: str,
+    ga_mode: str = "standard",
+    n_islands: int = 4,
+    migrate_interval: int = 10,
+    migrate_k: int = 10,
+    and_quota_frac: float = 0.25,
+    nand_quota_frac: float = 0.25,
+    island_gate_min_frac: float = 0.20,
+    island_mutpb: float = 0.30,
+    sbx_eta: float = 2.0,
+    island_n_jobs: int = None,
 ):
     """
     Run the full GA search (all n_runs) against a single healthy atlas.
@@ -505,6 +862,10 @@ def _run_single_atlas(
     Returns (df_hof, df_all) for this atlas.
     """
     global _tumor_matrix, _healthy_matrix, _gene_names, _n_genes, _safety_thresh
+    global _tumor_cols, _healthy_cols
+
+    if ga_mode not in ("standard", "island"):
+        raise ValueError(f"ga_mode must be 'standard' or 'island' — got {ga_mode!r}")
 
     print(f"\nLoading healthy matrix for atlas '{atlas_label}': {healthy_path}")
     healthy_matrix_full, healthy_genes, healthy_source = _load_healthy_matrix(
@@ -537,27 +898,66 @@ def _run_single_atlas(
     _n_genes        = len(common_genes)
     _safety_thresh  = safety_threshold
 
-    _init_deap(_n_genes, safety_threshold)
-
     all_hof     = []
     all_results = []
 
-    for run_id in range(n_runs):
-        seed = 42 + run_id
-        print(f"\n[{atlas_label}] Starting run {run_id + 1}/{n_runs}  (seed={seed})")
+    if ga_mode == "standard":
+        _init_deap(_n_genes, safety_threshold)
 
-        hof, results = _run_ga(
-            seed=seed, pop_size=pop_size, Gmax=Gmax,
-            Ggap=Ggap, Rrep=Rrep, patience=patience, n_cpus=n_cpus,
+        for run_id in range(n_runs):
+            seed = 42 + run_id
+            print(f"\n[{atlas_label}] Starting run {run_id + 1}/{n_runs}  (seed={seed})")
+
+            hof, results = _run_ga(
+                seed=seed, pop_size=pop_size, Gmax=Gmax,
+                Ggap=Ggap, Rrep=Rrep, patience=patience, n_cpus=n_cpus,
+            )
+
+            df_run = pd.DataFrame(
+                results,
+                columns=["generation", "LogicGates", "Genes", "Efficacy", "Safety", "seed_value"]
+            )
+            df_run = df_run[["seed_value", "generation", "LogicGates", "Genes", "Efficacy", "Safety"]]
+            all_results.append(df_run)
+            all_hof.extend(hof)
+
+    else:  # ga_mode == "island"
+        _tumor_cols   = [np.ascontiguousarray(tumor_mat[:, i])   for i in range(_n_genes)]
+        _healthy_cols = [np.ascontiguousarray(healthy_mat[:, i]) for i in range(_n_genes)]
+        _init_deap_island(_n_genes)
+
+        island_size = pop_size // n_islands
+        and_quota   = int(pop_size * and_quota_frac)
+        nand_quota  = int(pop_size * nand_quota_frac)
+        open_quota  = pop_size - and_quota - nand_quota
+
+        seed_list = [42 + i for i in range(n_runs)]
+        n_jobs    = island_n_jobs or n_runs
+
+        print(f"\n[{atlas_label}] Running island-model GA across {n_runs} seed(s) "
+              f"in parallel (n_jobs={n_jobs}, n_islands={n_islands}, "
+              f"island_size={island_size}, pop_size={pop_size})")
+
+        parallel_results = Parallel(n_jobs=n_jobs, backend="multiprocessing")(
+            delayed(_run_ga_island)(
+                seed=seed, n_genes=_n_genes, island_size=island_size,
+                n_islands=n_islands, and_quota=and_quota, nand_quota=nand_quota,
+                open_quota=open_quota, Gmax=Gmax, Ggap=Ggap, Rrep=Rrep,
+                patience=patience, gate_min_frac=island_gate_min_frac,
+                mutpb=island_mutpb, sbx_eta=sbx_eta,
+                migrate_interval=migrate_interval, migrate_k=migrate_k,
+            )
+            for seed in seed_list
         )
 
-        df_run = pd.DataFrame(
-            results,
-            columns=["generation", "LogicGates", "Genes", "Efficacy", "Safety", "seed_value"]
-        )
-        df_run = df_run[["seed_value", "generation", "LogicGates", "Genes", "Efficacy", "Safety"]]
-        all_results.append(df_run)
-        all_hof.extend(hof)
+        for hof, logbook, results in parallel_results:
+            df_run = pd.DataFrame(
+                results,
+                columns=["generation", "LogicGates", "Genes", "Efficacy", "Safety", "seed_value"]
+            )
+            df_run = df_run[["seed_value", "generation", "LogicGates", "Genes", "Efficacy", "Safety"]]
+            all_results.append(df_run)
+            all_hof.extend(hof)
 
     df_all       = pd.concat(all_results, ignore_index=True)
     df_all       = _postprocess_results(df_all)
@@ -596,7 +996,7 @@ def _run_single_atlas(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Robust Rank Aggregation across the two atlases  (NEW)
+# Robust Rank Aggregation across the two atlases
 #
 # Ported from the user's standalone RRA R script (Robust_Rank_Aggregation_
 # Three_Atlas_FIXED.R), reduced from 3 atlases (HPA/HCA/Tabula) to 2
@@ -866,10 +1266,20 @@ def run(
     patience: int  = 50,
     n_cpus: int    = 1,
     n_runs: int    = 10,
+    ga_mode: str   = "standard",
+    n_islands: int = 4,
+    migrate_interval: int = 10,
+    migrate_k: int = 10,
+    and_quota_frac: float = 0.25,
+    nand_quota_frac: float = 0.25,
+    island_gate_min_frac: float = 0.20,
+    island_mutpb: float = 0.30,
+    sbx_eta: float = 2.0,
+    island_n_jobs: int = None,
 ):
     """
     Run two-gene logic-gate CAR-T target search via Genetic Algorithm,
-    against one or both bundled healthy reference atlases.
+    against one or both healthy reference atlases.
 
     Parameters
     ----------
@@ -882,13 +1292,14 @@ def run(
                      candidate lists via Robust Rank Aggregation (RRA).
                      Default.
     hpa_path : str or None
-        Optional override path to a custom HPA-style healthy .h5ad/.tsv
-        file. If None and atlas is "hpa" or "both", the bundled
-        hpa_alltissues_geosketch_10k.h5ad shipped with SCART is used.
+        Local path to the Zenodo-downloaded hpa_alltissues_geosketch_10k.h5ad
+        file. If None and atlas is "hpa" or "both", SCART auto-searches
+        <cwd>/hpa_alltissues_geosketch_10k.h5ad and
+        <cwd>/healthy_atlases/hpa_alltissues_geosketch_10k.h5ad; raises
+        FileNotFoundError with download/placement instructions if not found.
+        (A .tsv/.tsv.gz path is also accepted, per _load_healthy_matrix.)
     tabula_path : str or None
-        Optional override path to a custom Tabula Sapiens healthy .h5ad
-        file. If None and atlas is "tabula" or "both", the bundled
-        tabula_sapiens_alltissues_10k.h5ad shipped with SCART is used.
+        Same as hpa_path, for tabula_sapiens_alltissues_10k.h5ad.
     tumor_path : str or None
         Path to tumour h5ad (Module 3 output). Auto-detected if None.
     safety_threshold : float
@@ -899,7 +1310,20 @@ def run(
         eligible for Robust Rank Aggregation. Only used when atlas="both".
         Defaults 0.7 / 0.9 (matches the reference RRA script).
     pop_size, Gmax, Ggap, Rrep, patience, n_cpus, n_runs :
-        Genetic-algorithm parameters (unchanged from previous versions).
+        Genetic-algorithm parameters (unchanged from previous versions;
+        n_cpus is only used by ga_mode="standard").
+    ga_mode : str
+        "standard" (default) - the module's original single-population GA.
+        "island"   - island-model GA with gate-quota seeding, ring
+                     migration, gate-quota selection, SBX crossover, and
+                     rare-gene immigrant injection. See _run_ga_island().
+    n_islands, migrate_interval, migrate_k, and_quota_frac, nand_quota_frac,
+    island_gate_min_frac, island_mutpb, sbx_eta, island_n_jobs :
+        Only used when ga_mode="island". and_quota_frac / nand_quota_frac
+        are the share of pop_size pre-seeded as A&B / A&!B individuals
+        (remainder is open/random-gate); defaults (0.25 / 0.25) match the
+        reference script's 250/250/500 split for pop_size=1000.
+        island_n_jobs defaults to n_runs (one worker per seed).
 
     Returns
     -------
@@ -925,24 +1349,28 @@ def run(
     ga_kwargs = dict(
         safety_threshold=safety_threshold, pop_size=pop_size, Gmax=Gmax,
         Ggap=Ggap, Rrep=Rrep, patience=patience, n_cpus=n_cpus, n_runs=n_runs,
-        output_dir=output_dir,
+        output_dir=output_dir, ga_mode=ga_mode, n_islands=n_islands,
+        migrate_interval=migrate_interval, migrate_k=migrate_k,
+        and_quota_frac=and_quota_frac, nand_quota_frac=nand_quota_frac,
+        island_gate_min_frac=island_gate_min_frac, island_mutpb=island_mutpb,
+        sbx_eta=sbx_eta, island_n_jobs=island_n_jobs,
     )
 
     if atlas == "hpa":
-        healthy_path = hpa_path or _get_bundled_atlas_path("hpa")
-        print(f"\nAtlas selection: HPA only ({ATLAS_LABELS['hpa']})")
+        healthy_path = _resolve_atlas_path("hpa", hpa_path)
+        print(f"\nAtlas selection: HPA only ({ATLAS_LABELS['hpa']})  |  ga_mode={ga_mode}")
         return _run_single_atlas("hpa", healthy_path, adata_tumor, tumor_genes, **ga_kwargs)
 
     if atlas == "tabula":
-        healthy_path = tabula_path or _get_bundled_atlas_path("tabula")
-        print(f"\nAtlas selection: Tabula Sapiens only ({ATLAS_LABELS['tabula']})")
+        healthy_path = _resolve_atlas_path("tabula", tabula_path)
+        print(f"\nAtlas selection: Tabula Sapiens only ({ATLAS_LABELS['tabula']})  |  ga_mode={ga_mode}")
         return _run_single_atlas("tabula", healthy_path, adata_tumor, tumor_genes, **ga_kwargs)
 
     # atlas == "both"
-    hpa_healthy_path    = hpa_path    or _get_bundled_atlas_path("hpa")
-    tabula_healthy_path = tabula_path or _get_bundled_atlas_path("tabula")
+    hpa_healthy_path    = _resolve_atlas_path("hpa", hpa_path)
+    tabula_healthy_path = _resolve_atlas_path("tabula", tabula_path)
 
-    print("\nAtlas selection: BOTH (independent runs + Robust Rank Aggregation)")
+    print(f"\nAtlas selection: BOTH (independent runs + Robust Rank Aggregation)  |  ga_mode={ga_mode}")
 
     print("\n" + "=" * 70)
     print(f"  Running GA search — ATLAS 1/2: {ATLAS_LABELS['hpa']}")
