@@ -316,9 +316,10 @@
     <div class="download-box">
       <div class="download-box-icon">🛡️</div>
       <div class="download-box-body">
-        <strong>Human Protein Atlas (HPA) healthy-tissue reference (for Module 4)</strong>
-        <p>This file is used by Modules 4a and 4b to assess safety — i.e., whether a candidate target gene is expressed in healthy tissues. Download <code>HPA_updated.h5ad</code> from the SCART GitHub repository.<br>
-        <a href="https://www.proteinatlas.org/" target="_blank">→ Download from HPA: https://www.proteinatlas.org/</a></p>
+        <strong>Healthy-tissue reference atlases (for Module 4)</strong>
+        <p>Modules 4a and 4b assess safety — i.e., whether a candidate target gene is expressed in healthy tissues — against two independent healthy single-cell atlases: <code>hpa_alltissues_geosketch_10k.h5ad</code> (Human Protein Atlas) and <code>tabula_sapiens_alltissues_10k.h5ad</code> (Tabula Sapiens). These are <strong>not</strong> bundled with SCART or the GitHub repo — download both from the SCART Zenodo record.<br>
+        <a href="#" target="_blank">→ Download from Zenodo: (see SCART documentation for the record link)</a></p>
+        <p style="margin-top:8px;">You can use either atlas on its own, or both together — Module 4 defaults to running against both and combining the results with Robust Rank Aggregation (RRA). See <a href="#module4a">Module 4a</a> below.</p>
       </div>
     </div>
 
@@ -413,7 +414,7 @@
     <ul class="checklist">
       <li>A GEO accession ID (format: <code>GSExxxxxx</code>). Find these on <a href="https://www.ncbi.nlm.nih.gov/geo/" target="_blank">ncbi.nlm.nih.gov/geo</a>.</li>
       <li>The Tabula Sapiens reference file for your cancer type (download from Figshare — see table above).</li>
-      <li>The HPA reference file <code>HPA_updated.h5ad</code> (download from HPA).</li>
+      <li>The Module 4 healthy reference atlas file(s) — <code>hpa_alltissues_geosketch_10k.h5ad</code> and/or <code>tabula_sapiens_alltissues_10k.h5ad</code> (download from Zenodo — see above).</li>
       <li>At least 20 GB free disk space and a stable internet connection for the download.</li>
     </ul>
 
@@ -510,7 +511,7 @@ normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = 
     <ul class="checklist">
       <li>Your <code>.h5ad</code> file(s) with raw (un-normalised) counts in <code>adata.X</code> or <code>adata.layers['counts']</code>.</li>
       <li>The Tabula Sapiens reference file for your cancer type.</li>
-      <li>The HPA reference file <code>HPA_updated.h5ad</code>.</li>
+      <li>The Module 4 healthy reference atlas file(s) — <code>hpa_alltissues_geosketch_10k.h5ad</code> and/or <code>tabula_sapiens_alltissues_10k.h5ad</code> (download from Zenodo — see above).</li>
       <li>(Optional) If you already have cell-type labels in your h5ad, the name of the column in <code>adata.obs</code> that holds them.</li>
     </ul>
 
@@ -622,8 +623,8 @@ normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = 
           <tr><td><strong>Module 1</strong></td><td>Downloads / loads data, classifies tumour vs normal samples, applies QC</td><td><code>*_tumor.h5ad</code></td><td>5–30 min</td></tr>
           <tr><td><strong>Module 2</strong></td><td>Annotates cell types using PopV consensus framework</td><td><code>final_popv_annotated.h5ad</code></td><td>30–120 min</td></tr>
           <tr><td><strong>Module 3</strong></td><td>Identifies malignant epithelial cells (SCEVAN + scMalignantFinder), runs surfaceome differential expression</td><td><code>final_tumor.h5ad</code></td><td>30–180 min</td></tr>
-          <tr><td><strong>Module 4a</strong></td><td>Scores every candidate surface gene for efficacy and safety</td><td><code>single_gene_results.csv</code></td><td>5–15 min</td></tr>
-          <tr><td><strong>Module 4b</strong></td><td>Finds optimal two-gene pairs using a genetic algorithm with AND / OR / NAND logic gates</td><td><code>two_gene_hof.csv</code></td><td>30–240 min</td></tr>
+          <tr><td><strong>Module 4a</strong></td><td>Scores every candidate surface gene for efficacy and safety against one or both healthy atlases</td><td><code>final_single_gene_candidates_RRA_HPA_Tabula.csv</code></td><td>5–15 min</td></tr>
+          <tr><td><strong>Module 4b</strong></td><td>Finds optimal two-gene pairs using a genetic algorithm with AND / OR / NAND logic gates, against one or both healthy atlases</td><td><code>final_candidates_RRA_HPA_Tabula.csv</code></td><td>30–240 min</td></tr>
         </tbody>
       </table>
     </div>
@@ -723,18 +724,22 @@ print(adata_preprocessed.uns[<span class="str">"filtered_deg"</span>].head(<span
       <div class="step-divider-num">4a</div>
       <div>
         <div class="step-divider-label">Module 4a — Single-Gene CAR-T Target Scoring</div>
-        <div class="step-divider-sub">Requires <code>HPA_updated.h5ad</code> downloaded from GitHub</div>
+        <div class="step-divider-sub">Requires the Module 4 healthy atlas file(s) downloaded from Zenodo</div>
       </div>
     </div>
 
-    <p>Module 4a scores every surface gene identified in Module 3 for two properties: <strong>Efficacy</strong> (how well the gene distinguishes tumour cells) and <strong>Safety</strong> (how absent the gene is from healthy tissues according to the Human Protein Atlas). Higher is better for both.</p>
+    <p>Module 4a scores every surface gene identified in Module 3 for two properties: <strong>Efficacy</strong> (how well the gene distinguishes tumour cells) and <strong>Safety</strong> (how absent the gene is from healthy tissue). Higher is better for both. Safety can be checked against either healthy atlas alone, or — recommended — against <strong>both independently</strong>, with the two ranked gene lists then combined via Robust Rank Aggregation (RRA) so a candidate only counts as "safe" once two independent references agree.</p>
 
     <div class="table-wrap">
       <table>
         <thead><tr><th>Parameter</th><th>Status</th><th>Default</th><th>What to change</th></tr></thead>
         <tbody>
-          <tr><td><code>hpa_path</code></td><td><span class="badge badge-required">required</span></td><td>—</td><td>Path to <code>HPA_updated.h5ad</code>. If omitted, SCART attempts an auto-download.</td></tr>
-          <tr><td><code>safety_threshold</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">0.9</span></td><td>Fraction of healthy cell types that must NOT express the target. 0.9 = 90% safety (recommended). Lower to get more candidates, raise for stricter safety.</td></tr>
+          <tr><td><code>atlas</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">"both"</span></td><td>Which healthy atlas(es) to score safety against: <code>"hpa"</code>, <code>"tabula"</code>, or <code>"both"</code>. <code>"both"</code> runs against each atlas independently and combines the results with RRA; <code>"hpa"</code>/<code>"tabula"</code> return a single result from that one atlas only.</td></tr>
+          <tr><td><code>hpa_path</code></td><td><span class="badge badge-optional">optional</span></td><td>—</td><td>Path to your local copy of <code>hpa_alltissues_geosketch_10k.h5ad</code>. Needed when <code>atlas="hpa"</code> or <code>"both"</code>. If omitted, SCART auto-searches the current directory and <code>./healthy_atlases/</code> for this filename.</td></tr>
+          <tr><td><code>tabula_path</code></td><td><span class="badge badge-optional">optional</span></td><td>—</td><td>Path to your local copy of <code>tabula_sapiens_alltissues_10k.h5ad</code>. Needed when <code>atlas="tabula"</code> or <code>"both"</code>. Same auto-detection rule as <code>hpa_path</code>.</td></tr>
+          <tr><td><code>safety_threshold</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">0.9</span></td><td>Fraction of healthy cell types that must NOT express the target, applied within each atlas's own evaluation. 0.9 = 90% safety (recommended). Lower to get more candidates, raise for stricter safety.</td></tr>
+          <tr><td><code>rra_efficacy_threshold</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">0.7</span></td><td>Only used when <code>atlas="both"</code>. A gene must clear this efficacy threshold in BOTH atlases to enter the final RRA-combined ranking.</td></tr>
+          <tr><td><code>rra_safety_threshold</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">0.9</span></td><td>Only used when <code>atlas="both"</code>. A gene must clear this safety threshold in BOTH atlases to enter the final RRA-combined ranking.</td></tr>
         </tbody>
       </table>
     </div>
@@ -743,17 +748,21 @@ print(adata_preprocessed.uns[<span class="str">"filtered_deg"</span>].head(<span
       <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
       <pre><span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> one_gene_combination
 
-<span class="c"># USER: replace the path with the location of your HPA_updated.h5ad</span>
-df = one_gene_combination.run(
-    hpa_path         = <span class="str">"/path/to/HPA_updated.h5ad"</span>,
+<span class="c"># USER: replace the paths with the location of your Zenodo-downloaded atlas files</span>
+result = one_gene_combination.run(
+    atlas            = <span class="str">"both"</span>,
+    hpa_path         = <span class="str">"/path/to/hpa_alltissues_geosketch_10k.h5ad"</span>,
+    tabula_path      = <span class="str">"/path/to/tabula_sapiens_alltissues_10k.h5ad"</span>,
     safety_threshold = <span class="num">0.9</span>,
 )
 
-<span class="c"># Filter and inspect top candidates</span>
-top = df[df[<span class="str">"Safety"</span>] &gt;= <span class="num">0.9</span>].sort_values(<span class="str">"Efficacy"</span>, ascending=<span class="kw">False</span>)
-print(top.head(<span class="num">20</span>))
+<span class="c"># atlas="both" returns a dict — the RRA-combined ranking is the headline result</span>
+df_rra = result[<span class="str">"rra"</span>]
+print(df_rra.head(<span class="num">20</span>))
 
-<span class="c"># Output saved to: single_gene_results.csv</span></pre>
+<span class="c"># Outputs saved to:
+#   single_gene_results_hpa.csv / single_gene_results_tabula.csv   → per-atlas results
+#   final_single_gene_candidates_RRA_HPA_Tabula.csv                → RRA-combined ranking (start here)</span></pre>
     </div>
 
     <!-- ══════════════ MODULE 4b ══════════════ -->
@@ -765,18 +774,23 @@ print(top.head(<span class="num">20</span>))
       </div>
     </div>
 
-    <p>Module 4b extends the single-gene analysis to pairs of genes, evaluated with three logic gates: <code>A &amp; B</code> (both expressed), <code>A | B</code> (either expressed), and <code>A &amp;! B</code> (A expressed, B not expressed — NAND gate for safety). A genetic algorithm efficiently searches the combination space.</p>
+    <p>Module 4b extends the single-gene analysis to pairs of genes, evaluated with three logic gates: <code>A &amp; B</code> (both expressed), <code>A | B</code> (either expressed), and <code>A &amp;! B</code> (A expressed, B not expressed — NAND gate for safety). A genetic algorithm efficiently searches the combination space. Like Module 4a, it can score safety against either healthy atlas alone, or — recommended, and the default — against <strong>both independently</strong>, combining the two ranked candidate-pair lists via Robust Rank Aggregation (RRA).</p>
 
     <div class="table-wrap">
       <table>
         <thead><tr><th>Parameter</th><th>Status</th><th>Default</th><th>What to change</th></tr></thead>
         <tbody>
-          <tr><td><code>hpa_path</code></td><td><span class="badge badge-required">required</span></td><td>—</td><td>Path to <code>HPA_updated.h5ad</code>.</td></tr>
-          <tr><td><code>safety_threshold</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">0.9</span></td><td>Same as Module 4a.</td></tr>
+          <tr><td><code>atlas</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">"both"</span></td><td>Same meaning as Module 4a: <code>"hpa"</code>, <code>"tabula"</code>, or <code>"both"</code>.</td></tr>
+          <tr><td><code>hpa_path</code></td><td><span class="badge badge-optional">optional</span></td><td>—</td><td>Path to your local copy of <code>hpa_alltissues_geosketch_10k.h5ad</code>. Same file and auto-detection rule as Module 4a.</td></tr>
+          <tr><td><code>tabula_path</code></td><td><span class="badge badge-optional">optional</span></td><td>—</td><td>Path to your local copy of <code>tabula_sapiens_alltissues_10k.h5ad</code>. Same file and auto-detection rule as Module 4a.</td></tr>
+          <tr><td><code>safety_threshold</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">0.9</span></td><td>Same as Module 4a — applied as the GA fitness cutoff inside each atlas's own search.</td></tr>
+          <tr><td><code>rra_efficacy_threshold</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">0.7</span></td><td>Only used when <code>atlas="both"</code>. Same meaning as Module 4a.</td></tr>
+          <tr><td><code>rra_safety_threshold</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">0.9</span></td><td>Only used when <code>atlas="both"</code>. Same meaning as Module 4a.</td></tr>
+          <tr><td><code>ga_mode</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">"standard"</span></td><td><code>"standard"</code> — the original single-population GA (recommended default). <code>"island"</code> — an alternative island-model search (gate-quota seeding, ring migration, SBX crossover) that explores gene space more thoroughly but runs slower. See the <a href="algorithm.html">Genetic Algorithm page</a> for details.</td></tr>
           <tr><td><code>pop_size</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">1000</span></td><td>Number of gene pairs evaluated per generation. Larger = more thorough search but slower.</td></tr>
           <tr><td><code>Gmax</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">100</span></td><td>Maximum number of generations the algorithm runs.</td></tr>
           <tr><td><code>patience</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">50</span></td><td>Early stop if no improvement for N generations.</td></tr>
-          <tr><td><code>n_cpus</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">1</span></td><td>CPU cores for parallel evaluation. Set to the number of cores available to you.</td></tr>
+          <tr><td><code>n_cpus</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">1</span></td><td>CPU cores for parallel evaluation. Only used when <code>ga_mode="standard"</code>. Set to the number of cores available to you.</td></tr>
           <tr><td><code>n_runs</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">10</span></td><td>Independent GA runs with different random seeds. More runs = more robust results.</td></tr>
         </tbody>
       </table>
@@ -786,11 +800,14 @@ print(top.head(<span class="num">20</span>))
       <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
       <pre><span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> two_gene_combination
 
-<span class="c"># USER: replace the path with the location of your HPA_updated.h5ad</span>
+<span class="c"># USER: replace the paths with the location of your Zenodo-downloaded atlas files</span>
 <span class="c"># USER: set n_cpus to the number of CPU cores on your machine</span>
-df_hof, df_all = two_gene_combination.run(
-    hpa_path         = <span class="str">"/path/to/HPA_updated.h5ad"</span>,
+result = two_gene_combination.run(
+    atlas            = <span class="str">"both"</span>,
+    hpa_path         = <span class="str">"/path/to/hpa_alltissues_geosketch_10k.h5ad"</span>,
+    tabula_path      = <span class="str">"/path/to/tabula_sapiens_alltissues_10k.h5ad"</span>,
     safety_threshold = <span class="num">0.9</span>,
+    ga_mode          = <span class="str">"standard"</span>,
     pop_size         = <span class="num">1000</span>,
     Gmax             = <span class="num">100</span>,
     patience         = <span class="num">50</span>,
@@ -798,15 +815,15 @@ df_hof, df_all = two_gene_combination.run(
     n_runs           = <span class="num">10</span>,
 )
 
-<span class="c"># View best AND-gate combinations</span>
-and_pairs = df_hof[df_hof[<span class="str">"LogicGates"</span>] == <span class="str">"A &amp; B"</span>]
-print(and_pairs.head(<span class="num">10</span>))
+<span class="c"># atlas="both" returns a dict — the RRA-combined ranking is the headline result</span>
+df_rra = result[<span class="str">"rra"</span>]
+print(<span class="str">"Top RRA-ranked pairs (safe + effective in BOTH atlases):"</span>)
+print(df_rra.head(<span class="num">10</span>))
 
-<span class="c"># View best NAND-gate combinations (A expressed, B absent — safer targeting)</span>
-nand_pairs = df_hof[df_hof[<span class="str">"LogicGates"</span>] == <span class="str">"A &amp;! B"</span>]
-print(nand_pairs.head(<span class="num">10</span>))
-
-<span class="c"># Outputs: two_gene_hof.csv (best pairs) and two_gene_complete.csv (all evaluated pairs)</span></pre>
+<span class="c"># Outputs saved to:
+#   two_gene_complete_hpa.csv / two_gene_hof_hpa.csv       → per-atlas full results
+#   two_gene_complete_tabula.csv / two_gene_hof_tabula.csv → per-atlas full results
+#   final_candidates_RRA_HPA_Tabula.csv                    → RRA-combined ranking (start here)</span></pre>
     </div>
 
     <!-- ═══════════════════════════════════════════════════════════════════
@@ -861,21 +878,28 @@ adata_preprocessed = preprocessing.run_preprocessing_pipeline(
 )
 
 <span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> one_gene_combination
-df = one_gene_combination.run(
-    hpa_path         = <span class="str">"/path/to/HPA_updated.h5ad"</span>,
+result_4a = one_gene_combination.run(
+    atlas            = <span class="str">"both"</span>,
+    hpa_path         = <span class="str">"/path/to/hpa_alltissues_geosketch_10k.h5ad"</span>,
+    tabula_path      = <span class="str">"/path/to/tabula_sapiens_alltissues_10k.h5ad"</span>,
     safety_threshold = <span class="num">0.9</span>,
 )
+df_rra_single = result_4a[<span class="str">"rra"</span>]  <span class="c"># RRA-combined single-gene ranking</span>
 
 <span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> two_gene_combination
-df_hof, df_all = two_gene_combination.run(
-    hpa_path         = <span class="str">"/path/to/HPA_updated.h5ad"</span>,
+result_4b = two_gene_combination.run(
+    atlas            = <span class="str">"both"</span>,
+    hpa_path         = <span class="str">"/path/to/hpa_alltissues_geosketch_10k.h5ad"</span>,
+    tabula_path      = <span class="str">"/path/to/tabula_sapiens_alltissues_10k.h5ad"</span>,
     safety_threshold = <span class="num">0.9</span>,
+    ga_mode          = <span class="str">"standard"</span>,
     pop_size         = <span class="num">1000</span>,
     Gmax             = <span class="num">100</span>,
     patience         = <span class="num">50</span>,
     n_cpus           = <span class="num">8</span>,
     n_runs           = <span class="num">10</span>,
-)</pre>
+)
+df_rra_pairs = result_4b[<span class="str">"rra"</span>]  <span class="c"># RRA-combined two-gene ranking</span></pre>
     </div>
 
     <!-- ── STEP 1 ── -->
@@ -1128,17 +1152,36 @@ print(adata_preprocessed.uns[<span class="str">"filtered_deg"</span>].head(<span
       <div class="code-header"><span class="code-lang">python — Module 4a · Single-Gene Scoring</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
       <pre><span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> one_gene_combination
 
-df = one_gene_combination.run(
+result = one_gene_combination.run(
 
-    hpa_path=<span class="str">"/path/to/HPA_updated.h5ad"</span>,
-                           <span class="c"># ← CHANGE: path to the HPA_updated.h5ad file you downloaded</span>
-                           <span class="c">#   from the SCART GitHub repository. This is the Human</span>
-                           <span class="c">#   Protein Atlas healthy-tissue reference used to check</span>
-                           <span class="c">#   whether each candidate gene is expressed in normal</span>
-                           <span class="c">#   organs — a critical safety check for CAR-T therapy.</span>
+    atlas=<span class="str">"both"</span>,           <span class="c"># ← Which healthy atlas(es) to score safety against.</span>
+                           <span class="c">#   "both"   → runs against HPA AND Tabula Sapiens</span>
+                           <span class="c">#   independently, then combines the two ranked gene</span>
+                           <span class="c">#   lists via Robust Rank Aggregation (RRA). Returns a</span>
+                           <span class="c">#   dict — see below. Default, and recommended: a gene</span>
+                           <span class="c">#   only counts as "safe" once it has been checked</span>
+                           <span class="c">#   against two independent healthy references.</span>
+                           <span class="c">#   "hpa"    → HPA only. Returns a single DataFrame.</span>
+                           <span class="c">#   "tabula" → Tabula Sapiens only. Returns a single DataFrame.</span>
+
+    hpa_path=<span class="str">"/path/to/hpa_alltissues_geosketch_10k.h5ad"</span>,
+                           <span class="c"># ← CHANGE: path to your local copy of</span>
+                           <span class="c">#   hpa_alltissues_geosketch_10k.h5ad, downloaded from</span>
+                           <span class="c">#   Zenodo (see Reference Files section above — NOT</span>
+                           <span class="c">#   bundled with SCART). Needed when atlas="hpa" or</span>
+                           <span class="c">#   "both". If omitted, SCART looks for this exact</span>
+                           <span class="c">#   filename in the current directory and</span>
+                           <span class="c">#   ./healthy_atlases/.</span>
+
+    tabula_path=<span class="str">"/path/to/tabula_sapiens_alltissues_10k.h5ad"</span>,
+                           <span class="c"># ← CHANGE: path to your local copy of</span>
+                           <span class="c">#   tabula_sapiens_alltissues_10k.h5ad, downloaded from</span>
+                           <span class="c">#   Zenodo. Needed when atlas="tabula" or "both". Same</span>
+                           <span class="c">#   auto-detection rule as hpa_path.</span>
 
     safety_threshold=<span class="num">0.9</span>, <span class="c"># ← The minimum fraction of healthy cell types that must</span>
-                           <span class="c">#   NOT express this gene for it to be considered safe.</span>
+                           <span class="c">#   NOT express this gene for it to be considered safe,</span>
+                           <span class="c">#   applied independently within each atlas.</span>
                            <span class="c">#   0.9 = the gene must be absent from at least 90% of</span>
                            <span class="c">#   healthy tissues — the recommended default.</span>
                            <span class="c">#</span>
@@ -1147,12 +1190,29 @@ df = one_gene_combination.run(
                            <span class="c">#   0.90 → standard, balanced (recommended)</span>
                            <span class="c">#   0.80 → lenient, more candidates, higher off-tumour risk</span>
                            <span class="c">#          use only for exploratory analysis</span>
+
+    rra_efficacy_threshold=<span class="num">0.7</span>,
+                           <span class="c"># ← Only used when atlas="both". A gene must clear this</span>
+                           <span class="c">#   efficacy threshold in BOTH atlases to be eligible</span>
+                           <span class="c">#   for the final RRA-combined ranking. 0.7 recommended.</span>
+
+    rra_safety_threshold=<span class="num">0.9</span>,
+                           <span class="c"># ← Only used when atlas="both". A gene must clear this</span>
+                           <span class="c">#   safety threshold in BOTH atlases to be eligible for</span>
+                           <span class="c">#   the final RRA-combined ranking. 0.9 recommended.</span>
 )
 
-<span class="c"># Filter to candidates meeting the safety threshold, ranked by tumour coverage</span>
-top = df[df[<span class="str">"Safety"</span>] &gt;= <span class="num">0.9</span>].sort_values(<span class="str">"Efficacy"</span>, ascending=<span class="kw">False</span>)
-print(top.head(<span class="num">20</span>))
-<span class="c"># Output saved to: single_gene_results.csv</span></pre>
+<span class="c"># atlas="both" returns a dict; atlas="hpa"/"tabula" returns a single DataFrame</span>
+<span class="kw">if</span> <span class="kw">isinstance</span>(result, <span class="kw">dict</span>):
+    df_rra = result[<span class="str">"rra"</span>]  <span class="c"># RRA-combined ranking — start here</span>
+    print(df_rra.head(<span class="num">20</span>))
+<span class="kw">else</span>:
+    top = result[result[<span class="str">"Safety"</span>] &gt;= <span class="num">0.9</span>].sort_values(<span class="str">"Efficacy"</span>, ascending=<span class="kw">False</span>)
+    print(top.head(<span class="num">20</span>))
+
+<span class="c"># Outputs saved to:
+#   single_gene_results_hpa.csv / single_gene_results_tabula.csv   → per-atlas results
+#   final_single_gene_candidates_RRA_HPA_Tabula.csv                → RRA-combined ranking</span></pre>
     </div>
 
     <!-- ── STEP 4b ── -->
@@ -1163,12 +1223,35 @@ print(top.head(<span class="num">20</span>))
       <div class="code-header"><span class="code-lang">python — Module 4b · Two-Gene Combination Scoring</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
       <pre><span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> two_gene_combination
 
-df_hof, df_all = two_gene_combination.run(
+result = two_gene_combination.run(
 
-    hpa_path=<span class="str">"/path/to/HPA_updated.h5ad"</span>,
-                           <span class="c"># ← CHANGE: same HPA file as Module 4a.</span>
+    atlas=<span class="str">"both"</span>,           <span class="c"># ← Same meaning as Module 4a: "hpa" / "tabula" / "both".</span>
+                           <span class="c">#   "both" runs the full GA search independently against</span>
+                           <span class="c">#   each atlas, then combines the two ranked candidate-pair</span>
+                           <span class="c">#   lists via Robust Rank Aggregation (RRA).</span>
 
-    safety_threshold=<span class="num">0.9</span>, <span class="c"># ← Same meaning as Module 4a. 0.9 is recommended.</span>
+    hpa_path=<span class="str">"/path/to/hpa_alltissues_geosketch_10k.h5ad"</span>,
+                           <span class="c"># ← CHANGE: same file as Module 4a. Needed for atlas="hpa"/"both".</span>
+
+    tabula_path=<span class="str">"/path/to/tabula_sapiens_alltissues_10k.h5ad"</span>,
+                           <span class="c"># ← CHANGE: same file as Module 4a. Needed for atlas="tabula"/"both".</span>
+
+    safety_threshold=<span class="num">0.9</span>, <span class="c"># ← Same meaning as Module 4a. Applied as the GA fitness</span>
+                           <span class="c">#   cutoff inside each atlas's own search. 0.9 recommended.</span>
+
+    rra_efficacy_threshold=<span class="num">0.7</span>,
+    rra_safety_threshold=<span class="num">0.9</span>,
+                           <span class="c"># ← Only used when atlas="both". A candidate pair must</span>
+                           <span class="c">#   clear both thresholds in BOTH atlases to enter the</span>
+                           <span class="c">#   final RRA-combined ranking. Defaults match Module 4a.</span>
+
+    ga_mode=<span class="str">"standard"</span>,     <span class="c"># ← Search strategy.</span>
+                           <span class="c">#   "standard" (default) → the original single-population</span>
+                           <span class="c">#   GA. Faster, well-tested, recommended for most runs.</span>
+                           <span class="c">#   "island" → island-model GA (gate-quota seeding, ring</span>
+                           <span class="c">#   migration, SBX crossover, rare-gene immigrant</span>
+                           <span class="c">#   injection). More thorough search of gene space, but</span>
+                           <span class="c">#   slower — see the Genetic Algorithm page for details.</span>
 
     pop_size=<span class="num">1000</span>,         <span class="c"># ← Number of gene pairs in each "generation" of the</span>
                            <span class="c">#   genetic algorithm. Think of it as the population size</span>
@@ -1192,8 +1275,9 @@ df_hof, df_all = two_gene_combination.run(
                            <span class="c">#   50  → standard balance (recommended)</span>
                            <span class="c">#   100 → keeps running longer, for thorough HPC runs</span>
 
-    n_cpus=<span class="num">8</span>,              <span class="c"># ← CPU cores for parallel fitness evaluation. This is the</span>
-                           <span class="c">#   single biggest speed lever for Module 4b.</span>
+    n_cpus=<span class="num">8</span>,              <span class="c"># ← CPU cores for parallel fitness evaluation. Only used</span>
+                           <span class="c">#   when ga_mode="standard" — this is the single biggest</span>
+                           <span class="c">#   speed lever for that mode.</span>
                            <span class="c">#   Set to the number of cores your machine has:</span>
                            <span class="c">#   4  → laptop</span>
                            <span class="c">#   8  → standard workstation (recommended)</span>
@@ -1208,18 +1292,27 @@ df_hof, df_all = two_gene_combination.run(
                            <span class="c">#   10+ → diminishing returns beyond 10 for most datasets</span>
 )
 
-<span class="c"># View the best AND-gate pairs (both genes must be expressed on tumour cell)</span>
-and_pairs = df_hof[df_hof[<span class="str">"LogicGates"</span>] == <span class="str">"A &amp; B"</span>]
-print(<span class="str">"Top AND-gate pairs:"</span>); print(and_pairs.head(<span class="num">10</span>))
+<span class="c"># atlas="both" returns a dict; atlas="hpa"/"tabula" returns (df_hof, df_all)</span>
+<span class="kw">if</span> <span class="kw">isinstance</span>(result, <span class="kw">dict</span>):
+    df_rra = result[<span class="str">"rra"</span>]  <span class="c"># RRA-combined ranking — start here</span>
+    print(<span class="str">"Top RRA-ranked pairs (safe + effective in BOTH atlases):"</span>)
+    print(df_rra.head(<span class="num">10</span>))
+<span class="kw">else</span>:
+    df_hof, df_all = result
 
-<span class="c"># View the best NAND-gate pairs (tumour expresses A but NOT B —</span>
-<span class="c"># B acts as a "safety catch" to spare healthy cells that express B)</span>
-nand_pairs = df_hof[df_hof[<span class="str">"LogicGates"</span>] == <span class="str">"A &amp;! B"</span>]
-print(<span class="str">"Top NAND-gate pairs:"</span>); print(nand_pairs.head(<span class="num">10</span>))
+    <span class="c"># View the best AND-gate pairs (both genes must be expressed on tumour cell)</span>
+    and_pairs = df_hof[df_hof[<span class="str">"LogicGates"</span>] == <span class="str">"A &amp; B"</span>]
+    print(<span class="str">"Top AND-gate pairs:"</span>); print(and_pairs.head(<span class="num">10</span>))
 
-<span class="c"># Outputs:
-#   two_gene_hof.csv      → Hall of Fame — best unique pairs (start here)
-#   two_gene_complete.csv → every pair evaluated across all runs</span></pre>
+    <span class="c"># View the best NAND-gate pairs (tumour expresses A but NOT B —</span>
+    <span class="c"># B acts as a "safety catch" to spare healthy cells that express B)</span>
+    nand_pairs = df_hof[df_hof[<span class="str">"LogicGates"</span>] == <span class="str">"A &amp;! B"</span>]
+    print(<span class="str">"Top NAND-gate pairs:"</span>); print(nand_pairs.head(<span class="num">10</span>))
+
+<span class="c"># Outputs saved to:
+#   two_gene_complete_hpa.csv / two_gene_hof_hpa.csv       → per-atlas full results
+#   two_gene_complete_tabula.csv / two_gene_hof_tabula.csv → per-atlas full results
+#   final_candidates_RRA_HPA_Tabula.csv                    → RRA-combined ranking</span></pre>
     </div>
 
     <div class="callout callout-tip">
