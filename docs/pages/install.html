@@ -458,21 +458,26 @@ adata_preprocessed = preprocessing.run_preprocessing_pipeline(
 )
 
 <span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> one_gene_combination
-df = one_gene_combination.run(
-    hpa_path         = <span class="str">"/path/to/HPA_updated.h5ad"</span>,
+result_4a = one_gene_combination.run(
+    atlas            = <span class="str">"both"</span>,
+    hpa_path         = <span class="str">"/path/to/hpa_alltissues_geosketch_10k.h5ad"</span>,
+    tabula_path      = <span class="str">"/path/to/tabula_sapiens_alltissues_10k.h5ad"</span>,
     safety_threshold = 0.9,
 )
+df_rra_single = result_4a[<span class="str">"rra"</span>]  <span class="c"># RRA-combined single-gene ranking</span>
 
 <span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> two_gene_combination
-df_hof, df_all = two_gene_combination.run(
-    hpa_path         = <span class="str">"/path/to/HPA_updated.h5ad"</span>,
+result_4b = two_gene_combination.run(
+    atlas            = <span class="str">"both"</span>,
+    hpa_path         = <span class="str">"/path/to/hpa_alltissues_geosketch_10k.h5ad"</span>,
+    tabula_path      = <span class="str">"/path/to/tabula_sapiens_alltissues_10k.h5ad"</span>,
     safety_threshold = 0.9,
     pop_size         = 1000,
     Gmax             = 100,
     patience         = 50,
-    n_cpus           = 8,
     n_runs           = 10,
-)</pre>
+)
+df_rra_pairs = result_4b[<span class="str">"rra"</span>]  <span class="c"># RRA-combined two-gene ranking</span></pre>
     </div>
 
     <h3>Option B — One module per cell (recommended for tracking outputs)</h3>
@@ -521,29 +526,34 @@ adata_preprocessed = preprocessing.run_preprocessing_pipeline(
 
     <div class="code-wrap">
       <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
-      <pre><span class="c"># ── Cell 4 · Module 4 — Single-gene CAR-T Target Prediction ────────────────</span>
+      <pre><span class="c"># ── Cell 4 · Module 4a — Single-gene CAR-T Target Prediction ───────────────</span>
 <span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> one_gene_combination
 
-df = one_gene_combination.run(
-    hpa_path         = <span class="str">"/path/to/HPA_updated.h5ad"</span>,
+result_4a = one_gene_combination.run(
+    atlas            = <span class="str">"both"</span>,     <span class="c"># or "hpa" / "tabula" to use just one atlas</span>
+    hpa_path         = <span class="str">"/path/to/hpa_alltissues_geosketch_10k.h5ad"</span>,
+    tabula_path      = <span class="str">"/path/to/tabula_sapiens_alltissues_10k.h5ad"</span>,
     safety_threshold = 0.9,
-)</pre>
+)
+df_rra_single = result_4a[<span class="str">"rra"</span>]  <span class="c"># RRA-combined single-gene ranking</span></pre>
     </div>
 
     <div class="code-wrap">
       <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
-      <pre><span class="c"># ── Cell 5 · Module 5 — Two-gene CAR-T Combination Prediction ──────────────</span>
+      <pre><span class="c"># ── Cell 5 · Module 4b — Two-gene CAR-T Combination Prediction ─────────────</span>
 <span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> two_gene_combination
 
-df_hof, df_all = two_gene_combination.run(
-    hpa_path         = <span class="str">"/path/to/HPA_updated.h5ad"</span>,
+result_4b = two_gene_combination.run(
+    atlas            = <span class="str">"both"</span>,     <span class="c"># or "hpa" / "tabula" to use just one atlas</span>
+    hpa_path         = <span class="str">"/path/to/hpa_alltissues_geosketch_10k.h5ad"</span>,
+    tabula_path      = <span class="str">"/path/to/tabula_sapiens_alltissues_10k.h5ad"</span>,
     safety_threshold = 0.9,
     pop_size         = 1000,
     Gmax             = 100,
     patience         = 50,
-    n_cpus           = 8,
     n_runs           = 10,
-)</pre>
+)
+df_rra_pairs = result_4b[<span class="str">"rra"</span>]  <span class="c"># RRA-combined two-gene ranking</span></pre>
     </div>
 
   </div>
