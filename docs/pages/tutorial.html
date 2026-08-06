@@ -756,9 +756,18 @@ result = one_gene_combination.run(
     safety_threshold = <span class="num">0.9</span>,
 )
 
-<span class="c"># atlas="both" returns a dict — the RRA-combined ranking is the headline result</span>
-df_rra = result[<span class="str">"rra"</span>]
-print(df_rra.head(<span class="num">20</span>))
+<span class="c"># atlas="both" returns a dict with per-atlas results AND the RRA-combined ranking</span>
+df_hpa    = result[<span class="str">"hpa"</span>]
+df_tabula = result[<span class="str">"tabula"</span>]
+df_rra    = result[<span class="str">"rra"</span>]
+
+print(<span class="str">"Top 10 — HPA only:"</span>);            print(df_hpa.sort_values(<span class="str">"Efficacy"</span>, ascending=<span class="kw">False</span>).head(<span class="num">10</span>))
+print(<span class="str">"Top 10 — Tabula Sapiens only:"</span>); print(df_tabula.sort_values(<span class="str">"Efficacy"</span>, ascending=<span class="kw">False</span>).head(<span class="num">10</span>))
+print(<span class="str">"Top 10 — RRA-combined:"</span>);        print(df_rra.head(<span class="num">10</span>))
+
+<span class="c"># Only have (or only want) one atlas? Set atlas="hpa" or atlas="tabula" instead —
+# this skips RRA and returns a single DataFrame, same as before RRA existed:
+#   df = one_gene_combination.run(atlas="hpa", hpa_path="...", safety_threshold=0.9)</span>
 
 <span class="c"># Outputs saved to:
 #   single_gene_results_hpa.csv / single_gene_results_tabula.csv   → per-atlas results
@@ -812,10 +821,18 @@ result = two_gene_combination.run(
     n_runs           = <span class="num">10</span>,
 )
 
-<span class="c"># atlas="both" returns a dict — the RRA-combined ranking is the headline result</span>
-df_rra = result[<span class="str">"rra"</span>]
-print(<span class="str">"Top RRA-ranked pairs (safe + effective in BOTH atlases):"</span>)
-print(df_rra.head(<span class="num">10</span>))
+<span class="c"># atlas="both" returns a dict with per-atlas results AND the RRA-combined ranking</span>
+df_hof_hpa,    df_all_hpa    = result[<span class="str">"hpa"</span>]
+df_hof_tabula, df_all_tabula = result[<span class="str">"tabula"</span>]
+df_rra                       = result[<span class="str">"rra"</span>]
+
+print(<span class="str">"Top 10 — HPA only:"</span>);            print(df_hof_hpa.head(<span class="num">10</span>))
+print(<span class="str">"Top 10 — Tabula Sapiens only:"</span>); print(df_hof_tabula.head(<span class="num">10</span>))
+print(<span class="str">"Top 10 — RRA-combined:"</span>);        print(df_rra.head(<span class="num">10</span>))
+
+<span class="c"># Only have (or only want) one atlas? Set atlas="hpa" or atlas="tabula" instead —
+# this skips RRA and returns (df_hof, df_all) as a tuple, same as before RRA existed:
+#   df_hof, df_all = two_gene_combination.run(atlas="hpa", hpa_path="...", ...)</span>
 
 <span class="c"># Outputs saved to:
 #   two_gene_complete_hpa.csv / two_gene_hof_hpa.csv       → per-atlas full results
@@ -1199,15 +1216,38 @@ result = one_gene_combination.run(
 
 <span class="c"># atlas="both" returns a dict; atlas="hpa"/"tabula" returns a single DataFrame</span>
 <span class="kw">if</span> <span class="kw">isinstance</span>(result, <span class="kw">dict</span>):
-    df_rra = result[<span class="str">"rra"</span>]  <span class="c"># RRA-combined ranking — start here</span>
-    print(df_rra.head(<span class="num">20</span>))
+    df_hpa    = result[<span class="str">"hpa"</span>]      <span class="c"># full results, HPA only</span>
+    df_tabula = result[<span class="str">"tabula"</span>]   <span class="c"># full results, Tabula Sapiens only</span>
+    df_rra    = result[<span class="str">"rra"</span>]      <span class="c"># RRA-combined ranking — the headline result</span>
+
+    print(<span class="str">"Top 10 — HPA only:"</span>)
+    print(df_hpa.sort_values(<span class="str">"Efficacy"</span>, ascending=<span class="kw">False</span>).head(<span class="num">10</span>))
+
+    print(<span class="str">"\nTop 10 — Tabula Sapiens only:"</span>)
+    print(df_tabula.sort_values(<span class="str">"Efficacy"</span>, ascending=<span class="kw">False</span>).head(<span class="num">10</span>))
+
+    print(<span class="str">"\nTop 10 — RRA-combined (safe + effective in BOTH atlases):"</span>)
+    print(df_rra.head(<span class="num">10</span>))
 <span class="kw">else</span>:
+    <span class="c"># atlas="hpa" or atlas="tabula" — single-atlas run, single DataFrame back</span>
     top = result[result[<span class="str">"Safety"</span>] &gt;= <span class="num">0.9</span>].sort_values(<span class="str">"Efficacy"</span>, ascending=<span class="kw">False</span>)
     print(top.head(<span class="num">20</span>))
 
 <span class="c"># Outputs saved to:
 #   single_gene_results_hpa.csv / single_gene_results_tabula.csv   → per-atlas results
 #   final_single_gene_candidates_RRA_HPA_Tabula.csv                → RRA-combined ranking</span></pre>
+    </div>
+
+    <div class="callout callout-tip">
+      <span class="callout-icon">💡</span>
+      <div><strong>Using only one atlas</strong> — if you only have one reference file downloaded, or only want to check safety against one atlas, set <code>atlas="hpa"</code> or <code>atlas="tabula"</code> and drop the other <code>*_path</code> argument. This skips RRA entirely and returns a single DataFrame, e.g.:
+      <pre style="margin-top:10px;"><span class="kw">df</span> = one_gene_combination.run(
+    atlas    = <span class="str">"hpa"</span>,
+    hpa_path = <span class="str">"/path/to/hpa_alltissues_geosketch_10k.h5ad"</span>,
+    safety_threshold = <span class="num">0.9</span>,
+)
+<span class="c"># Output: single_gene_results_hpa.csv</span></pre>
+      </div>
     </div>
 
     <!-- ── STEP 4b ── -->
@@ -1290,10 +1330,20 @@ result = two_gene_combination.run(
 
 <span class="c"># atlas="both" returns a dict; atlas="hpa"/"tabula" returns (df_hof, df_all)</span>
 <span class="kw">if</span> <span class="kw">isinstance</span>(result, <span class="kw">dict</span>):
-    df_rra = result[<span class="str">"rra"</span>]  <span class="c"># RRA-combined ranking — start here</span>
-    print(<span class="str">"Top RRA-ranked pairs (safe + effective in BOTH atlases):"</span>)
+    df_hof_hpa,    df_all_hpa    = result[<span class="str">"hpa"</span>]      <span class="c"># full results, HPA only</span>
+    df_hof_tabula, df_all_tabula = result[<span class="str">"tabula"</span>]   <span class="c"># full results, Tabula Sapiens only</span>
+    df_rra                       = result[<span class="str">"rra"</span>]      <span class="c"># RRA-combined ranking — the headline result</span>
+
+    print(<span class="str">"Top 10 — HPA only:"</span>)
+    print(df_hof_hpa.head(<span class="num">10</span>))
+
+    print(<span class="str">"\nTop 10 — Tabula Sapiens only:"</span>)
+    print(df_hof_tabula.head(<span class="num">10</span>))
+
+    print(<span class="str">"\nTop 10 — RRA-combined (safe + effective in BOTH atlases):"</span>)
     print(df_rra.head(<span class="num">10</span>))
 <span class="kw">else</span>:
+    <span class="c"># atlas="hpa" or atlas="tabula" — single-atlas run, (df_hof, df_all) back</span>
     df_hof, df_all = result
 
     <span class="c"># View the best AND-gate pairs (both genes must be expressed on tumour cell)</span>
@@ -1309,6 +1359,19 @@ result = two_gene_combination.run(
 #   two_gene_complete_hpa.csv / two_gene_hof_hpa.csv       → per-atlas full results
 #   two_gene_complete_tabula.csv / two_gene_hof_tabula.csv → per-atlas full results
 #   final_candidates_RRA_HPA_Tabula.csv                    → RRA-combined ranking</span></pre>
+    </div>
+
+    <div class="callout callout-tip">
+      <span class="callout-icon">💡</span>
+      <div><strong>Using only one atlas</strong> — same idea as Module 4a: set <code>atlas="hpa"</code> or <code>atlas="tabula"</code> and drop the other <code>*_path</code> argument. This skips the second GA run and RRA entirely, and <code>run()</code> returns a plain <code>(df_hof, df_all)</code> tuple, e.g.:
+      <pre style="margin-top:10px;">df_hof, df_all = two_gene_combination.run(
+    atlas    = <span class="str">"hpa"</span>,
+    hpa_path = <span class="str">"/path/to/hpa_alltissues_geosketch_10k.h5ad"</span>,
+    safety_threshold = <span class="num">0.9</span>,
+    pop_size = <span class="num">1000</span>, Gmax = <span class="num">100</span>, patience = <span class="num">50</span>, n_runs = <span class="num">10</span>,
+)
+<span class="c"># Outputs: two_gene_complete_hpa.csv, two_gene_hof_hpa.csv</span></pre>
+      </div>
     </div>
 
     <div class="callout callout-tip">
