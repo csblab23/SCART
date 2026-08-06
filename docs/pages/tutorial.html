@@ -786,12 +786,12 @@ print(df_rra.head(<span class="num">20</span>))
           <tr><td><code>safety_threshold</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">0.9</span></td><td>Same as Module 4a — applied as the GA fitness cutoff inside each atlas's own search.</td></tr>
           <tr><td><code>rra_efficacy_threshold</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">0.7</span></td><td>Only used when <code>atlas="both"</code>. Same meaning as Module 4a.</td></tr>
           <tr><td><code>rra_safety_threshold</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">0.9</span></td><td>Only used when <code>atlas="both"</code>. Same meaning as Module 4a.</td></tr>
-          <tr><td><code>ga_mode</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">"standard"</span></td><td><code>"standard"</code> — the original single-population GA (recommended default). <code>"island"</code> — an alternative island-model search (gate-quota seeding, ring migration, SBX crossover) that explores gene space more thoroughly but runs slower. See the <a href="algorithm.html">Genetic Algorithm page</a> for details.</td></tr>
-          <tr><td><code>pop_size</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">1000</span></td><td>Number of gene pairs evaluated per generation. Larger = more thorough search but slower.</td></tr>
+          <tr><td><code>pop_size</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">1000</span></td><td>Total population size per seed, split evenly across the islands. Larger = more thorough search but slower.</td></tr>
           <tr><td><code>Gmax</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">100</span></td><td>Maximum number of generations the algorithm runs.</td></tr>
           <tr><td><code>patience</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">50</span></td><td>Early stop if no improvement for N generations.</td></tr>
-          <tr><td><code>n_cpus</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">1</span></td><td>CPU cores for parallel evaluation. Only used when <code>ga_mode="standard"</code>. Set to the number of cores available to you.</td></tr>
-          <tr><td><code>n_runs</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">10</span></td><td>Independent GA runs with different random seeds. More runs = more robust results.</td></tr>
+          <tr><td><code>n_runs</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">10</span></td><td>Independent GA runs (different random seeds), run in parallel via joblib and combined afterward. More runs = more robust results.</td></tr>
+          <tr><td><code>n_jobs</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">None</span></td><td>Parallel workers across seeds. Defaults to <code>n_runs</code> (one worker per seed) — lower this if <code>n_runs</code> exceeds your available CPU cores.</td></tr>
+          <tr><td><code>n_islands</code>, <code>migrate_interval</code>, <code>migrate_k</code>, <code>and_quota_frac</code>, <code>nand_quota_frac</code>, <code>gate_min_frac</code>, <code>mutpb</code>, <code>sbx_eta</code></td><td><span class="badge badge-optional">optional</span></td><td>see below</td><td>Island-model GA configuration — gate-quota population seeding, ring migration, gate-quota selection, and SBX crossover. Defaults match the reference script and work well for most runs; see the <a href="algorithm.html">Genetic Algorithm page</a> for what each one controls.</td></tr>
         </tbody>
       </table>
     </div>
@@ -801,17 +801,14 @@ print(df_rra.head(<span class="num">20</span>))
       <pre><span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> two_gene_combination
 
 <span class="c"># USER: replace the paths with the location of your Zenodo-downloaded atlas files</span>
-<span class="c"># USER: set n_cpus to the number of CPU cores on your machine</span>
 result = two_gene_combination.run(
     atlas            = <span class="str">"both"</span>,
     hpa_path         = <span class="str">"/path/to/hpa_alltissues_geosketch_10k.h5ad"</span>,
     tabula_path      = <span class="str">"/path/to/tabula_sapiens_alltissues_10k.h5ad"</span>,
     safety_threshold = <span class="num">0.9</span>,
-    ga_mode          = <span class="str">"standard"</span>,
     pop_size         = <span class="num">1000</span>,
     Gmax             = <span class="num">100</span>,
     patience         = <span class="num">50</span>,
-    n_cpus           = <span class="num">8</span>,
     n_runs           = <span class="num">10</span>,
 )
 
@@ -892,11 +889,9 @@ result_4b = two_gene_combination.run(
     hpa_path         = <span class="str">"/path/to/hpa_alltissues_geosketch_10k.h5ad"</span>,
     tabula_path      = <span class="str">"/path/to/tabula_sapiens_alltissues_10k.h5ad"</span>,
     safety_threshold = <span class="num">0.9</span>,
-    ga_mode          = <span class="str">"standard"</span>,
     pop_size         = <span class="num">1000</span>,
     Gmax             = <span class="num">100</span>,
     patience         = <span class="num">50</span>,
-    n_cpus           = <span class="num">8</span>,
     n_runs           = <span class="num">10</span>,
 )
 df_rra_pairs = result_4b[<span class="str">"rra"</span>]  <span class="c"># RRA-combined two-gene ranking</span></pre>
@@ -1245,14 +1240,6 @@ result = two_gene_combination.run(
                            <span class="c">#   clear both thresholds in BOTH atlases to enter the</span>
                            <span class="c">#   final RRA-combined ranking. Defaults match Module 4a.</span>
 
-    ga_mode=<span class="str">"standard"</span>,     <span class="c"># ← Search strategy.</span>
-                           <span class="c">#   "standard" (default) → the original single-population</span>
-                           <span class="c">#   GA. Faster, well-tested, recommended for most runs.</span>
-                           <span class="c">#   "island" → island-model GA (gate-quota seeding, ring</span>
-                           <span class="c">#   migration, SBX crossover, rare-gene immigrant</span>
-                           <span class="c">#   injection). More thorough search of gene space, but</span>
-                           <span class="c">#   slower — see the Genetic Algorithm page for details.</span>
-
     pop_size=<span class="num">1000</span>,         <span class="c"># ← Number of gene pairs in each "generation" of the</span>
                            <span class="c">#   genetic algorithm. Think of it as the population size</span>
                            <span class="c">#   in an evolutionary search — larger means the algorithm</span>
@@ -1275,13 +1262,12 @@ result = two_gene_combination.run(
                            <span class="c">#   50  → standard balance (recommended)</span>
                            <span class="c">#   100 → keeps running longer, for thorough HPC runs</span>
 
-    n_cpus=<span class="num">8</span>,              <span class="c"># ← CPU cores for parallel fitness evaluation. Only used</span>
-                           <span class="c">#   when ga_mode="standard" — this is the single biggest</span>
-                           <span class="c">#   speed lever for that mode.</span>
-                           <span class="c">#   Set to the number of cores your machine has:</span>
-                           <span class="c">#   4  → laptop</span>
-                           <span class="c">#   8  → standard workstation (recommended)</span>
-                           <span class="c">#   16–40 → HPC node</span>
+    n_jobs=<span class="kw">None</span>,            <span class="c"># ← Parallel workers across seeds (joblib). Defaults to</span>
+                           <span class="c">#   n_runs (one worker per seed) — this is the single</span>
+                           <span class="c">#   biggest speed lever for Module 4b.</span>
+                           <span class="c">#   Lower this if n_runs exceeds your available CPU cores,</span>
+                           <span class="c">#   e.g. n_jobs=4 on a laptop, n_jobs=8 on a workstation,</span>
+                           <span class="c">#   n_jobs=16-40 on an HPC node.</span>
 
     n_runs=<span class="num">10</span>,             <span class="c"># ← Number of independent algorithm runs with different</span>
                            <span class="c">#   random starting points. Because genetic algorithms have</span>
@@ -1290,6 +1276,16 @@ result = two_gene_combination.run(
                            <span class="c">#   2   → quick test only</span>
                            <span class="c">#   10  → standard, reliable (recommended)</span>
                            <span class="c">#   10+ → diminishing returns beyond 10 for most datasets</span>
+
+    <span class="c"># --- Island-model GA configuration (defaults match the reference script) ---</span>
+    <span class="c"># n_islands=4,          # number of islands the population is split across</span>
+    <span class="c"># migrate_interval=10,  # generations between ring-migration events</span>
+    <span class="c"># migrate_k=10,         # individuals migrated per island per event</span>
+    <span class="c"># and_quota_frac=0.25,  # share of pop_size pre-seeded as "A & B" individuals</span>
+    <span class="c"># nand_quota_frac=0.25, # share of pop_size pre-seeded as "A &! B" individuals</span>
+    <span class="c"># gate_min_frac=0.20,   # minimum share of each gate type kept through selection</span>
+    <span class="c"># mutpb=0.30,           # mutation probability applied each generation</span>
+    <span class="c"># sbx_eta=2.0,          # SBX crossover distribution index</span>
 )
 
 <span class="c"># atlas="both" returns a dict; atlas="hpa"/"tabula" returns (df_hof, df_all)</span>
