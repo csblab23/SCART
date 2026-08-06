@@ -317,9 +317,9 @@
       <div class="download-box-icon">🛡️</div>
       <div class="download-box-body">
         <strong>Healthy-tissue reference atlases (for Module 4)</strong>
-        <p>Modules 4a and 4b assess safety — i.e., whether a candidate target gene is expressed in healthy tissues — against two independent healthy single-cell atlases: <code>hpa_alltissues_geosketch_10k.h5ad</code> (Human Protein Atlas) and <code>tabula_sapiens_alltissues_10k.h5ad</code> (Tabula Sapiens). These are <strong>not</strong> bundled with SCART or the GitHub repo — download both from the SCART Zenodo record.<br>
+        <p>Modules 4a and 4b assess safety — i.e., whether a candidate target gene is expressed in healthy tissues — against two independent healthy single-cell atlases: <code>hpa_alltissues_geosketch_10k.h5ad</code> (Human Protein Atlas) and <code>tabula_sapiens_alltissues_10k.h5ad</code> (Tabula Sapiens). These are <strong>not</strong> bundled with SCART or the GitHub repo — download whichever one(s) you plan to use from the SCART Zenodo record.<br>
         <a href="#" target="_blank">→ Download from Zenodo: (see SCART documentation for the record link)</a></p>
-        <p style="margin-top:8px;">You can use either atlas on its own, or both together — Module 4 defaults to running against both and combining the results with Robust Rank Aggregation (RRA). See <a href="#module4a">Module 4a</a> below.</p>
+        <p style="margin-top:8px;">You only need the file(s) for the atlas you're actually using — either one on its own is fine. Module 4 defaults to running against both and combining the results with Robust Rank Aggregation (RRA), but this is optional. See <a href="#module4a">Module 4a</a> below.</p>
       </div>
     </div>
 
@@ -730,6 +730,11 @@ print(adata_preprocessed.uns[<span class="str">"filtered_deg"</span>].head(<span
 
     <p>Module 4a scores every surface gene identified in Module 3 for two properties: <strong>Efficacy</strong> (how well the gene distinguishes tumour cells) and <strong>Safety</strong> (how absent the gene is from healthy tissue). Higher is better for both. Safety can be checked against either healthy atlas alone, or — recommended — against <strong>both independently</strong>, with the two ranked gene lists then combined via Robust Rank Aggregation (RRA) so a candidate only counts as "safe" once two independent references agree.</p>
 
+    <div class="callout callout-tip">
+      <span class="callout-icon">💡</span>
+      <div>You only need to download and supply the atlas file you're actually using. Set <code>atlas="hpa"</code> with just <code>hpa_path=</code>, or <code>atlas="tabula"</code> with just <code>tabula_path=</code> — the other path argument is not required and can be left out entirely. Both files (and both path arguments) are only needed when <code>atlas="both"</code>.</div>
+    </div>
+
     <div class="table-wrap">
       <table>
         <thead><tr><th>Parameter</th><th>Status</th><th>Default</th><th>What to change</th></tr></thead>
@@ -743,6 +748,9 @@ print(adata_preprocessed.uns[<span class="str">"filtered_deg"</span>].head(<span
         </tbody>
       </table>
     </div>
+
+    <div class="variant-label">Variant A — Using both atlases (recommended, default)</div>
+    <p>Runs against HPA and Tabula Sapiens independently, then combines the two ranked gene lists via Robust Rank Aggregation (RRA) — a gene only counts as "safe" once both independent references agree.</p>
 
     <div class="code-wrap">
       <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
@@ -765,13 +773,46 @@ print(<span class="str">"Top 10 — HPA only:"</span>);            print(df_hpa.
 print(<span class="str">"Top 10 — Tabula Sapiens only:"</span>); print(df_tabula.sort_values(<span class="str">"Efficacy"</span>, ascending=<span class="kw">False</span>).head(<span class="num">10</span>))
 print(<span class="str">"Top 10 — RRA-combined:"</span>);        print(df_rra.head(<span class="num">10</span>))
 
-<span class="c"># Only have (or only want) one atlas? Set atlas="hpa" or atlas="tabula" instead —
-# this skips RRA and returns a single DataFrame, same as before RRA existed:
-#   df = one_gene_combination.run(atlas="hpa", hpa_path="...", safety_threshold=0.9)</span>
-
 <span class="c"># Outputs saved to:
 #   single_gene_results_hpa.csv / single_gene_results_tabula.csv   → per-atlas results
 #   final_single_gene_candidates_RRA_HPA_Tabula.csv                → RRA-combined ranking (start here)</span></pre>
+    </div>
+
+    <div class="variant-label" style="margin-top:24px;">Variant B — Using a single atlas</div>
+    <p>If you only downloaded one reference file, or only want to check safety against one atlas, set <code>atlas="hpa"</code> or <code>atlas="tabula"</code> and supply only that atlas's path — the other <code>*_path</code> argument is not required. No second run, no RRA — <code>run()</code> returns a single <code>DataFrame</code>, exactly as it did before RRA existed.</p>
+
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">python — HPA only</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre><span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> one_gene_combination
+
+df = one_gene_combination.run(
+    atlas            = <span class="str">"hpa"</span>,       <span class="c"># ← only score safety against HPA</span>
+    hpa_path         = <span class="str">"/path/to/hpa_alltissues_geosketch_10k.h5ad"</span>,
+                                    <span class="c"># tabula_path is not needed and can be omitted</span>
+    safety_threshold = <span class="num">0.9</span>,
+)
+
+top = df[df[<span class="str">"Safety"</span>] &gt;= <span class="num">0.9</span>].sort_values(<span class="str">"Efficacy"</span>, ascending=<span class="kw">False</span>)
+print(top.head(<span class="num">20</span>))
+
+<span class="c"># Output: single_gene_results_hpa.csv</span></pre>
+    </div>
+
+    <div class="code-wrap" style="margin-top:16px;">
+      <div class="code-header"><span class="code-lang">python — Tabula Sapiens only</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre><span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> one_gene_combination
+
+df = one_gene_combination.run(
+    atlas            = <span class="str">"tabula"</span>,    <span class="c"># ← only score safety against Tabula Sapiens</span>
+    tabula_path      = <span class="str">"/path/to/tabula_sapiens_alltissues_10k.h5ad"</span>,
+                                    <span class="c"># hpa_path is not needed and can be omitted</span>
+    safety_threshold = <span class="num">0.9</span>,
+)
+
+top = df[df[<span class="str">"Safety"</span>] &gt;= <span class="num">0.9</span>].sort_values(<span class="str">"Efficacy"</span>, ascending=<span class="kw">False</span>)
+print(top.head(<span class="num">20</span>))
+
+<span class="c"># Output: single_gene_results_tabula.csv</span></pre>
     </div>
 
     <!-- ══════════════ MODULE 4b ══════════════ -->
@@ -784,6 +825,11 @@ print(<span class="str">"Top 10 — RRA-combined:"</span>);        print(df_rra.
     </div>
 
     <p>Module 4b extends the single-gene analysis to pairs of genes, evaluated with three logic gates: <code>A &amp; B</code> (both expressed), <code>A | B</code> (either expressed), and <code>A &amp;! B</code> (A expressed, B not expressed — NAND gate for safety). A genetic algorithm efficiently searches the combination space. Like Module 4a, it can score safety against either healthy atlas alone, or — recommended, and the default — against <strong>both independently</strong>, combining the two ranked candidate-pair lists via Robust Rank Aggregation (RRA).</p>
+
+    <div class="callout callout-tip">
+      <span class="callout-icon">💡</span>
+      <div>Same rule as Module 4a: you only need the atlas file you're actually using. Set <code>atlas="hpa"</code> with just <code>hpa_path=</code>, or <code>atlas="tabula"</code> with just <code>tabula_path=</code> — the other path argument isn't required. Both files are only needed when <code>atlas="both"</code>.</div>
+    </div>
 
     <div class="table-wrap">
       <table>
@@ -804,6 +850,9 @@ print(<span class="str">"Top 10 — RRA-combined:"</span>);        print(df_rra.
         </tbody>
       </table>
     </div>
+
+    <div class="variant-label">Variant A — Using both atlases (recommended, default)</div>
+    <p>Runs the full GA search independently against HPA and Tabula Sapiens, then combines the two ranked candidate-pair lists via Robust Rank Aggregation (RRA).</p>
 
     <div class="code-wrap">
       <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
@@ -830,14 +879,55 @@ print(<span class="str">"Top 10 — HPA only:"</span>);            print(df_hof_
 print(<span class="str">"Top 10 — Tabula Sapiens only:"</span>); print(df_hof_tabula.head(<span class="num">10</span>))
 print(<span class="str">"Top 10 — RRA-combined:"</span>);        print(df_rra.head(<span class="num">10</span>))
 
-<span class="c"># Only have (or only want) one atlas? Set atlas="hpa" or atlas="tabula" instead —
-# this skips RRA and returns (df_hof, df_all) as a tuple, same as before RRA existed:
-#   df_hof, df_all = two_gene_combination.run(atlas="hpa", hpa_path="...", ...)</span>
-
 <span class="c"># Outputs saved to:
 #   two_gene_complete_hpa.csv / two_gene_hof_hpa.csv       → per-atlas full results
 #   two_gene_complete_tabula.csv / two_gene_hof_tabula.csv → per-atlas full results
 #   final_candidates_RRA_HPA_Tabula.csv                    → RRA-combined ranking (start here)</span></pre>
+    </div>
+
+    <div class="variant-label" style="margin-top:24px;">Variant B — Using a single atlas</div>
+    <p>If you only downloaded one reference file, or only want to search against one atlas, set <code>atlas="hpa"</code> or <code>atlas="tabula"</code> and supply only that atlas's path. Only one GA search runs, no RRA — <code>run()</code> returns <code>(df_hof, df_all)</code> exactly as it did before RRA existed.</p>
+
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">python — HPA only</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre><span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> two_gene_combination
+
+df_hof, df_all = two_gene_combination.run(
+    atlas            = <span class="str">"hpa"</span>,       <span class="c"># ← only search against HPA</span>
+    hpa_path         = <span class="str">"/path/to/hpa_alltissues_geosketch_10k.h5ad"</span>,
+                                    <span class="c"># tabula_path is not needed and can be omitted</span>
+    safety_threshold = <span class="num">0.9</span>,
+    pop_size         = <span class="num">1000</span>,
+    Gmax             = <span class="num">100</span>,
+    patience         = <span class="num">50</span>,
+    n_runs           = <span class="num">10</span>,
+)
+
+and_pairs = df_hof[df_hof[<span class="str">"LogicGates"</span>] == <span class="str">"A &amp; B"</span>]
+print(<span class="str">"Top AND-gate pairs:"</span>); print(and_pairs.head(<span class="num">10</span>))
+
+<span class="c"># Outputs: two_gene_complete_hpa.csv, two_gene_hof_hpa.csv</span></pre>
+    </div>
+
+    <div class="code-wrap" style="margin-top:16px;">
+      <div class="code-header"><span class="code-lang">python — Tabula Sapiens only</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre><span class="kw">from</span> SCART.gene_combination_predictor <span class="kw">import</span> two_gene_combination
+
+df_hof, df_all = two_gene_combination.run(
+    atlas            = <span class="str">"tabula"</span>,    <span class="c"># ← only search against Tabula Sapiens</span>
+    tabula_path      = <span class="str">"/path/to/tabula_sapiens_alltissues_10k.h5ad"</span>,
+                                    <span class="c"># hpa_path is not needed and can be omitted</span>
+    safety_threshold = <span class="num">0.9</span>,
+    pop_size         = <span class="num">1000</span>,
+    Gmax             = <span class="num">100</span>,
+    patience         = <span class="num">50</span>,
+    n_runs           = <span class="num">10</span>,
+)
+
+and_pairs = df_hof[df_hof[<span class="str">"LogicGates"</span>] == <span class="str">"A &amp; B"</span>]
+print(<span class="str">"Top AND-gate pairs:"</span>); print(and_pairs.head(<span class="num">10</span>))
+
+<span class="c"># Outputs: two_gene_complete_tabula.csv, two_gene_hof_tabula.csv</span></pre>
     </div>
 
     <!-- ═══════════════════════════════════════════════════════════════════
