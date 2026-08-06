@@ -47,23 +47,15 @@ argument of run():
                      ranked candidate lists are then combined with Robust
                      Rank Aggregation (RRA) into a single consensus ranking.
 
-GA modes
---------
-run(..., ga_mode=...) selects the search strategy:
-
-  "standard" (default) — the module's original single-population GA
-      (_run_ga / _init_deap / _evaluate_fitness), completely unchanged.
-
-  "island" — an alternative strategy ported from a later, more elaborate
-      CAR-T GA script: gate-quota population seeding (a fixed share of the
-      starting population is pre-seeded as A&B / A&!B / open-gate
-      individuals), a 4-island model with periodic ring migration,
-      gate-quota tournament selection (guarantees a minimum share of each
-      gate type survives selection), SBX (simulated binary bounded)
-      crossover in place of one-point crossover, rare-gene immigrant
-      injection during the periodic diversity-injection step, and
-      per-seed parallelism via joblib (rather than per-generation
-      multiprocessing). See _run_ga_island() below.
+Genetic algorithm
+-----------------
+Pair search uses an island-model GA: gate-quota population seeding (a fixed
+share of the starting population is pre-seeded as A&B / A&!B / open-gate
+individuals), a multi-island model with periodic ring migration, gate-quota
+tournament selection (guarantees a minimum share of each gate type survives
+selection), SBX (simulated binary bounded) crossover, rare-gene immigrant
+injection during the periodic diversity-injection step, and per-seed
+parallelism via joblib. See _run_ga() below. There is no alternate GA mode.
 
 Fix applied
 -----------
@@ -75,7 +67,6 @@ import zipfile
 import urllib.request
 import logging
 import random
-import multiprocessing as mp
 
 import numpy as np
 import pandas as pd
@@ -378,67 +369,24 @@ def evaluate_gate(expression: str, A: np.ndarray, B: np.ndarray) -> np.ndarray:
     raise ValueError(f"Unsupported logic expression: {expression}")
 
 
-# Module-level matrices (set inside _run_single_atlas() before multiprocessing starts)
-_tumor_matrix   = None
-_healthy_matrix = None
+# Module-level state (set inside _run_single_atlas() before GA runs start)
 _gene_names     = None
 _n_genes        = None
 _safety_thresh  = 0.9
 _logic_gates    = LOGIC_GATES
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Genetic algorithm — island model with gate-quota seeding
+#
+# Ported directly from the user's reference CAR-T GA script: gate-quota
+# population seeding, a multi-island model with ring migration, gate-quota
+# tournament selection, SBX (simulated binary bounded) crossover, and
+# rare-gene immigrant injection during diversity-injection steps. This is
+# the module's only GA implementation — there is no alternate "simple" mode.
+# ─────────────────────────────────────────────────────────────────────────────
+
 toolbox = None
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# STANDARD GA (original — unchanged)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _init_deap(n_genes: int, safety_threshold: float):
-    global toolbox
-
-    if "FitnessMax" not in creator.__dict__:
-        creator.create("FitnessMax", base.Fitness, weights=(1.0,))
-    if "Individual" not in creator.__dict__:
-        creator.create("Individual", list, fitness=creator.FitnessMax)
-
-    toolbox = base.Toolbox()
-    toolbox.register("geneA",      random.randrange, n_genes)
-    toolbox.register("geneB",      random.randrange, n_genes)
-    toolbox.register("gate",       random.randrange, len(LOGIC_GATES))
-    toolbox.register("individual", tools.initCycle, creator.Individual,
-                     (toolbox.geneA, toolbox.geneB, toolbox.gate), n=1)
-    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
-    toolbox.register("evaluate",   _evaluate_fitness)
-    toolbox.register("mate",       tools.cxOnePoint)
-    toolbox.register("mutate",     tools.mutUniformInt,
-                     low=[0, 0, 0],
-                     up=[n_genes - 1, n_genes - 1, len(LOGIC_GATES) - 1],
-                     indpb=0.2)
-    toolbox.register("select",     tools.selTournament, tournsize=2)
-
-
-def _evaluate_fitness(individual):
-    geneA_idx, geneB_idx, gate_type_idx = individual
-    gate_type = _logic_gates[gate_type_idx]
-
-    A_tumor   = _tumor_matrix[:, geneA_idx]
-    B_tumor   = _tumor_matrix[:, geneB_idx]
-    A_healthy = _healthy_matrix[:, geneA_idx]
-    B_healthy = _healthy_matrix[:, geneB_idx]
-
-    output_tumor   = evaluate_gate(gate_type, A_tumor,   B_tumor)
-    output_healthy = evaluate_gate(gate_type, A_healthy, B_healthy)
-
-    efficacy = np.sum(output_tumor)        / len(output_tumor)
-    safety   = np.sum(output_healthy == 0) / len(output_healthy)
-
-    individual.safety = safety
-    return (efficacy if safety >= _safety_thresh else 0,)
-
-
-def _evaluate_individual_mp(ind):
-    ind.fitness.values = toolbox.evaluate(ind)
-    return ind
 
 
 def _normalize_gene_pair(genes):
@@ -455,93 +403,15 @@ def _postprocess_results(df: pd.DataFrame) -> pd.DataFrame:
     return df.drop(columns=["GenePairKey"]).reset_index(drop=True)
 
 
-def _run_ga(seed, pop_size, Gmax, Ggap, Rrep, patience, n_cpus):
-    random.seed(seed)
-    np.random.seed(seed)
-
-    pop = toolbox.population(n=pop_size)
-    hof = tools.HallOfFame(100)
-
-    max_fitness                 = 0
-    generations_without_improve = 0
-    all_results                 = []
-
-    for gen in range(Gmax):
-        offspring = algorithms.varAnd(pop, toolbox, cxpb=0.5, mutpb=0.2)
-
-        with mp.Pool(processes=n_cpus) as pool:
-            offspring = pool.map(_evaluate_individual_mp, offspring)
-
-        if gen > 0 and gen % Ggap == 0:
-            n_replace = int(Rrep * pop_size)
-            offspring.sort(key=lambda ind: ind.fitness.values[0])
-            for i in range(n_replace):
-                new_ind = toolbox.individual()
-                new_ind.fitness.values = toolbox.evaluate(new_ind)
-                gA, gB, gT = new_ind
-                new_ind.generation = gen
-                new_ind.seed_value = seed
-                all_results.append([
-                    gen, LOGIC_GATES[gT],
-                    [_gene_names[gA], _gene_names[gB]],
-                    new_ind.fitness.values[0],
-                    getattr(new_ind, "safety", None),
-                    seed,
-                ])
-                offspring[i] = new_ind
-
-        for ind in offspring:
-            gA, gB, gT = ind
-            ind.generation = gen
-            ind.seed_value = seed
-            all_results.append([
-                gen, LOGIC_GATES[gT],
-                [_gene_names[gA], _gene_names[gB]],
-                ind.fitness.values[0],
-                getattr(ind, "safety", None),
-                seed,
-            ])
-
-        pop = toolbox.select(offspring, k=pop_size)
-        hof.update(pop)
-
-        print(f"\rProgress: {(gen+1)/Gmax*100:.1f}% completed", end="")
-
-        current_best = max(ind.fitness.values[0] for ind in pop)
-        if current_best > max_fitness:
-            max_fitness                 = current_best
-            generations_without_improve = 0
-        else:
-            generations_without_improve += 1
-
-        if generations_without_improve >= patience:
-            print(f"\nEarly stopping at generation {gen}")
-            break
-
-    return hof, all_results
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ISLAND-MODEL GA  (NEW, optional — ga_mode="island")
-#
-# Ported from a later, more elaborate CAR-T GA script that added: gate-quota
-# population seeding, a multi-island model with ring migration, gate-quota
-# tournament selection, SBX crossover, and rare-gene immigrant injection
-# during diversity-injection steps. This is a self-contained alternative to
-# _run_ga() above — nothing in the "STANDARD GA" section above was touched.
-# ─────────────────────────────────────────────────────────────────────────────
-
-_island_toolbox = None
-
-# Per-gene contiguous column caches (island mode only). Precomputing these
-# avoids the strided-slice cache-miss penalty seen on very large matrices
-# when indexing _tumor_matrix[:, i] repeatedly inside the GA's hot loop.
+# Per-gene contiguous column caches. Precomputing these avoids the
+# strided-slice cache-miss penalty seen on very large matrices when
+# indexing a 2D matrix column-wise repeatedly inside the GA's hot loop.
 _tumor_cols   = None
 _healthy_cols = None
 
 
-def _init_deap_island(n_genes: int):
-    global _island_toolbox
+def _init_deap(n_genes: int):
+    global toolbox
 
     if "FitnessMax" not in creator.__dict__:
         creator.create("FitnessMax", base.Fitness, weights=(1.0,))
@@ -555,17 +425,17 @@ def _init_deap_island(n_genes: int):
     tb.register("individual", tools.initCycle, creator.Individual,
                  (tb.geneA, tb.geneB, tb.gate), n=1)
     tb.register("population", tools.initRepeat, list, tb.individual)
-    tb.register("evaluate",   _evaluate_fitness_island)
+    tb.register("evaluate",   _evaluate_fitness)
     tb.register("mutate",     tools.mutUniformInt,
                  low=[0, 0, 0],
                  up=[n_genes - 1, n_genes - 1, len(LOGIC_GATES) - 1],
                  indpb=0.2)
 
-    _island_toolbox = tb
+    toolbox = tb
     return tb
 
 
-def _evaluate_fitness_island(individual):
+def _evaluate_fitness(individual):
     geneA_idx, geneB_idx, gate_type_idx = individual
     gate_type = LOGIC_GATES[gate_type_idx]
 
@@ -584,12 +454,12 @@ def _evaluate_fitness_island(individual):
     return (efficacy if safety >= _safety_thresh else 0,)
 
 
-def _evaluate_individual_island(ind):
-    ind.fitness.values = _island_toolbox.evaluate(ind)
+def _evaluate_individual(ind):
+    ind.fitness.values = toolbox.evaluate(ind)
     return ind
 
 
-def _round_back_island(ind, low, up):
+def _round_back(ind, low, up):
     """Clamp and round SBX's float outputs back to valid integer gene/gate
     indices, in-place."""
     for i in range(3):
@@ -599,8 +469,8 @@ def _round_back_island(ind, low, up):
 def _cx_simulated_binary_bounded(ind1, ind2, low, up, eta=2.0):
     """SBX crossover with hard index bounds, rounded back to valid ints."""
     tools.cxSimulatedBinaryBounded(ind1, ind2, eta=eta, low=low, up=up)
-    _round_back_island(ind1, low, up)
-    _round_back_island(ind2, low, up)
+    _round_back(ind1, low, up)
+    _round_back(ind2, low, up)
     return ind1, ind2
 
 
@@ -622,7 +492,7 @@ def _init_islands(n_genes, n_islands, and_quota, nand_quota, open_quota):
         island_pop = []
 
         def make_ind(gate_idx, region=region):
-            ind = _island_toolbox.individual()
+            ind = toolbox.individual()
             ind[0] = random.choice(region)
             ind[1] = random.randrange(n_genes)
             while ind[1] == ind[0]:
@@ -635,7 +505,7 @@ def _init_islands(n_genes, n_islands, and_quota, nand_quota, open_quota):
         for _ in range(nand_quota // n_islands):
             island_pop.append(make_ind(gate_idx=2))    # "A & !B"
         for _ in range(open_quota // n_islands):
-            ind = _island_toolbox.individual()
+            ind = toolbox.individual()
             ind[0] = random.choice(region)
             ind[1] = random.randrange(n_genes)
             while ind[1] == ind[0]:
@@ -681,7 +551,7 @@ def _migrate_islands(islands, n_islands, migrate_k):
     migrants = []
     for island in islands:
         island.sort(key=lambda ind: ind.fitness.values[0], reverse=True)
-        migrants.append([_island_toolbox.clone(ind) for ind in island[:migrate_k]])
+        migrants.append([toolbox.clone(ind) for ind in island[:migrate_k]])
 
     for i, island in enumerate(islands):
         incoming = migrants[(i - 1) % n_islands]
@@ -690,7 +560,7 @@ def _migrate_islands(islands, n_islands, migrate_k):
     return islands
 
 
-def _run_ga_island(
+def _run_ga(
     seed, n_genes, island_size, n_islands,
     and_quota, nand_quota, open_quota,
     Gmax, Ggap, Rrep, patience,
@@ -711,7 +581,7 @@ def _run_ga_island(
 
     low = [0, 0, 0]
     up  = [n_genes - 1, n_genes - 1, len(LOGIC_GATES) - 1]
-    _island_toolbox.register("mate", _cx_simulated_binary_bounded, low=low, up=up, eta=sbx_eta)
+    toolbox.register("mate", _cx_simulated_binary_bounded, low=low, up=up, eta=sbx_eta)
 
     islands = _init_islands(n_genes, n_islands, and_quota, nand_quota, open_quota)
 
@@ -729,8 +599,8 @@ def _run_ga_island(
 
         for isl_idx, island in enumerate(islands):
 
-            offspring = algorithms.varAnd(island, _island_toolbox, cxpb=0.5, mutpb=mutpb)
-            offspring = list(map(_evaluate_individual_island, offspring))
+            offspring = algorithms.varAnd(island, toolbox, cxpb=0.5, mutpb=mutpb)
+            offspring = list(map(_evaluate_individual, offspring))
 
             for ind in offspring:
                 gA, gB, gT = ind
@@ -758,7 +628,7 @@ def _run_ga_island(
                 num_rare = num_replace // 2
 
                 for i in range(num_replace):
-                    new_ind = _island_toolbox.individual()
+                    new_ind = toolbox.individual()
 
                     if i < num_rare and rare_genes:
                         forced_gene = random.choice(rare_genes)
@@ -781,7 +651,7 @@ def _run_ga_island(
                                 while new_ind[0] == new_ind[1]:
                                     new_ind[0] = random.randrange(n_genes)
 
-                    new_ind.fitness.values = _island_toolbox.evaluate(new_ind)
+                    new_ind.fitness.values = toolbox.evaluate(new_ind)
                     gA, gB, gT = new_ind
                     all_results.append([
                         gen, LOGIC_GATES[gT],
@@ -822,8 +692,7 @@ def _run_ga_island(
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Single-atlas GA run  (factored out of run() so it can be executed once per
-# atlas when atlas="both"; dispatches to _run_ga (standard) or _run_ga_island
-# depending on ga_mode)
+# atlas when atlas="both")
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _run_single_atlas(
@@ -837,22 +706,21 @@ def _run_single_atlas(
     Ggap: int,
     Rrep: float,
     patience: int,
-    n_cpus: int,
     n_runs: int,
     output_dir: str,
-    ga_mode: str = "standard",
     n_islands: int = 4,
     migrate_interval: int = 10,
     migrate_k: int = 10,
     and_quota_frac: float = 0.25,
     nand_quota_frac: float = 0.25,
-    island_gate_min_frac: float = 0.20,
-    island_mutpb: float = 0.30,
+    gate_min_frac: float = 0.20,
+    mutpb: float = 0.30,
     sbx_eta: float = 2.0,
-    island_n_jobs: int = None,
+    n_jobs: int = None,
 ):
     """
-    Run the full GA search (all n_runs) against a single healthy atlas.
+    Run the full island-model GA search (all n_runs, one seed per run,
+    parallelised across seeds via joblib) against a single healthy atlas.
 
     Output CSVs are suffixed with the atlas label so that atlas="both" runs
     do not overwrite each other:
@@ -861,11 +729,8 @@ def _run_single_atlas(
 
     Returns (df_hof, df_all) for this atlas.
     """
-    global _tumor_matrix, _healthy_matrix, _gene_names, _n_genes, _safety_thresh
+    global _gene_names, _n_genes, _safety_thresh
     global _tumor_cols, _healthy_cols
-
-    if ga_mode not in ("standard", "island"):
-        raise ValueError(f"ga_mode must be 'standard' or 'island' — got {ga_mode!r}")
 
     print(f"\nLoading healthy matrix for atlas '{atlas_label}': {healthy_path}")
     healthy_matrix_full, healthy_genes, healthy_source = _load_healthy_matrix(
@@ -892,72 +757,48 @@ def _run_single_atlas(
     print(f"Tumour matrix  ({atlas_label}): {tumor_mat.shape[0]} cells x {len(common_genes)} genes")
     print(f"Healthy matrix ({atlas_label}): {healthy_mat.shape[0]} samples x {len(common_genes)} genes")
 
-    _tumor_matrix   = tumor_mat
-    _healthy_matrix = healthy_mat
-    _gene_names     = common_genes
-    _n_genes        = len(common_genes)
-    _safety_thresh  = safety_threshold
+    _gene_names    = common_genes
+    _n_genes       = len(common_genes)
+    _safety_thresh = safety_threshold
+
+    _tumor_cols   = [np.ascontiguousarray(tumor_mat[:, i])   for i in range(_n_genes)]
+    _healthy_cols = [np.ascontiguousarray(healthy_mat[:, i]) for i in range(_n_genes)]
+    _init_deap(_n_genes)
+
+    island_size = pop_size // n_islands
+    and_quota   = int(pop_size * and_quota_frac)
+    nand_quota  = int(pop_size * nand_quota_frac)
+    open_quota  = pop_size - and_quota - nand_quota
+
+    seed_list      = [42 + i for i in range(n_runs)]
+    resolved_n_jobs = n_jobs or n_runs
+
+    print(f"\n[{atlas_label}] Running island-model GA across {n_runs} seed(s) "
+          f"in parallel (n_jobs={resolved_n_jobs}, n_islands={n_islands}, "
+          f"island_size={island_size}, pop_size={pop_size})")
+
+    parallel_results = Parallel(n_jobs=resolved_n_jobs, backend="multiprocessing")(
+        delayed(_run_ga)(
+            seed=seed, n_genes=_n_genes, island_size=island_size,
+            n_islands=n_islands, and_quota=and_quota, nand_quota=nand_quota,
+            open_quota=open_quota, Gmax=Gmax, Ggap=Ggap, Rrep=Rrep,
+            patience=patience, gate_min_frac=gate_min_frac,
+            mutpb=mutpb, sbx_eta=sbx_eta,
+            migrate_interval=migrate_interval, migrate_k=migrate_k,
+        )
+        for seed in seed_list
+    )
 
     all_hof     = []
     all_results = []
-
-    if ga_mode == "standard":
-        _init_deap(_n_genes, safety_threshold)
-
-        for run_id in range(n_runs):
-            seed = 42 + run_id
-            print(f"\n[{atlas_label}] Starting run {run_id + 1}/{n_runs}  (seed={seed})")
-
-            hof, results = _run_ga(
-                seed=seed, pop_size=pop_size, Gmax=Gmax,
-                Ggap=Ggap, Rrep=Rrep, patience=patience, n_cpus=n_cpus,
-            )
-
-            df_run = pd.DataFrame(
-                results,
-                columns=["generation", "LogicGates", "Genes", "Efficacy", "Safety", "seed_value"]
-            )
-            df_run = df_run[["seed_value", "generation", "LogicGates", "Genes", "Efficacy", "Safety"]]
-            all_results.append(df_run)
-            all_hof.extend(hof)
-
-    else:  # ga_mode == "island"
-        _tumor_cols   = [np.ascontiguousarray(tumor_mat[:, i])   for i in range(_n_genes)]
-        _healthy_cols = [np.ascontiguousarray(healthy_mat[:, i]) for i in range(_n_genes)]
-        _init_deap_island(_n_genes)
-
-        island_size = pop_size // n_islands
-        and_quota   = int(pop_size * and_quota_frac)
-        nand_quota  = int(pop_size * nand_quota_frac)
-        open_quota  = pop_size - and_quota - nand_quota
-
-        seed_list = [42 + i for i in range(n_runs)]
-        n_jobs    = island_n_jobs or n_runs
-
-        print(f"\n[{atlas_label}] Running island-model GA across {n_runs} seed(s) "
-              f"in parallel (n_jobs={n_jobs}, n_islands={n_islands}, "
-              f"island_size={island_size}, pop_size={pop_size})")
-
-        parallel_results = Parallel(n_jobs=n_jobs, backend="multiprocessing")(
-            delayed(_run_ga_island)(
-                seed=seed, n_genes=_n_genes, island_size=island_size,
-                n_islands=n_islands, and_quota=and_quota, nand_quota=nand_quota,
-                open_quota=open_quota, Gmax=Gmax, Ggap=Ggap, Rrep=Rrep,
-                patience=patience, gate_min_frac=island_gate_min_frac,
-                mutpb=island_mutpb, sbx_eta=sbx_eta,
-                migrate_interval=migrate_interval, migrate_k=migrate_k,
-            )
-            for seed in seed_list
+    for hof, logbook, results in parallel_results:
+        df_run = pd.DataFrame(
+            results,
+            columns=["generation", "LogicGates", "Genes", "Efficacy", "Safety", "seed_value"]
         )
-
-        for hof, logbook, results in parallel_results:
-            df_run = pd.DataFrame(
-                results,
-                columns=["generation", "LogicGates", "Genes", "Efficacy", "Safety", "seed_value"]
-            )
-            df_run = df_run[["seed_value", "generation", "LogicGates", "Genes", "Efficacy", "Safety"]]
-            all_results.append(df_run)
-            all_hof.extend(hof)
+        df_run = df_run[["seed_value", "generation", "LogicGates", "Genes", "Efficacy", "Safety"]]
+        all_results.append(df_run)
+        all_hof.extend(hof)
 
     df_all       = pd.concat(all_results, ignore_index=True)
     df_all       = _postprocess_results(df_all)
@@ -1264,22 +1105,20 @@ def run(
     Ggap: int      = 10,
     Rrep: float    = 0.1,
     patience: int  = 50,
-    n_cpus: int    = 1,
     n_runs: int    = 10,
-    ga_mode: str   = "standard",
     n_islands: int = 4,
     migrate_interval: int = 10,
     migrate_k: int = 10,
     and_quota_frac: float = 0.25,
     nand_quota_frac: float = 0.25,
-    island_gate_min_frac: float = 0.20,
-    island_mutpb: float = 0.30,
+    gate_min_frac: float = 0.20,
+    mutpb: float = 0.30,
     sbx_eta: float = 2.0,
-    island_n_jobs: int = None,
+    n_jobs: int = None,
 ):
     """
-    Run two-gene logic-gate CAR-T target search via Genetic Algorithm,
-    against one or both healthy reference atlases.
+    Run two-gene logic-gate CAR-T target search via island-model Genetic
+    Algorithm, against one or both healthy reference atlases.
 
     Parameters
     ----------
@@ -1309,26 +1148,49 @@ def run(
         Per-atlas thresholds a candidate must clear in BOTH atlases to be
         eligible for Robust Rank Aggregation. Only used when atlas="both".
         Defaults 0.7 / 0.9 (matches the reference RRA script).
-    pop_size, Gmax, Ggap, Rrep, patience, n_cpus, n_runs :
-        Genetic-algorithm parameters (unchanged from previous versions;
-        n_cpus is only used by ga_mode="standard").
-    ga_mode : str
-        "standard" (default) - the module's original single-population GA.
-        "island"   - island-model GA with gate-quota seeding, ring
-                     migration, gate-quota selection, SBX crossover, and
-                     rare-gene immigrant injection. See _run_ga_island().
-    n_islands, migrate_interval, migrate_k, and_quota_frac, nand_quota_frac,
-    island_gate_min_frac, island_mutpb, sbx_eta, island_n_jobs :
-        Only used when ga_mode="island". and_quota_frac / nand_quota_frac
-        are the share of pop_size pre-seeded as A&B / A&!B individuals
-        (remainder is open/random-gate); defaults (0.25 / 0.25) match the
-        reference script's 250/250/500 split for pop_size=1000.
-        island_n_jobs defaults to n_runs (one worker per seed).
+    pop_size : int
+        Total population size per seed. Default 1000.
+    Gmax : int
+        Maximum generations per seed. Default 100.
+    Ggap : int
+        Interval (generations) between diversity-injection / rare-gene
+        immigrant steps. Default 10.
+    Rrep : float
+        Fraction of each island replaced during diversity injection.
+        Default 0.1.
+    patience : int
+        Early-stop a seed if its best fitness hasn't improved for this many
+        consecutive generations. Default 50.
+    n_runs : int
+        Independent GA runs (one seed each, seeds 42, 43, 44, ...), run in
+        parallel via joblib and combined afterward. Default 10.
+    n_islands : int
+        Number of islands the population is split across. Default 4.
+    migrate_interval : int
+        Generations between ring-migration events. Default 10.
+    migrate_k : int
+        Individuals migrated per island at each migration event. Default 10.
+    and_quota_frac, nand_quota_frac : float
+        Share of pop_size pre-seeded as "A & B" / "A & !B" individuals at
+        initialisation (remainder is open/random-gate). Defaults (0.25 /
+        0.25) match the reference script's 250/250/500 split for
+        pop_size=1000.
+    gate_min_frac : float
+        Minimum fraction of each gate type guaranteed to survive gate-quota
+        tournament selection. Default 0.20.
+    mutpb : float
+        Mutation probability applied by varAnd each generation. Default 0.30.
+    sbx_eta : float
+        Distribution index for SBX (simulated binary bounded) crossover.
+        Default 2.0.
+    n_jobs : int or None
+        Parallel workers across seeds (joblib, multiprocessing backend).
+        Defaults to n_runs (one worker per seed).
 
     Returns
     -------
     If atlas == "hpa" or "tabula":
-        (df_hof, df_all) — unchanged behaviour, for that single atlas.
+        (df_hof, df_all) — for that single atlas.
     If atlas == "both":
         dict with keys:
           "hpa"    -> (df_hof_hpa, df_all_hpa)
@@ -1348,29 +1210,29 @@ def run(
 
     ga_kwargs = dict(
         safety_threshold=safety_threshold, pop_size=pop_size, Gmax=Gmax,
-        Ggap=Ggap, Rrep=Rrep, patience=patience, n_cpus=n_cpus, n_runs=n_runs,
-        output_dir=output_dir, ga_mode=ga_mode, n_islands=n_islands,
+        Ggap=Ggap, Rrep=Rrep, patience=patience, n_runs=n_runs,
+        output_dir=output_dir, n_islands=n_islands,
         migrate_interval=migrate_interval, migrate_k=migrate_k,
         and_quota_frac=and_quota_frac, nand_quota_frac=nand_quota_frac,
-        island_gate_min_frac=island_gate_min_frac, island_mutpb=island_mutpb,
-        sbx_eta=sbx_eta, island_n_jobs=island_n_jobs,
+        gate_min_frac=gate_min_frac, mutpb=mutpb,
+        sbx_eta=sbx_eta, n_jobs=n_jobs,
     )
 
     if atlas == "hpa":
         healthy_path = _resolve_atlas_path("hpa", hpa_path)
-        print(f"\nAtlas selection: HPA only ({ATLAS_LABELS['hpa']})  |  ga_mode={ga_mode}")
+        print(f"\nAtlas selection: HPA only ({ATLAS_LABELS['hpa']})")
         return _run_single_atlas("hpa", healthy_path, adata_tumor, tumor_genes, **ga_kwargs)
 
     if atlas == "tabula":
         healthy_path = _resolve_atlas_path("tabula", tabula_path)
-        print(f"\nAtlas selection: Tabula Sapiens only ({ATLAS_LABELS['tabula']})  |  ga_mode={ga_mode}")
+        print(f"\nAtlas selection: Tabula Sapiens only ({ATLAS_LABELS['tabula']})")
         return _run_single_atlas("tabula", healthy_path, adata_tumor, tumor_genes, **ga_kwargs)
 
     # atlas == "both"
     hpa_healthy_path    = _resolve_atlas_path("hpa", hpa_path)
     tabula_healthy_path = _resolve_atlas_path("tabula", tabula_path)
 
-    print(f"\nAtlas selection: BOTH (independent runs + Robust Rank Aggregation)  |  ga_mode={ga_mode}")
+    print("\nAtlas selection: BOTH (independent runs + Robust Rank Aggregation)")
 
     print("\n" + "=" * 70)
     print(f"  Running GA search — ATLAS 1/2: {ATLAS_LABELS['hpa']}")
