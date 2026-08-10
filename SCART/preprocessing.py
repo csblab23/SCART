@@ -109,11 +109,14 @@ FIX 12  New Step 8b (between the existing Step 8 DEG and Step 9 gene
         subsetting): calls run_cancer_composition_step() (defined further
         down in this same file) on a full-gene-space snapshot of the
         malignant cells (captured right after Step 5, before Step 7's
-        surfaceome subsetting) against the SAME healthy reference h5ad
-        already used for SCEVAN (or a separately supplied one). This
-        Harmony-integrates tumor vs. healthy, saves before/after UMAP QC
-        plots, and computes a per-gene Cancer Composition Score
-        (Tumor_Z - Healthy_Z on % cells expressing).
+        surfaceome subsetting) against reference_h5ad — the SAME single
+        Tabula Sapiens h5ad the user already supplies for SCEVAN. There is
+        deliberately no separate healthy-reference argument: reference_h5ad
+        is the one h5ad this whole module takes from the user, reused
+        wherever a healthy reference is needed. This Harmony-integrates
+        tumor vs. healthy, saves before/after UMAP QC plots, and computes a
+        per-gene Cancer Composition Score (Tumor_Z - Healthy_Z on % cells
+        expressing).
 FIX 13  Step 9's gene subsetting is now a 3-way intersection between THREE
         INDEPENDENT, PARALLEL criteria (none gates the others beforehand):
             {DEG-passing genes (Step 8, log2FC / pvals_adj, full gene space)}
@@ -1264,9 +1267,11 @@ def run_preprocessing_pipeline(
     scevan_par_cores=1,
     scevan_subclones=False,
     scevan_batch_size=3000,
-    # CLAUDE EDIT — Step 8b (Cancer Composition Score) parameters
+    # CLAUDE EDIT — Step 8b (Cancer Composition Score) parameters.
+    # No separate healthy-reference path here on purpose: reference_h5ad
+    # (already required above, for SCEVAN) is the ONE h5ad the user supplies
+    # for this whole module — it's reused as the healthy reference here too.
     run_cancer_composition=True,
-    healthy_reference_h5ad=None,
     cc_score_threshold=0.5,
     cc_n_top_genes=3000,
     cc_n_pcs=50,
@@ -1731,17 +1736,18 @@ def run_preprocessing_pipeline(
 
     # CLAUDE EDIT — STEP 8b: Cancer Composition Score (tumor vs. healthy
     # reference), Harmony-integrated, with before/after UMAP QC plots.
+    # Uses reference_h5ad directly — the same Tabula Sapiens file already
+    # required above for SCEVAN. No separate healthy-reference argument.
     cc_df    = None
     cc_genes = None
     cc_plot_paths = None
-    _cc_healthy_ref = healthy_reference_h5ad or reference_h5ad
+    _cc_healthy_ref = reference_h5ad
 
     if run_cancer_composition and _cc_healthy_ref is None:
         print(
-            "\nWarning: Step 8b skipped — no healthy_reference_h5ad (or "
-            "reference_h5ad) provided.\n"
-            "  Pass healthy_reference_h5ad= to enable the Cancer "
-            "Composition Score."
+            "\nWarning: Step 8b skipped — no reference_h5ad provided.\n"
+            "  Pass reference_h5ad= (the same Tabula Sapiens file used for "
+            "SCEVAN) to enable the Cancer Composition Score."
         )
     elif run_cancer_composition:
         try:
