@@ -681,7 +681,7 @@ print(adata.obs[<span class="str">"popv_majority_vote_prediction"</span>].value_
 
     <div class="callout callout-tip">
       <span class="callout-icon">💡</span>
-      <div><strong>New: Cancer Composition Score step</strong> — in addition to the standard DEG test, Module 3 now also Harmony-integrates your malignant cells with a healthy reference dataset and computes a per-gene "Cancer Composition Score" (how much more a gene is detected in tumour cells vs. healthy cells, expressed as a difference of z-scores). Genes are only kept in the final output if they pass this score <strong>and</strong> the DEG test <strong>and</strong> are on the surfaceome list — not any one of the three alone. This step reuses <code>reference_h5ad</code> by default, so no extra file is required unless you want a different healthy reference. It also saves a before/after UMAP plot (unintegrated vs. Harmony-integrated) so you can visually confirm the integration worked.</div>
+      <div><strong>New: Cancer Composition Score step</strong> — in addition to the standard DEG test, Module 3 now also Harmony-integrates your malignant cells with a healthy reference dataset and computes a per-gene "Cancer Composition Score" (how much more a gene is detected in tumour cells vs. healthy cells, expressed as a difference of z-scores). Genes are only kept in the final output if they pass this score <strong>and</strong> the DEG test <strong>and</strong> are on the surfaceome list — not any one of the three alone. This step always reuses the same <code>reference_h5ad</code> you already provide above — there's no separate file to download or path to configure. It also saves a before/after UMAP plot (unintegrated vs. Harmony-integrated) so you can visually confirm the integration worked.</div>
     </div>
 
     <div class="table-wrap">
@@ -696,8 +696,7 @@ print(adata.obs[<span class="str">"popv_majority_vote_prediction"</span>].value_
           <tr><td><code>scevan_par_cores</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">1</span></td><td>CPU cores for SCEVAN. Set to the number of cores available on your machine to speed things up.</td></tr>
           <tr><td><code>scevan_batch_size</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">3000</span></td><td>Cells processed per SCEVAN batch. Lower if you run out of memory.</td></tr>
           <tr><td><code>scevan_organism</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">"human"</span></td><td>Set to <code>"mouse"</code> for mouse data.</td></tr>
-          <tr><td><code>healthy_reference_h5ad</code></td><td><span class="badge badge-optional">optional</span></td><td>same as <code>reference_h5ad</code></td><td>Healthy reference for the Cancer Composition Score step. Defaults to whatever you pass for <code>reference_h5ad</code> — set this separately only if you want a different healthy dataset than the one used for SCEVAN.</td></tr>
-          <tr><td><code>run_cancer_composition</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">True</span></td><td>Whether to run the Harmony-integrated Cancer Composition Score step at all. Set <code>False</code> to skip it and fall back to DEG ∩ surfaceome only (the old Module 3 behaviour).</td></tr>
+          <tr><td><code>run_cancer_composition</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">True</span></td><td>Whether to run the Harmony-integrated Cancer Composition Score step at all — it uses the same <code>reference_h5ad</code> above, no separate file needed. Set <code>False</code> to skip it and fall back to DEG ∩ surfaceome only (the old Module 3 behaviour).</td></tr>
           <tr><td><code>cc_score_threshold</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">0.5</span></td><td>Minimum Cancer Composition Score (Tumour_Z − Healthy_Z) for a gene to pass this criterion. Lower = more genes pass; raise for stricter tumour-preferential selection.</td></tr>
           <tr><td><code>cc_n_top_genes</code>, <code>cc_n_pcs</code>, <code>cc_max_iter_harmony</code>, <code>cc_theta</code>, <code>cc_seed</code>, <code>cc_tumor_batch_key</code>, <code>cc_healthy_batch_key</code></td><td><span class="badge badge-optional">optional</span></td><td>see below</td><td>Harmony integration settings for the Cancer Composition step (HVG count, PCA dimensions, Harmony iterations/diversity penalty/seed, and batch columns). Defaults match <code>run_harmony_integration.py</code> and auto-detect batch columns — only change these if you know you need to.</td></tr>
         </tbody>
@@ -720,10 +719,7 @@ adata_preprocessed = preprocessing.run_preprocessing_pipeline(
     scevan_par_cores     = <span class="num">1</span>,
     scevan_subclones     = <span class="kw">False</span>,
     scevan_batch_size    = <span class="num">3000</span>,
-    <span class="c"># NEW — Cancer Composition Score step (runs by default, reuses reference_h5ad</span>
-    <span class="c"># as the healthy reference unless you set healthy_reference_h5ad= separately)</span>
-    run_cancer_composition = <span class="kw">True</span>,
-    cc_score_threshold     = <span class="num">0.5</span>,
+    cc_score_threshold    = <span class="num">0.5</span>,  <span class="c"># Cancer Composition Score threshold (runs automatically, reuses reference_h5ad)</span>
 )
 
 <span class="c"># Inspect top differentially expressed surface genes (Step 8 DEG only)</span>
@@ -1269,21 +1265,12 @@ adata_preprocessed = preprocessing.run_preprocessing_pipeline(
     <span class="c"># ── NEW: Cancer Composition Score (Step 8b) ──────────────────────────</span>
     <span class="c"># In addition to the DEG test above (malignant vs. the rest of the same</span>
     <span class="c"># sample), Module 3 now ALSO Harmony-integrates your malignant cells</span>
-    <span class="c"># with an external healthy reference and scores every gene by how much</span>
-    <span class="c"># more it's detected in tumour cells than healthy cells. The FINAL gene</span>
-    <span class="c"># list kept in the output is genes common to ALL THREE: DEG-passing ∩</span>
-    <span class="c"># Cancer-Composition-passing ∩ surfaceome list — not any one alone.</span>
-
-    run_cancer_composition=<span class="kw">True</span>,
-                           <span class="c"># ← Set False to skip this step entirely and fall back to the</span>
-                           <span class="c">#   old behaviour (DEG ∩ surfaceome only).</span>
-
-    healthy_reference_h5ad=<span class="kw">None</span>,
-                           <span class="c"># ← Healthy reference for this step. Leave as None to reuse</span>
-                           <span class="c">#   the same file you passed as reference_h5ad above (the</span>
-                           <span class="c">#   usual choice — no extra download needed). Only set this</span>
-                           <span class="c">#   if you want a DIFFERENT healthy dataset than the one used</span>
-                           <span class="c">#   for SCEVAN.</span>
+    <span class="c"># with reference_h5ad (the SAME file you already gave above — no second</span>
+    <span class="c"># file to download or configure) and scores every gene by how much more</span>
+    <span class="c"># it's detected in tumour cells than in that healthy reference. The</span>
+    <span class="c"># FINAL gene list kept in the output is genes common to ALL THREE:</span>
+    <span class="c"># DEG-passing ∩ Cancer-Composition-passing ∩ surfaceome list.</span>
+    <span class="c"># This runs automatically — nothing below is required to turn it on.</span>
 
     cc_score_threshold=<span class="num">0.5</span>,
                            <span class="c"># ← Minimum Cancer Composition Score (Tumour_Z − Healthy_Z)</span>
@@ -1292,8 +1279,10 @@ adata_preprocessed = preprocessing.run_preprocessing_pipeline(
                            <span class="c">#   1.0+ → stricter, fewer but more tumour-preferential genes</span>
                            <span class="c">#   0.0–0.3 → lenient, more candidates pass</span>
 
-    <span class="c"># --- Harmony integration settings for this step (defaults are fine for</span>
-    <span class="c">#     almost every run — only change if you know you need to) ---</span>
+    <span class="c"># --- Optional overrides for this step (defaults are fine for almost</span>
+    <span class="c">#     every run — only uncomment if you know you need to) ---</span>
+    <span class="c"># run_cancer_composition=True,  # set False to skip this step entirely</span>
+    <span class="c">#                                # and fall back to DEG ∩ surfaceome only</span>
     <span class="c"># cc_n_top_genes=3000,        # HVGs used to build the Harmony/UMAP embedding</span>
     <span class="c"># cc_n_pcs=50,                # PCA dimensions passed into Harmony</span>
     <span class="c"># cc_max_iter_harmony=10,     # Harmony's max clustering iterations</span>
