@@ -15,33 +15,26 @@ Step 6  DEG: malignant epithelial vs non-epithelial rest (surfaceome genes).
 Step 7  Binarise ONLY the malignant epithelial AnnData, store DEG, save.
 
 ═══════════════════════════════════════════════════════════════════════════════
-RAW COUNT HANDLING (input_type from Module 2)
+RAW COUNT HANDLING
 ═══════════════════════════════════════════════════════════════════════════════
 
-Module 2 (PopV) can be run with two input_type modes:
+CORRECTION: popv_annotation.py has no input_type parameter and no log1p
+mode — it only accepts raw integer counts. _set_raw_counts_in_X() routes
+counts into .X (layers['counts'] -> 'raw_counts' -> 'scvi_counts', reference
+side also checks 'decontXcounts' first), and _validate_raw_counts() then
+RAISES if the result looks log-normalised (any negative values, or mean
+between 0 and 2.0). So Module 2 always runs on raw counts, always snapshots
+them to layers['full_counts'] before HVG subsetting (_store_full_counts_layer),
+and always writes layers['counts'] (HVG-space) plus the full-gene sidecar
+full_counts_for_module3.h5ad in its output. There is no partial/log1p path
+to handle here.
 
-  input_type='raw'   → all 8 methods run; Module 2 saves layers['counts']
-                       in final_popv_annotated.h5ad (original integer counts
-                       subsetted to 4000 HVGs, restored by popv_annotation.py).
-
-  input_type='log1p' → only CELLTYPIST runs; .X was already log-normalised
-                       when passed to Module 2; NO raw counts layer is saved
-                       because Module 2 never had integer counts to snapshot.
-
-This module handles both cases via _get_raw_counts_from_adata():
-
-  Priority order for extracting raw counts from adata_epi / adata_rest:
-    1. layers['counts']      ← written by updated popv_annotation.py (raw mode)
-    2. layers['raw_counts']  ← alternate name
-    3. layers['scvi_counts'] ← scVI internal counts (less preferred)
-    4. adata.raw.X           ← legacy path
-    5. adata.X               ← last resort; may be log1p — a WARNING is logged
-
-  If only log1p data is available (input_type='log1p' path), steps that
-  REQUIRE raw counts (QC, CNA, scMalignantFinder normalisation) will still
-  work because _build_fullgene_adata_for_scm() reads from the Module 1
-  tumor h5ad (Route A-rescue) which always has layers['counts'] with the
-  original integer counts from GEO.
+_get_raw_counts_from_adata() below still uses a priority-ordered fallback
+(layers['counts'] -> 'raw_counts' -> 'scvi_counts' -> adata.raw.X -> adata.X)
+purely as defensive coding — e.g. if PopV is bypassed via
+auto_run_popv(user_popv_prediction=...) with a hand-supplied h5ad that
+doesn't follow the same layer convention. Under the normal Module 1 -> 2 -> 3
+flow, layers['counts'] is always present and always raw.
 
 ═══════════════════════════════════════════════════════════════════════════════
 SCEVAN REFERENCE — HOW IT WORKS
@@ -107,6 +100,33 @@ FIX 11  Epithelial cell selection uses str.contains("epithelial cell")
         "lung epithelial cell", etc. are all captured correctly.
 QC FIX  QC thresholds read from adata.uns['qc_params'] (set by Module 1).
         If absent, QC is SKIPPED ENTIRELY.
+
+═══════════════════════════════════════════════════════════════════════════════
+CLAUDE EDIT — Step 8b + 3-way final gene intersection
+═══════════════════════════════════════════════════════════════════════════════
+
+FIX 12  New Step 8b (between the existing Step 8 DEG and Step 9 gene
+        subsetting): calls run_cancer_composition_step() (defined further
+        down in this same file) on a full-gene-space snapshot of the
+        malignant cells (captured right after Step 5, before Step 7's
+        surfaceome subsetting) against the SAME healthy reference h5ad
+        already used for SCEVAN (or a separately supplied one). This
+        Harmony-integrates tumor vs. healthy, saves before/after UMAP QC
+        plots, and computes a per-gene Cancer Composition Score
+        (Tumor_Z - Healthy_Z on % cells expressing).
+FIX 13  Step 9's gene subsetting is now a 3-way intersection between THREE
+        INDEPENDENT, PARALLEL criteria (none gates the others beforehand):
+            {DEG-passing genes (Step 8, log2FC / pvals_adj, full gene space)}
+          ∩ {Cancer_Composition >= cc_score_threshold (Step 8b, full gene space)}
+          ∩ {surfaceome genes (GESP list, Step 7 — list membership only)}
+        Step 7 no longer pre-restricts adata_mal/adata_rest to surfaceome
+        genes before DEG runs — Step 8 and Step 8b both operate on the full
+        common gene space; surfaceome is intersected in only at the end,
+        on equal footing with the other two.
+        adata.uns['final_gene_selection'] records each set's size and the
+        final intersection for traceability. If run_cancer_composition=False
+        or no healthy reference is available, this falls back to a 2-way
+        DEG ∩ surfaceome intersection.
 """
 
 import os
@@ -256,8 +276,10 @@ def _get_raw_counts_from_adata(adata, context=""):
         return np.array(X, dtype=np.float32)
 
     logger.warning(
-        f"{tag}No raw counts layer found — using adata.X. "
-        "If PopV was run with input_type='log1p', this may be log-normalised. "
+        f"{tag}No raw counts layer found — using adata.X as-is. "
+        "Under the normal Module 1->2->3 flow this shouldn't happen "
+        "(PopV always writes layers['counts']); this object may have "
+        "bypassed PopV or come from a hand-supplied h5ad. "
         "QC metrics and CNA tools require true raw counts. "
         "Consider providing tumor_h5ad= to load raw counts from Module 1."
     )
@@ -835,6 +857,391 @@ cat("Done!\\n")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# CLAUDE EDIT — Step 8b: Cancer Composition Score (tumor vs. healthy
+# reference), Harmony integration + before/after UMAP QC plot.
+# Merged inline (single-file Module 3) rather than a separate import.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Raw count extraction (local copy — kept self-contained, mirrors the
+# priority order used elsewhere in Module 3: layers['counts'] -> 'raw_counts'
+# -> 'scvi_counts' -> .raw.X -> .X)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _get_raw_counts(adata, context=""):
+    tag = f"[{context}] " if context else ""
+    for lyr in ("counts", "raw_counts", "scvi_counts"):
+        if lyr in adata.layers:
+            logger.info(f"{tag}Raw counts source: layers['{lyr}']")
+            X = adata.layers[lyr]
+            if sp.issparse(X):
+                X = X.toarray()
+            return np.array(X, dtype=np.float32)
+    if adata.raw is not None:
+        logger.info(f"{tag}Raw counts source: adata.raw.X ({adata.raw.n_vars} genes)")
+        X = adata.raw.X
+        if sp.issparse(X):
+            X = X.toarray()
+        return np.array(X, dtype=np.float32)
+    logger.warning(
+        f"{tag}No raw counts layer found on this object — using .X as-is. "
+        "If this is already log-normalised, the composition score will be wrong."
+    )
+    X = adata.X
+    if sp.issparse(X):
+        X = X.toarray()
+    return np.array(X, dtype=np.float32)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Batch-column auto-detection (mirrors popv_annotation.py's
+# _detect_query_batch_key, kept as a local copy for module independence)
+# ═══════════════════════════════════════════════════════════════════════════
+
+_DEFAULT_BATCH_CANDIDATES = [
+    "gsm_id", "sample", "batch", "Sample", "Batch", "patient",
+    "donor", "library", "Run", "run", "gse_id",
+]
+
+
+def _detect_batch_column(adata, user_key=None, candidates=None, context=""):
+    tag = f"[{context}] " if context else ""
+    candidates = candidates or _DEFAULT_BATCH_CANDIDATES
+
+    if user_key is not None:
+        if user_key not in adata.obs.columns:
+            raise ValueError(
+                f"{tag}batch key '{user_key}' not found in obs.\n"
+                f"Available columns: {list(adata.obs.columns)}"
+            )
+        logger.info(f"{tag}batch key (user-specified): '{user_key}'")
+        return user_key
+
+    for key in candidates:
+        if key in adata.obs.columns and adata.obs[key].nunique() >= 2:
+            logger.info(f"{tag}batch key auto-detected: '{key}' "
+                        f"({adata.obs[key].nunique()} unique values)")
+            return key
+
+    logger.warning(
+        f"{tag}No batch column auto-detected (checked {candidates}) — "
+        "all cells from this side will be treated as a single batch."
+    )
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Step 1 — build the combined tumor + healthy-reference AnnData
+# ═══════════════════════════════════════════════════════════════════════════
+
+def build_tumor_healthy_combined(
+    adata_tumor_fullgene,
+    healthy_reference_h5ad,
+    tumor_batch_key=None,
+    healthy_batch_key=None,
+):
+    """
+    Combine malignant epithelial (tumor) cells with an external healthy
+    reference on their common genes. Mirrors Ovarian_adata_prep.ipynb's
+    merge logic (Data_Type tagging, batch tagging, inner-join on common
+    genes, raw counts preserved in layers['counts']).
+    """
+    print(f"  Loading healthy reference: {healthy_reference_h5ad}")
+    adata_healthy = sc.read_h5ad(healthy_reference_h5ad)
+
+    common_genes = adata_tumor_fullgene.var_names.intersection(adata_healthy.var_names)
+    print(
+        f"  Tumor genes: {adata_tumor_fullgene.n_vars}  |  "
+        f"Healthy genes: {adata_healthy.n_vars}  |  Common genes: {len(common_genes)}"
+    )
+    if len(common_genes) == 0:
+        raise ValueError(
+            "No common genes between malignant cells and healthy reference.\n"
+            "Check both use the same gene identifier (HGNC symbol vs Ensembl ID)."
+        )
+
+    adata_t = adata_tumor_fullgene[:, common_genes].copy()
+    adata_h = adata_healthy[:, common_genes].copy()
+
+    adata_t.obs["Data_Type"] = "Tumor"
+    adata_h.obs["Data_Type"] = "Healthy"
+
+    t_key = _detect_batch_column(adata_t, tumor_batch_key, context="tumor")
+    h_key = _detect_batch_column(
+        adata_h, healthy_batch_key,
+        candidates=["donor"] + _DEFAULT_BATCH_CANDIDATES,
+        context="healthy",
+    )
+    adata_t.obs["batch"] = (adata_t.obs[t_key].astype(str) if t_key else "tumor_all")
+    adata_h.obs["batch"] = (adata_h.obs[h_key].astype(str) if h_key else "healthy_all")
+
+    raw_t = _get_raw_counts(adata_t, "tumor")
+    raw_h = _get_raw_counts(adata_h, "healthy")
+    adata_t.X = sp.csr_matrix(raw_t)
+    adata_h.X = sp.csr_matrix(raw_h)
+
+    adata_combined = sc.concat(
+        [adata_t, adata_h],
+        axis=0,
+        join="inner",
+        merge="same",
+        label=None,
+        keys=["Tumor", "Healthy"],
+        index_unique="-",
+    )
+    adata_combined.var_names_make_unique()
+    adata_combined.layers["counts"] = adata_combined.X.copy()
+
+    for col in adata_combined.obs.columns:
+        if adata_combined.obs[col].dtype == object:
+            adata_combined.obs[col] = adata_combined.obs[col].astype(str)
+
+    return adata_combined
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Step 2 — HVG selection + scaling, for the Harmony/PCA/UMAP embedding ONLY
+# (the Cancer Composition Score itself is computed later on the full
+# common-gene space preserved in adata_combined.layers['counts'])
+# ═══════════════════════════════════════════════════════════════════════════
+
+def prepare_for_harmony(adata_combined, n_top_genes=3000):
+    adata_hvg = adata_combined.copy()
+    sc.pp.normalize_total(adata_hvg, target_sum=1e4)
+    sc.pp.log1p(adata_hvg)
+
+    # FIX vs. original notebook: flavor='seurat_v3' requires raw counts.
+    # The notebook passed already-log1p'd .X (silent scanpy warning). Here
+    # we point it at the preserved raw-counts layer explicitly.
+    sc.pp.highly_variable_genes(
+        adata_hvg,
+        batch_key="batch",
+        flavor="seurat_v3",
+        n_top_genes=n_top_genes,
+        layer="counts",
+    )
+    print(f"  Selected {int(adata_hvg.var['highly_variable'].sum())} HVGs for Harmony/UMAP embedding")
+
+    adata_hvg = adata_hvg[:, adata_hvg.var["highly_variable"]].copy()
+    sc.pp.scale(adata_hvg, max_value=10)
+    return adata_hvg
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Step 3 — Harmony integration (ported from run_harmony_integration.py)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def run_harmony_integration(
+    adata_hvg,
+    batch_key="batch",
+    n_pcs=50,
+    max_iter_harmony=10,
+    theta=None,
+    seed=0,
+    svd_solver="arpack",
+):
+    import harmonypy
+
+    print(f"  Running PCA (n_comps={n_pcs}, svd_solver={svd_solver})")
+    sc.pp.pca(adata_hvg, n_comps=n_pcs, svd_solver=svd_solver)
+
+    harmony_kwargs = {"max_iter_harmony": max_iter_harmony, "random_state": seed}
+    if theta is not None:
+        harmony_kwargs["theta"] = theta
+
+    print(f"  Running Harmony (vars_use=['{batch_key}'], "
+          f"max_iter_harmony={max_iter_harmony}, theta={theta}, random_state={seed})")
+    ho = harmonypy.run_harmony(
+        adata_hvg.obsm["X_pca"], adata_hvg.obs, vars_use=[batch_key], **harmony_kwargs,
+    )
+
+    Z = np.asarray(ho.Z_corr)
+    if Z.shape == (adata_hvg.n_obs, n_pcs):
+        adata_hvg.obsm["X_pca_harmony"] = Z
+    elif Z.shape == (n_pcs, adata_hvg.n_obs):
+        adata_hvg.obsm["X_pca_harmony"] = Z.T
+    else:
+        raise RuntimeError(f"Unexpected Harmony output shape: {Z.shape}")
+
+    return adata_hvg
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Step 4 — UMAP before (unintegrated PCA) vs. after (Harmony) + QC plot
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _scatter(ax, coords, labels, title, legend=True):
+    import matplotlib.pyplot as plt
+
+    labels = pd.Categorical(pd.Series(labels).astype(str))
+    cmap = plt.get_cmap("tab20", max(len(labels.categories), 1))
+    for i, cat in enumerate(labels.categories):
+        mask = np.asarray(labels == cat)
+        ax.scatter(coords[mask, 0], coords[mask, 1], s=3, color=cmap(i), label=cat)
+    ax.set_title(title, fontsize=10)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    if legend and len(labels.categories) <= 15:
+        ax.legend(markerscale=4, fontsize=6, loc="best", frameon=False)
+
+
+def plot_umap_before_after(adata_hvg, save_dir, sample_name="cancer_composition"):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    print("  Computing UMAP — unintegrated (X_pca)")
+    sc.pp.neighbors(adata_hvg, use_rep="X_pca", key_added="unintegrated")
+    sc.tl.umap(adata_hvg, neighbors_key="unintegrated")
+    umap_unintegrated = adata_hvg.obsm["X_umap"].copy()
+
+    print("  Computing UMAP — Harmony-integrated (X_pca_harmony)")
+    sc.pp.neighbors(adata_hvg, use_rep="X_pca_harmony", key_added="harmony")
+    sc.tl.umap(adata_hvg, neighbors_key="harmony")
+    umap_harmony = adata_hvg.obsm["X_umap"].copy()
+
+    adata_hvg.obsm["X_umap_unintegrated"] = umap_unintegrated
+    adata_hvg.obsm["X_umap_harmony"]      = umap_harmony
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+    _scatter(axes[0, 0], umap_unintegrated, adata_hvg.obs["Data_Type"], "Unintegrated — Data_Type")
+    _scatter(axes[0, 1], umap_unintegrated, adata_hvg.obs["batch"],     "Unintegrated — batch", legend=False)
+    _scatter(axes[1, 0], umap_harmony,      adata_hvg.obs["Data_Type"], "Harmony-integrated — Data_Type")
+    _scatter(axes[1, 1], umap_harmony,      adata_hvg.obs["batch"],     "Harmony-integrated — batch", legend=False)
+    fig.suptitle("Tumor vs. Healthy Reference — before/after Harmony integration", fontsize=12)
+    fig.tight_layout()
+
+    pdf_path = os.path.join(save_dir, f"{sample_name}_umap_before_after.pdf")
+    png_path = os.path.join(save_dir, f"{sample_name}_umap_before_after.png")
+    fig.savefig(pdf_path, dpi=600)
+    fig.savefig(png_path, dpi=600)
+    plt.close(fig)
+
+    return pdf_path, png_path
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Step 5 — Cancer Composition Score (tumor-vs-healthy detection-rate proxy)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def compute_cancer_composition_score(adata_combined, save_dir=None, sample_name="cancer_composition"):
+    adata_cc = adata_combined.copy()
+    adata_cc.X = adata_cc.layers["counts"].copy()
+    sc.pp.normalize_total(adata_cc, target_sum=1e6)
+
+    tumor   = (adata_cc.obs["Data_Type"] == "Tumor").to_numpy()
+    healthy = (adata_cc.obs["Data_Type"] == "Healthy").to_numpy()
+    print(f"  Tumor cells: {tumor.sum()}  |  Healthy cells: {healthy.sum()}")
+
+    X = adata_cc.X
+    if sp.issparse(X):
+        tumor_pct   = np.asarray((X[tumor]   > 0).mean(axis=0)).ravel() * 100
+        healthy_pct = np.asarray((X[healthy] > 0).mean(axis=0)).ravel() * 100
+    else:
+        tumor_pct   = (X[tumor]   > 0).mean(axis=0) * 100
+        healthy_pct = (X[healthy] > 0).mean(axis=0) * 100
+
+    cancer_composition_preview = pd.DataFrame({
+        "Gene"        : adata_cc.var_names,
+        "Tumor_pct"   : tumor_pct,
+        "Healthy_pct" : healthy_pct,
+    })
+    print(cancer_composition_preview.head().to_string(index=False))
+
+    tumor_z   = (tumor_pct   - tumor_pct.mean())   / tumor_pct.std()
+    healthy_z = (healthy_pct - healthy_pct.mean()) / healthy_pct.std()
+    cc_score  = tumor_z - healthy_z
+
+    # Strict parity with script 3: scores are also written back onto the
+    # combined AnnData's .var (script 3 wrote adata.var[...] = ...), not
+    # just returned as a standalone dataframe.
+    adata_combined.var["Tumor_pct"]         = tumor_pct
+    adata_combined.var["Healthy_pct"]       = healthy_pct
+    adata_combined.var["Tumor_Z"]           = tumor_z
+    adata_combined.var["Healthy_Z"]         = healthy_z
+    adata_combined.var["Cancer_Composition"] = cc_score
+
+    cc_df = pd.DataFrame({
+        "Gene"        : adata_cc.var_names,
+        "Tumor_pct"   : tumor_pct,
+        "Healthy_pct" : healthy_pct,
+        "Tumor_Z"     : tumor_z,
+        "Healthy_Z"   : healthy_z,
+        "Cancer_Composition": cc_score,
+    })
+    cc_df["Cancer_Composition_Scaled"] = (
+        (cc_df["Cancer_Composition"] - cc_df["Cancer_Composition"].min())
+        / (cc_df["Cancer_Composition"].max() - cc_df["Cancer_Composition"].min())
+    )
+    cc_df = cc_df.sort_values("Cancer_Composition", ascending=False).reset_index(drop=True)
+
+    print("\n  Top 20 genes by Cancer_Composition (tumor-preferential):")
+    print(cc_df.head(20).to_string(index=False))
+
+    if save_dir is not None:
+        out_csv = os.path.join(save_dir, f"{sample_name}_cancer_composition_scores.csv")
+        cc_df.to_csv(out_csv, index=False)
+        print(f"\n  Cancer Composition scores (all genes) saved to: {out_csv}")
+
+    return cc_df
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Public entry point — called from preprocessing.py's Step 8b
+# ═══════════════════════════════════════════════════════════════════════════
+
+def run_cancer_composition_step(
+    adata_tumor_fullgene,
+    healthy_reference_h5ad,
+    save_dir,
+    tumor_batch_key=None,
+    healthy_batch_key=None,
+    n_top_genes=3000,
+    n_pcs=50,
+    max_iter_harmony=10,
+    theta=None,
+    seed=0,
+    cc_score_threshold=0.5,
+    sample_name="cancer_composition",
+):
+    """
+    Full sub-pipeline: build tumor+healthy combined object -> HVG select ->
+    Harmony integrate -> UMAP before/after -> Cancer Composition Score.
+
+    Returns
+    -------
+    cc_df    : pd.DataFrame, every common gene, sorted by Cancer_Composition desc.
+    cc_genes : set[str], genes with Cancer_Composition >= cc_score_threshold.
+    plot_paths : (pdf_path, png_path) for the before/after UMAP figure.
+    """
+    print("\n--- Step 8b: Cancer Composition Score (tumor vs. healthy reference) ---")
+    os.makedirs(save_dir, exist_ok=True)
+
+    adata_combined = build_tumor_healthy_combined(
+        adata_tumor_fullgene, healthy_reference_h5ad,
+        tumor_batch_key=tumor_batch_key, healthy_batch_key=healthy_batch_key,
+    )
+    print(f"  Combined: {adata_combined.n_obs} cells x {adata_combined.n_vars} common genes")
+    print(f"  Data_Type counts: {adata_combined.obs['Data_Type'].value_counts().to_dict()}")
+
+    adata_hvg = prepare_for_harmony(adata_combined, n_top_genes=n_top_genes)
+    adata_hvg = run_harmony_integration(
+        adata_hvg, batch_key="batch", n_pcs=n_pcs,
+        max_iter_harmony=max_iter_harmony, theta=theta, seed=seed,
+    )
+    plot_paths = plot_umap_before_after(adata_hvg, save_dir, sample_name=sample_name)
+    print(f"  UMAP (unintegrated vs Harmony-integrated) saved to:\n"
+          f"    {plot_paths[0]}\n    {plot_paths[1]}")
+
+    cc_df = compute_cancer_composition_score(adata_combined, save_dir=save_dir, sample_name=sample_name)
+
+    cc_genes = set(cc_df.loc[cc_df["Cancer_Composition"] >= cc_score_threshold, "Gene"])
+    print(f"\n  Genes with Cancer_Composition >= {cc_score_threshold}: {len(cc_genes)}")
+
+    return cc_df, cc_genes, plot_paths
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Main pipeline
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -857,6 +1264,17 @@ def run_preprocessing_pipeline(
     scevan_par_cores=1,
     scevan_subclones=False,
     scevan_batch_size=3000,
+    # CLAUDE EDIT — Step 8b (Cancer Composition Score) parameters
+    run_cancer_composition=True,
+    healthy_reference_h5ad=None,
+    cc_score_threshold=0.5,
+    cc_n_top_genes=3000,
+    cc_n_pcs=50,
+    cc_max_iter_harmony=10,
+    cc_theta=None,
+    cc_seed=0,
+    cc_tumor_batch_key=None,
+    cc_healthy_batch_key=None,
 ):
     print("\n========== START ==========\n")
 
@@ -951,11 +1369,13 @@ def run_preprocessing_pipeline(
     ]
     if _raw_layers_present:
         print(f"Raw count layers available: {_raw_layers_present} "
-              f"(PopV was run with input_type='raw')")
+              f"(expected — PopV always outputs raw counts)")
     else:
         print(
             "WARNING: No raw count layers found in PopV output.\n"
-            "  PopV was likely run with input_type='log1p'.\n"
+            "  This is unexpected under the normal Module 1->2->3 flow "
+            "(PopV always writes layers['counts']) — this h5ad may have "
+            "bypassed PopV or come from elsewhere.\n"
             "  Steps requiring raw counts (QC, SCEVAN, scMalignantFinder)\n"
             "  will attempt Route A-rescue from the Module 1 tumor h5ad.\n"
             f"  Provide tumor_h5ad= explicitly or place GSE*_tumor.h5ad in cwd."
@@ -1141,7 +1561,8 @@ def run_preprocessing_pipeline(
             if not _raw_layers_present:
                 print(
                     "\n  WARNING: No raw count layers in PopV output "
-                    "(input_type='log1p' path).\n"
+                    "(unexpected — PopV always outputs raw counts; this "
+                    "h5ad may have bypassed PopV).\n"
                     "  SCEVAN requires integer raw counts for reliable CNV inference.\n"
                     "  Results may be unreliable."
                 )
@@ -1225,6 +1646,12 @@ def run_preprocessing_pipeline(
             "Check scMalignantFinder model path and gene overlap."
         )
 
+    # CLAUDE EDIT — full-gene-space snapshot for Step 8b, taken right after
+    # Step 5, before Step 9's final gene subsetting touches adata_mal.
+    # (Step 7 no longer restricts adata_mal's genes — see FIX 13 above —
+    # but this snapshot is kept as a defensive, explicit copy regardless.)
+    adata_mal_fullgene = adata_mal.copy()
+
     # STEP 6 — Non-epithelial "rest" group
     print("\n--- Step 6: Extract non-epithelial 'rest' group ---")
     rest_mask  = ~ep_mask
@@ -1236,27 +1663,27 @@ def run_preprocessing_pipeline(
     sc.pp.normalize_total(adata_rest, target_sum=1e4)
     sc.pp.log1p(adata_rest)
 
-    # STEP 7 — Surfaceome filter
-    print("\n--- Step 7: Surfaceome filter (GESP file) ---")
+    # STEP 7 — Load surfaceome gene list (GESP file)
+    # CLAUDE EDIT: this used to SUBSET adata_mal/adata_rest to surfaceome
+    # genes before DEG ran, so Step 8's Wilcoxon test only ever saw ~3,568
+    # surfaceome genes. Per your correction, surfaceome membership is now a
+    # separate, independent criterion — not a pre-filter. Step 8 (DEG) and
+    # Step 8b (Cancer Composition) both now run on the FULL common gene
+    # space; the surfaceome list is intersected in at the very end
+    # (Step 9), alongside DEG and Cancer Composition, as the 3rd of 3 equal
+    # criteria.
+    print("\n--- Step 7: Load surfaceome gene list (GESP file) ---")
     surfaceome         = pd.read_csv(surfaceome_path)
     surfaceome.columns = surfaceome.columns.str.strip()
-    surf_genes         = surfaceome["Gene"].astype(str).tolist()
-    print(f"Surfaceome genes in GESP file: {len(surf_genes)}")
+    surf_genes          = surfaceome["Gene"].astype(str).tolist()
+    surf_genes_set       = set(surf_genes)
+    print(f"Surfaceome genes in GESP file: {len(surf_genes_set)}")
 
-    surf_in_mal  = adata_mal.var_names.intersection(surf_genes)
-    adata_mal    = adata_mal[:, surf_in_mal].copy()
-    print(f"Surfaceome genes in malignant cells: {len(surf_in_mal)}")
+    surf_in_mal = adata_mal.var_names.intersection(surf_genes_set)
+    print(f"  Of those, present in the malignant-cell gene space: {len(surf_in_mal)} "
+          f"(membership only — NOT filtered here, see Step 9)\n")
 
-    surf_in_rest = adata_rest.var_names.intersection(surf_genes)
-    adata_rest   = adata_rest[:, surf_in_rest].copy()
-    print(f"Surfaceome genes in rest cells: {len(surf_in_rest)}")
-
-    surf_common = surf_in_mal.intersection(surf_in_rest)
-    adata_mal   = adata_mal[:, surf_common].copy()
-    adata_rest  = adata_rest[:, surf_common].copy()
-    print(f"Common surfaceome genes (used for DEG): {len(surf_common)}\n")
-
-    # STEP 8 — DEG
+    # STEP 8 — DEG (now runs on the FULL common gene space, unrestricted)
     print("--- Step 8: DEG — malignant epithelial vs non-epithelial rest ---")
 
     adata_mal.obs["deg_group"]  = "malignant_epithelial"
@@ -1302,16 +1729,80 @@ def run_preprocessing_pipeline(
         print("\nTop 10 DEGs (malignant epithelial vs non-epithelial rest):")
         print(filtered_deg.head(10).to_string(index=False))
 
-    # STEP 9 — Subset to DEG-passing genes, binarise, store, save
-    print("\n--- Step 9: Subset to DEG-passing genes, binarise and save ---")
+    # CLAUDE EDIT — STEP 8b: Cancer Composition Score (tumor vs. healthy
+    # reference), Harmony-integrated, with before/after UMAP QC plots.
+    cc_df    = None
+    cc_genes = None
+    cc_plot_paths = None
+    _cc_healthy_ref = healthy_reference_h5ad or reference_h5ad
 
-    if filtered_deg.shape[0] > 0:
-        deg_genes   = filtered_deg["names"].tolist()
-        deg_in_mal  = adata_mal.var_names.intersection(deg_genes)
-        adata_mal   = adata_mal[:, deg_in_mal].copy()
-        print(f"Malignant cells subset to {len(deg_in_mal)} DEG-passing surfaceome genes.")
+    if run_cancer_composition and _cc_healthy_ref is None:
+        print(
+            "\nWarning: Step 8b skipped — no healthy_reference_h5ad (or "
+            "reference_h5ad) provided.\n"
+            "  Pass healthy_reference_h5ad= to enable the Cancer "
+            "Composition Score."
+        )
+    elif run_cancer_composition:
+        try:
+            cc_save_dir = os.path.join(save_dir, "cancer_composition")
+            cc_df, cc_genes, cc_plot_paths = run_cancer_composition_step(
+                adata_tumor_fullgene   = adata_mal_fullgene,
+                healthy_reference_h5ad = _cc_healthy_ref,
+                save_dir               = cc_save_dir,
+                tumor_batch_key        = cc_tumor_batch_key,
+                healthy_batch_key      = cc_healthy_batch_key,
+                n_top_genes            = cc_n_top_genes,
+                n_pcs                  = cc_n_pcs,
+                max_iter_harmony       = cc_max_iter_harmony,
+                theta                  = cc_theta,
+                seed                   = cc_seed,
+                cc_score_threshold     = cc_score_threshold,
+                sample_name            = scevan_sample_name,
+            )
+        except Exception as exc:
+            print(f"\nWarning: Step 8b (Cancer Composition Score) failed — "
+                  f"{type(exc).__name__}: {exc}\n"
+                  "  Continuing without it — Step 9 will fall back to "
+                  "DEG ∩ surfaceome only.")
+            logger.exception("Cancer Composition Score error:")
+            cc_df, cc_genes, cc_plot_paths = None, None, None
+
+    # STEP 9 — Subset to final gene list (3-way intersection), binarise, store, save
+    print("\n--- Step 9: Subset to final gene list, binarise and save ---")
+
+    deg_genes = filtered_deg["names"].tolist() if filtered_deg.shape[0] > 0 else None
+
+    selection_sets = {}
+    if deg_genes is not None:
+        selection_sets["DEG malignant-vs-rest (Step 8)"] = set(deg_genes)
+    if cc_genes is not None:
+        selection_sets[f"Cancer_Composition >= {cc_score_threshold} (Step 8b)"] = cc_genes
+    selection_sets["surfaceome gene list (Step 7)"] = surf_genes_set
+
+    for label, gset in selection_sets.items():
+        print(f"  {label}: {len(gset)} genes")
+
+    if len(selection_sets) >= 2:
+        final_gene_list = set.intersection(*selection_sets.values())
     else:
-        print("WARNING: No DEGs passed filters — saving all surfaceome genes (no gene subset).")
+        final_gene_list = next(iter(selection_sets.values()))
+
+    print(f"  Final intersection ({' ∩ '.join(selection_sets.keys())}): "
+          f"{len(final_gene_list)} genes")
+
+    if len(final_gene_list) == 0:
+        print(
+            "WARNING: 0 genes passed the final intersection — "
+            "saving all surfaceome genes (no gene subset) instead.\n"
+            "  Consider relaxing log2fc_threshold / pval_adj_threshold / "
+            "cc_score_threshold."
+        )
+        final_gene_list = surf_genes_set
+
+    final_in_mal = adata_mal.var_names.intersection(final_gene_list)
+    adata_mal    = adata_mal[:, final_in_mal].copy()
+    print(f"Malignant cells subset to {len(final_in_mal)} final genes.")
 
     adata_mal.X = (
         np.array(
@@ -1330,12 +1821,33 @@ def run_preprocessing_pipeline(
         "method"             : "wilcoxon",
         "n_malignant"        : int(adata_mal.n_obs),
         "n_rest"             : int(adata_rest.n_obs),
-        "n_surfaceome_genes" : int(len(surf_common)),
+        "n_genes_tested"     : int(adata_mal.var_names.shape[0]),
+        "n_surfaceome_genes_total"      : int(len(surf_genes_set)),
+        "n_surfaceome_genes_in_dataset" : int(len(surf_in_mal)),
         "n_filtered_deg"     : int(filtered_deg.shape[0]),
     }
     adata_mal.uns["qc_params"] = (
         {"min_genes": min_genes, "max_mt": max_mt} if qc_active else None
     )
+
+    # CLAUDE EDIT — store Step 8b + final 3-way selection for traceability
+    adata_mal.uns["cancer_composition_scores"] = (
+        cc_df.reset_index(drop=True) if cc_df is not None else None
+    )
+    adata_mal.uns["cc_params"] = {
+        "ran"                 : cc_df is not None,
+        "healthy_reference"   : _cc_healthy_ref,
+        "cc_score_threshold"  : cc_score_threshold,
+        "n_cc_genes"          : int(len(cc_genes)) if cc_genes is not None else None,
+        "umap_plot_paths"     : cc_plot_paths,
+    }
+    adata_mal.uns["final_gene_selection"] = {
+        "sets_used"   : {label: int(len(gset)) for label, gset in selection_sets.items()},
+        "n_final"     : int(len(final_gene_list)),
+        "fell_back_to_surfaceome_only": len(final_gene_list) == len(surf_genes_set)
+                                          and len(selection_sets) >= 2
+                                          and final_gene_list == surf_genes_set,
+    }
 
     if scevan_result_df is not None:
         final_barcodes = set(adata_mal.obs_names)
