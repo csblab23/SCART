@@ -551,7 +551,13 @@ normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = 
       <li>The Tabula Sapiens reference file for your cancer type.</li>
       <li>The Module 4 healthy reference atlas file(s) — <code>hpa_alltissues_geosketch_10k.h5ad</code> and/or <code>tabula_sapiens_alltissues_10k.h5ad</code> (download from Zenodo — see above).</li>
       <li>(Optional) If you already have cell-type labels in your h5ad, the name of the column in <code>adata.obs</code> that holds them.</li>
+      <li>The name of your h5ad's own batch/donor column, if it has one — see the callout below.</li>
     </ul>
+
+    <div class="callout callout-tip">
+      <span class="callout-icon">💡</span>
+      <div><strong>Your own batch column</strong> — <code>batch_key</code> on <code>SampleAnnotator</code> is a GEO-only feature (it searches GEO's own metadata text). It has no effect here, because SCART has no way to know what you named your batch/donor column in your own h5ad. If your file already has one, skip <code>batch_key</code> in Module 1 entirely and just pass that column's exact name straight to Module 2 instead: <code>popv_annotation.auto_run_popv(..., batch_key='&lt;your column name&gt;')</code>. If it has none, PopV falls back to no batch correction for these cells.</div>
+    </div>
 
     <!-- 2A single h5ad -->
     <div class="variant-label">Variant A — Single h5ad file</div>
@@ -566,10 +572,19 @@ annotator = SampleAnnotator(
     cancer_type=<span class="str">"ovary_cancer"</span>,
     min_genes=<span class="num">200</span>,
     max_mt=<span class="num">40</span>,
+    <span class="c"># No batch_key here — it's a GEO-only feature and has no effect on</span>
+    <span class="c"># your own h5ad. If your file has its own batch/donor column, pass</span>
+    <span class="c"># its name straight to Module 2 instead (see below).</span>
 )
 normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = annotator.run()
 
-<span class="c"># Output: input_tumor.h5ad</span></pre>
+<span class="c"># Output: input_tumor.h5ad
+
+# Then in Module 2, tell SCART your h5ad's OWN batch column name:
+#   adata = popv_annotation.auto_run_popv(
+#       user_reference = "...",
+#       batch_key      = "donor",   # ← whatever column your h5ad already has
+#   )</span></pre>
     </div>
 
     <!-- 2B multiple h5ad -->
@@ -629,6 +644,11 @@ normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = 
       </div>
     </div>
 
+    <div class="callout callout-warn">
+      <span class="callout-icon">⚠️</span>
+      <div><strong>Batch key in a mixed run</strong> — <code>batch_key</code> here only extracts a value for the <strong>GEO-derived</strong> cells (by searching GEO metadata); your own h5ad's cells keep whatever columns they already had, completely untouched — SCART still doesn't know what you named them. If you don't set anything, the GEO cells get <code>gsm_id</code>/<code>gse_id</code> while your h5ad's cells have neither, so those rows end up with no batch value after combining. For one clean, unified batch column across both sources: give your own h5ad a batch/donor column first, then pass that <strong>same name</strong> as <code>batch_key='&lt;name&gt;'</code> to <strong>both</strong> this <code>SampleAnnotator</code> call (so the GEO side gets it extracted from metadata too) <strong>and</strong> to Module 2.</div>
+    </div>
+
     <div class="code-wrap" style="margin-top:20px;">
       <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
       <pre><span class="kw">from</span> SCART.geo_fetcher <span class="kw">import</span> SampleAnnotator
@@ -636,14 +656,21 @@ normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = 
 <span class="c"># Mix GEO IDs and h5ad paths freely — all must be the same cancer type</span>
 annotator = SampleAnnotator(
     <span class="str">"GSE158937"</span>,                     <span class="c"># downloaded from GEO</span>
-    <span class="str">"/path/to/extra_data.h5ad"</span>,      <span class="c"># your own local file</span>
+    <span class="str">"/path/to/extra_data.h5ad"</span>,      <span class="c"># your own local file — MUST already have</span>
+                                            <span class="c"># its own "donor" column for this to line up</span>
     cancer_type=<span class="str">"ovary_cancer"</span>,
     min_genes=<span class="num">200</span>,
     max_mt=<span class="num">40</span>,
+    <span class="c"># USER: only meaningful if your own h5ad ALSO already has a column</span>
+    <span class="c"># with this exact name — otherwise those rows get no batch value.</span>
+    batch_key=<span class="str">"donor"</span>,
 )
 normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = annotator.run()
 
-<span class="c"># Output: combined_tumor.h5ad</span></pre>
+<span class="c"># Output: combined_tumor.h5ad
+
+# Pass the SAME name to Module 2 next:
+#   adata = popv_annotation.auto_run_popv(..., batch_key="donor")</span></pre>
     </div>
 
     <!-- ═══════════════════════════════════════════════════════════════════
@@ -691,6 +718,7 @@ normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = 
           <tr><td><code>user_reference</code></td><td><span class="badge badge-required">required</span></td><td>—</td><td>Path to the Tabula Sapiens tissue reference file for your cancer type. Download from <a href="https://doi.org/10.6084/m9.figshare.27921984" target="_blank">Figshare</a> — see the cancer type table above for the exact filename.</td></tr>
           <tr><td><code>output_dir</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">"popv_results"</span></td><td>Where to save the annotated h5ad. Change if you want a custom location.</td></tr>
           <tr><td><code>batch_key</code></td><td><span class="badge badge-optional">optional</span></td><td>auto-detected (<code>gsm_id</code> first)</td><td>Column in your query h5ad's <code>.obs</code> to use as the batch key. Defaults to GSM ID for GEO-derived data. Set this to match whatever <code>batch_key</code> you used in Module 1, or to your own h5ad's batch column name.</td></tr>
+          <tr><td><code>seed</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">0</span></td><td>Random seed for reproducibility. Seeds python's and numpy's global RNG before annotation, and is also passed to PopV's own methods if your installed PopV version accepts a seed there. Change only if you specifically want a different run's randomness.</td></tr>
         </tbody>
       </table>
     </div>
@@ -708,6 +736,7 @@ adata = popv_annotation.auto_run_popv(
     <span class="c"># If you passed batch_key="donor" in Module 1 (or your own h5ad</span>
     <span class="c"># has a "donor" column), uncomment this to match it:</span>
     <span class="c"># batch_key = "donor",</span>
+    seed = <span class="num">0</span>,  <span class="c"># reproducible by default — change only if you want different randomness</span>
 )
 
 <span class="c"># Inspect the annotation results</span>
