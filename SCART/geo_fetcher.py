@@ -653,16 +653,22 @@ class SampleAnnotator:
         if any(fl.endswith(e) for e in (".mtx", ".mtx.gz", ".h5", ".hdf5", ".h5.gz")):
             return None
         try:
-            opener = gzip.open(file_path, "rt") if file_path.endswith(".gz") else open(file_path, "r")
+            # CLAUDE EDIT — explicit UTF-8 (same fix as popv_annotation.py's
+            # cl.obo read): without this, text-mode open()/gzip.open("rt")
+            # fall back to the OS default encoding — cp1252 on Windows —
+            # which can crash or silently mangle non-ASCII bytes in GEO
+            # metadata/matrix files that Linux/Mac's UTF-8 default handles fine.
+            opener = gzip.open(file_path, "rt", encoding="utf-8") if file_path.endswith(".gz") \
+                     else open(file_path, "r", encoding="utf-8")
             with opener as f:
                 first_line = f.readline()
             sep = "\t" if "\t" in first_line else ","
 
             if file_path.endswith(".gz"):
-                with gzip.open(file_path, "rt") as f:
+                with gzip.open(file_path, "rt", encoding="utf-8") as f:
                     df = pd.read_csv(f, sep=sep, index_col=0)
             else:
-                df = pd.read_csv(file_path, sep=sep, index_col=0)
+                df = pd.read_csv(file_path, sep=sep, index_col=0, encoding="utf-8")
 
             if df.empty:
                 return None
@@ -995,17 +1001,19 @@ class SampleAnnotator:
 
         if meta_path:
             try:
-                opener = gzip.open(meta_path, "rt") if meta_path.endswith(".gz") \
-                         else open(meta_path, "r")
+                # CLAUDE EDIT — explicit UTF-8, same fix as _read_generic_matrix
+                # above and popv_annotation.py's cl.obo read.
+                opener = gzip.open(meta_path, "rt", encoding="utf-8") if meta_path.endswith(".gz") \
+                         else open(meta_path, "r", encoding="utf-8")
                 with opener as f:
                     first = f.readline()
                 sep = "\t" if "\t" in first else ","
 
                 if meta_path.endswith(".gz"):
-                    with gzip.open(meta_path, "rt") as f:
+                    with gzip.open(meta_path, "rt", encoding="utf-8") as f:
                         cell_meta = pd.read_csv(f, sep=sep, index_col=0)
                 else:
-                    cell_meta = pd.read_csv(meta_path, sep=sep, index_col=0)
+                    cell_meta = pd.read_csv(meta_path, sep=sep, index_col=0, encoding="utf-8")
 
                 for col in cell_meta.columns:
                     vals = cell_meta[col].astype(str)
