@@ -491,6 +491,44 @@ annotator = SampleAnnotator(
 normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = annotator.run()</pre>
     </div>
 
+    <!-- 1D batch key hint -->
+    <div class="variant-label" style="margin-top:24px;">Variant D — Telling SCART what your batch is (<code>batch_key_hint</code>)</div>
+    <p>By default, SCART uses the <strong>GSM ID</strong> (one value per GEO sample) as the batch for downstream batch correction — this is correct for most datasets, where one GSM = one library/capture run. If a GSM in your dataset actually contains <strong>multiple pooled patients or donors</strong>, GSM ID is too coarse. Pass <code>batch_key_hint</code> with a keyword (e.g. <code>"donor"</code>, <code>"patient"</code>, <code>"timepoint"</code>) and SCART will search each sample's GEO metadata for a matching field (e.g. <code>"donor: P1"</code>) and save it as its own column.</p>
+
+    <div class="code-wrap">
+      <div class="code-header"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+      <pre><span class="kw">from</span> SCART.geo_fetcher <span class="kw">import</span> SampleAnnotator
+
+annotator = SampleAnnotator(
+    <span class="str">"GSE224550"</span>,
+    cancer_type=<span class="str">"blood_cancer"</span>,
+    min_genes=<span class="num">200</span>,
+    max_mt=<span class="num">40</span>,
+    <span class="c"># USER: a keyword to search for in each GSM's GEO metadata (title /</span>
+    <span class="c"># source_name_ch1 / characteristics_ch1), e.g. "donor", "patient".</span>
+    <span class="c"># Only needed if one GSM in your GSE pools multiple donors/patients —</span>
+    <span class="c"># leave this out and GSM ID is used as the batch automatically.</span>
+    batch_key_hint=<span class="str">"donor"</span>,
+)
+normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = annotator.run()
+
+<span class="c"># SCART prints, per sample, whether "donor" was found in that GSM's</span>
+<span class="c"># metadata. Where found, it's saved as adata.obs["donor"]; where not</span>
+<span class="c"># found, that sample is tagged "unknown" for this column.
+# Pass the SAME name to Module 2 next: query_batch_key="donor"</span></pre>
+    </div>
+
+    <div class="callout callout-tip">
+      <span class="callout-icon">💡</span>
+      <div><strong>Batch key — what SCART uses, and how to override it</strong><br>
+      If you don't set <code>batch_key_hint</code> here (or <code>query_batch_key</code> in Module 2 below), <strong>GSM ID is used as the batch</strong> automatically — no configuration needed for the common case.
+      <br><br>
+      If GSM ID isn't right for your data (pooled multi-donor GSMs), you have two options:
+      <br>1. Set <code>batch_key_hint='&lt;keyword&gt;'</code> here (Variant D above) to try extracting it automatically from GEO sample metadata — works only for GEO ID input, not your own h5ad.
+      <br>2. Supply your own h5ad with a batch column already in <code>adata.obs</code>, and pass its name as <code>query_batch_key='&lt;your column name&gt;'</code> directly to Module 2 (skips Module 1's extraction entirely).
+      </div>
+    </div>
+
     <div class="callout callout-tip">
       <span class="callout-icon">✅</span>
       <div>After completing Module 1 for any of the variants above, continue directly to <a href="#module2">Module 2 — Cell-Type Annotation</a>.</div>
@@ -640,6 +678,11 @@ normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = 
 
     <p>PopV runs multiple annotation methods in parallel (CELLTYPIST, KNN-SCVI, SCANVI, and others) and reports a majority-vote cell-type prediction for each cell. Module 1 prints the name of the Tabula Sapiens reference file recommended for your cancer type — download that file before running this step.</p>
 
+    <div class="callout callout-tip">
+      <span class="callout-icon">💡</span>
+      <div><strong>Batch key default</strong> — if you don't pass <code>query_batch_key</code> below (and didn't set <code>batch_key_hint</code> in Module 1), <strong>GSM ID is used as the batch automatically</strong>. If GSM ID isn't valid for your data (e.g. pooled multi-donor GSMs), either re-run Module 1 with <code>batch_key_hint='&lt;keyword&gt;'</code>, or pass <code>query_batch_key='&lt;your column name&gt;'</code> here directly.</div>
+    </div>
+
     <div class="table-wrap">
       <table>
         <thead><tr><th>Parameter</th><th>Status</th><th>Default</th><th>What to change</th></tr></thead>
@@ -647,6 +690,7 @@ normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = 
           <tr><td><code>nsamples</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">300</span></td><td>Cells sampled per label from reference. Increase for better accuracy, decrease to save memory.</td></tr>
           <tr><td><code>user_reference</code></td><td><span class="badge badge-required">required</span></td><td>—</td><td>Path to the Tabula Sapiens tissue reference file for your cancer type. Download from <a href="https://doi.org/10.6084/m9.figshare.27921984" target="_blank">Figshare</a> — see the cancer type table above for the exact filename.</td></tr>
           <tr><td><code>output_dir</code></td><td><span class="badge badge-optional">optional</span></td><td><span class="badge badge-default">"popv_results"</span></td><td>Where to save the annotated h5ad. Change if you want a custom location.</td></tr>
+          <tr><td><code>query_batch_key</code></td><td><span class="badge badge-optional">optional</span></td><td>auto-detected (<code>gsm_id</code> first)</td><td>Column in your query h5ad's <code>.obs</code> to use as the batch key. Defaults to GSM ID for GEO-derived data. Set this to match whatever <code>batch_key_hint</code> you used in Module 1, or to your own h5ad's batch column name.</td></tr>
         </tbody>
       </table>
     </div>
@@ -660,6 +704,10 @@ normal, tumor, unspecified, annotation_info, query_h5ad, cancer_type, results = 
 adata = popv_annotation.auto_run_popv(
     nsamples       = <span class="num">300</span>,
     user_reference = <span class="str">"/path/to/Ovary_TSP1_30_version2d_10X_smartseq_scvi_Nov262024.h5ad"</span>,
+    <span class="c"># query_batch_key not set → GSM ID used as batch automatically.</span>
+    <span class="c"># If you passed batch_key_hint="donor" in Module 1 (or your own h5ad</span>
+    <span class="c"># has a "donor" column), uncomment this to match it:</span>
+    <span class="c"># query_batch_key = "donor",</span>
 )
 
 <span class="c"># Inspect the annotation results</span>
@@ -1058,6 +1106,16 @@ annotator = SampleAnnotator(
                            <span class="c">#   removed — high mitochondrial content usually means</span>
                            <span class="c">#   a dying or damaged cell. Typical range: 20–50.</span>
                            <span class="c">#   Remove this line entirely to skip the filter.</span>
+
+    <span class="c"># batch_key_hint="donor",</span>
+                           <span class="c"># ← OPTIONAL, commented out by default. Without it, GSM ID</span>
+                           <span class="c">#   is used as the batch automatically (correct for most</span>
+                           <span class="c">#   data — one GSM = one library). Only uncomment this if</span>
+                           <span class="c">#   one GSM in your GSE actually pools multiple patients/</span>
+                           <span class="c">#   donors: SCART will search each sample's GEO metadata</span>
+                           <span class="c">#   for a field matching your keyword (e.g. "donor: P1")</span>
+                           <span class="c">#   and save it as adata.obs["donor"]. Pass the SAME name</span>
+                           <span class="c">#   as query_batch_key to Module 2 (Step 2 below).</span>
 )
 
 <span class="c"># ════════════════════════════════════════════════════════════════════════════
@@ -1175,6 +1233,14 @@ adata = popv_annotation.auto_run_popv(
                            <span class="c">#   download — this requires a good internet connection and</span>
                            <span class="c">#   can be slow (~4 GB file). Supplying the path yourself</span>
                            <span class="c">#   is always faster and more reliable.</span>
+
+    <span class="c"># query_batch_key="donor",</span>
+                           <span class="c"># ← OPTIONAL, commented out by default. Without it, GSM ID</span>
+                           <span class="c">#   is used as the batch automatically (matches the default</span>
+                           <span class="c">#   in Step 1). If you set batch_key_hint="donor" in Step 1,</span>
+                           <span class="c">#   or your own h5ad already has a "donor"-type column,</span>
+                           <span class="c">#   uncomment this with the SAME column name so PopV's</span>
+                           <span class="c">#   batch-corrected methods use it instead of GSM ID.</span>
 )
 
 <span class="c"># Inspect which cell types were found in your data</span>
