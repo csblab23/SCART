@@ -136,6 +136,15 @@ setup(
             # glob is resolved by the build backend in use.
             "healthy_atlases/hpa_alltissues_geosketch_10k.h5ad",
             "healthy_atlases/tabula_sapiens_alltissues_10k.h5ad",
+            # NEW: surfaceome gene list read by preprocessing.py on every
+            # Module 3 run (_auto_surfaceome_path() now checks the SCART
+            # package root first: <scart_root>/GESP_surfaceome_gene.csv).
+            # "**/*.csv" above already matches this, but it's listed
+            # explicitly too — same rationale as cl.obo and the atlas
+            # h5ad files above: this file is required for every run, not
+            # an edge case, so its inclusion shouldn't depend on how the
+            # glob is resolved by the build backend in use.
+            "GESP_surfaceome_gene.csv",
         ]
     },
     zip_safe=False,
@@ -151,6 +160,14 @@ setup(
         # (_plot_top_rra_candidates). Already pulled in transitively via
         # scanpy, but listed explicitly since it is now a direct import.
         "matplotlib",
+
+        # NEW: used directly by preprocessing.py's Cancer Composition Score
+        # step (Harmony-integrates malignant cells vs. a healthy reference,
+        # Module 3 Step 8b). Almost certainly already pulled in transitively
+        # via popv (PopV's own knn_on_harmony method runs Harmony), but
+        # listed explicitly since preprocessing.py now imports it directly —
+        # same rationale as matplotlib above.
+        "harmonypy",
 
         # JAX ecosystem — pinned for scvi-tools 1.1.6 + Windows compat
         "jax[cpu]==0.4.23",
