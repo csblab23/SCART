@@ -1044,8 +1044,23 @@ def run_harmony_integration(
     theta=None,
     seed=0,
     svd_solver="arpack",
+    n_jobs=1,
 ):
     import harmonypy
+
+    # CLAUDE EDIT — thread-limiting, mirrors popv_annotation.py's Step 14
+    # exactly (same env vars, same pattern). Without this, numpy/sklearn's
+    # BLAS backend defaults to using ALL available cores for PCA and for
+    # harmonypy's internal sklearn.KMeans centroid initialization. On a
+    # multi-core HPC node with a per-job memory limit, that oversubscription
+    # (each thread/worker duplicating chunks of the data) is a classic
+    # silent OOM-killer trigger — the process is killed with no Python
+    # traceback, which looks exactly like "the kernel just died".
+    import os as _os
+    n_threads = str(n_jobs if n_jobs > 0 else (_os.cpu_count() or 1))
+    for env_var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+        _os.environ[env_var] = n_threads
+    print(f"  Parallelism: n_jobs={n_jobs} ({n_threads} threads) for PCA + Harmony")
 
     print(f"  Running PCA (n_comps={n_pcs}, svd_solver={svd_solver})")
     sc.pp.pca(adata_hvg, n_comps=n_pcs, svd_solver=svd_solver)
@@ -1206,12 +1221,23 @@ def run_cancer_composition_step(
     max_iter_harmony=10,
     theta=None,
     seed=0,
+    n_jobs=1,
     cc_score_threshold=0.5,
     sample_name="cancer_composition",
 ):
     """
     Full sub-pipeline: build tumor+healthy combined object -> HVG select ->
     Harmony integrate -> UMAP before/after -> Cancer Composition Score.
+
+    n_jobs : int
+        CPU threads for PCA + Harmony (default 1 — deliberately
+        conservative). Passed to OMP_NUM_THREADS/OPENBLAS_NUM_THREADS/
+        MKL_NUM_THREADS the same way Module 2 already does. Raise this only
+        if you know you have the RAM headroom for it: sklearn's KMeans
+        (used internally by harmonypy) duplicates data across threads/
+        workers, and on a shared multi-core HPC node with a per-job memory
+        cap, an unconstrained thread count is a common cause of the kernel
+        silently dying (OOM-killed) with no Python traceback.
 
     Returns
     -------
@@ -1243,7 +1269,7 @@ def run_cancer_composition_step(
     adata_hvg = prepare_for_harmony(adata_combined, n_top_genes=n_top_genes)
     adata_hvg = run_harmony_integration(
         adata_hvg, batch_key="batch", n_pcs=n_pcs,
-        max_iter_harmony=max_iter_harmony, theta=theta, seed=seed,
+        max_iter_harmony=max_iter_harmony, theta=theta, seed=seed, n_jobs=n_jobs,
     )
     plot_paths = plot_umap_before_after(adata_hvg, save_dir, sample_name=sample_name)
     print(f"  UMAP (unintegrated vs Harmony-integrated) saved to:\n"
@@ -1291,6 +1317,7 @@ def run_preprocessing_pipeline(
     cc_max_iter_harmony=10,
     cc_theta=None,
     cc_seed=0,
+    cc_n_jobs=1,
     cc_tumor_batch_key=None,
     cc_healthy_batch_key=None,
 ):
@@ -1753,6 +1780,7 @@ def run_preprocessing_pipeline(
                 max_iter_harmony       = cc_max_iter_harmony,
                 theta                  = cc_theta,
                 seed                   = cc_seed,
+                n_jobs                 = cc_n_jobs,
                 cc_score_threshold     = cc_score_threshold,
                 sample_name            = scevan_sample_name,
             )
