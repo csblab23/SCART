@@ -322,8 +322,36 @@ class SampleAnnotator:
         print("\n========== BATCH KEY GUIDANCE ==========")
         if self.h5ad_inputs and not self.gse_ids:
             print("Input was h5ad file(s) — batch_key does not apply (GEO-only feature).")
-            print("If your h5ad has its own batch/donor column, pass its name as")
+            print("SCART does not know what you named your batch/donor column, so it")
+            print("cannot detect or set one for you here. If your h5ad already has its")
+            print("own batch/donor column, pass its EXACT name as")
             print("batch_key='<column name>' to Module 2 (popv_annotation.auto_run_popv).")
+            return
+
+        if self.h5ad_inputs and self.gse_ids:
+            print("Input mixes GEO ID(s) with your own h5ad file(s).")
+            print("batch_key (if set) only extracts a value for the GEO-derived cells —")
+            print("your own h5ad's cells keep whatever columns they already had,")
+            print("completely untouched (SCART does not know what you named them).")
+            if self.batch_key:
+                print(f"  You set batch_key='{self.batch_key}': GEO-derived cells get this")
+                print(f"  column extracted from GEO metadata where a match is found.")
+                print(f"  For ONE unified batch column across both sources, your own")
+                print(f"  h5ad must ALSO already contain a column named exactly")
+                print(f"  '{self.batch_key}' — otherwise those rows will be missing a")
+                print(f"  value for that column once Module 1 combines everything.")
+            else:
+                print("  You did not set batch_key: GEO-derived cells fall back to")
+                print("  'gsm_id'/'gse_id'; your own h5ad's cells have neither column,")
+                print("  so those rows will have no value there after combining.")
+                print("  For a clean, single batch column across both sources:")
+                print("    1. Give your own h5ad a batch/donor column, then pass that")
+                print("       SAME name as batch_key='<name>' to BOTH this SampleAnnotator")
+                print("       call (so the GEO cells get it extracted from metadata) and")
+                print("       to Module 2, or")
+                print("    2. Add a batch/donor column to the combined h5ad yourself")
+                print("       after Module 1 runs, then pass its name as batch_key= to")
+                print("       Module 2 directly.")
             return
 
         if self.batch_key:
