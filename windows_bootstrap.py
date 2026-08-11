@@ -151,7 +151,7 @@ def _check_platform_and_conda() -> bool:
 # ---------------------------------------------------------------------------
 
 def _prepin_python_deps() -> bool:
-    print(f"\n{SEP}\n  Step 1/5 — Pre-pinning numpy / scipy / JAX stack\n{SEP}")
+    print(f"\n{SEP}\n  Step 1/6 — Pre-pinning numpy / scipy / JAX stack\n{SEP}")
     ok = True
     ok &= _pip(*PINNED_CORE)
     ok &= _pip(*PINNED_FLAX)
@@ -196,7 +196,7 @@ def _register_annoy_with_pip() -> bool:
 
 
 def _install_annoy() -> bool:
-    print(f"\n{SEP}\n  Step 2/5 — Installing annoy (no C++ compiler needed)\n{SEP}")
+    print(f"\n{SEP}\n  Step 2/6 — Installing annoy (no C++ compiler needed)\n{SEP}")
 
     check = subprocess.run(
         [sys.executable, "-m", "pip", "show", "annoy"],
@@ -247,7 +247,7 @@ def _install_annoy() -> bool:
 # ---------------------------------------------------------------------------
 
 def _install_scart() -> bool:
-    print(f"\n{SEP}\n  Step 3/5 — Installing SCART\n{SEP}")
+    print(f"\n{SEP}\n  Step 3/6 — Installing SCART\n{SEP}")
     return _run(
         [sys.executable, "-m", "pip", "install",
          "git+https://github.com/csblab23/SCART.git"],
@@ -256,13 +256,45 @@ def _install_scart() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Step 4 — hand off to SCART's own installer, non-interactively
-# (old Steps 2d/2e/2f + Step 3 R/SCEVAN/RobustRankAggreg + Step 5 verify)
+# Step 4 — fix the PyTorch DLL issue, BEFORE ever touching SCART.install
+# ---------------------------------------------------------------------------
+#
+# This MUST happen here, not inside SCART.install, and not rely on
+# setup.py's PostInstall hook. Two reasons:
+#
+#   1. setup.py's PostInstall/PostDevelop cmdclass hooks only run for the
+#      legacy `python setup.py install` path. Modern pip (`pip install
+#      git+...`) builds a wheel first and just unpacks it — it never
+#      invokes the custom install command class at all. So the "auto-fix
+#      torch on Windows" hook in setup.py silently never fires here.
+#   2. `python -m SCART.install` can't self-heal this either: `-m` first
+#      imports the SCART package, and SCART/__init__.py imports
+#      geo_fetcher -> scanpy -> anndata -> torch at module level. If torch
+#      is DLL-broken, that import crashes before install.py's main()
+#      (and its own torch-fix step inside _run_windows()) ever runs.
+#
+# So this step runs as plain subprocess calls with zero dependency on
+# SCART being importable — the only place this fix can reliably happen.
+
+def _fix_torch() -> bool:
+    print(f"\n{SEP}\n  Step 4/6 — Fixing PyTorch CPU wheel "
+          f"(before SCART is ever imported)\n{SEP}")
+    _run([sys.executable, "-m", "pip", "uninstall", "torch", "-y"], label="pip")
+    return _run(
+        [sys.executable, "-m", "pip", "install", "torch==2.2.2",
+         "--index-url", "https://download.pytorch.org/whl/cpu"],
+        label="pip",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Step 5 — hand off to SCART's own installer, non-interactively
+# (old Steps 2e/2f + Step 3 R/SCEVAN/RobustRankAggreg + Step 5 verify)
 # ---------------------------------------------------------------------------
 
 def _run_scart_install() -> bool:
-    print(f"\n{SEP}\n  Step 4/5 — Running SCART's own installer "
-          f"(torch fix, TensorFlow pin, R + SCEVAN + RobustRankAggreg, verify)\n{SEP}")
+    print(f"\n{SEP}\n  Step 5/6 — Running SCART's own installer "
+          f"(TensorFlow pin, R + SCEVAN + RobustRankAggreg, verify)\n{SEP}")
     return _run(
         [sys.executable, "-m", "SCART.install", "--os", "windows", "--yes"],
         label="SCART.install",
@@ -316,6 +348,8 @@ def main():
         print(f"\n{SEP}\n  --stop-before-install given — steps 1-2 complete.\n"
               f"  Continue yourself with:\n"
               f"    pip install git+https://github.com/csblab23/SCART.git\n"
+              f"    pip uninstall torch -y\n"
+              f"    pip install torch==2.2.2 --index-url https://download.pytorch.org/whl/cpu\n"
               f"    python -m SCART.install --os windows --yes\n{SEP}")
         return
 
@@ -325,6 +359,20 @@ def main():
             "above. Fix it, then re-run with --stop-before-install already "
             "done, or just re-run this whole script (steps 1-2 are safe to "
             "repeat).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if not _fix_torch():
+        print(
+            "\n[bootstrap] Step 4 (torch fix) failed — see the error above. "
+            "This is not optional: the default torch pip just installed is "
+            "DLL-broken on most Windows machines, and `import SCART` (which "
+            "Step 5 needs) will crash until this is fixed. Run manually:\n"
+            "  pip uninstall torch -y\n"
+            "  pip install torch==2.2.2 --index-url https://download.pytorch.org/whl/cpu\n"
+            "then re-run this script, or just run "
+            "`python -m SCART.install --os windows --yes` yourself.",
             file=sys.stderr,
         )
         sys.exit(1)
