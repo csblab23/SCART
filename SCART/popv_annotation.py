@@ -23,6 +23,7 @@ Key notebook logic preserved:
 
 import os
 import glob
+import random
 import logging
 import urllib.request
 import unicodedata
@@ -81,7 +82,13 @@ def make_celltype_to_cell_ontology_id_dict(obo_file: str):
     id2name : dict  {CL:xxxxxxx -> cell type name}
     """
     logger.info(f"Parsing OBO: {obo_file}")
-    with open(obo_file, "r") as f:
+    # CLAUDE EDIT — explicit UTF-8. Without this, Python falls back to the
+    # OS's default locale encoding: UTF-8 on Linux/Mac (works by luck), but
+    # typically cp1252 on Windows, which crashes with UnicodeDecodeError on
+    # the non-ASCII bytes present in cl.obo (~17k terms). cl.obo is a UTF-8
+    # file regardless of platform, so the encoding must be pinned, not left
+    # to the environment.
+    with open(obo_file, "r", encoding="utf-8") as f:
         co = obonet.read_obo(f)
 
     id2name = {
@@ -115,7 +122,7 @@ def make_celltype_to_cell_ontology_id_dict(obo_file: str):
                     id2name[cur_id] = cur_name
                     _scan_added += 1
 
-        with open(obo_file, "r", errors="replace") as fh:
+        with open(obo_file, "r", encoding="utf-8", errors="replace") as fh:
             for raw in fh:
                 line = raw.rstrip()
                 if line == "[Term]":
@@ -183,7 +190,7 @@ def _resolve_obo_file() -> str:
         """Fast line-count of 'name:' entries — proxy for OBO completeness."""
         try:
             n = 0
-            with open(path, "r", errors="replace") as fh:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
                 for line in fh:
                     if line.startswith("name:"):
                         n += 1
@@ -938,6 +945,7 @@ def run_popv_annotation(
     drop_reference_columns: bool = True,
     n_jobs:                 int  = 1,
     batch_key:              str  = None,
+    seed:                   int  = 0,
 ) -> anndata.AnnData:
     """
     Run PopV cell-type annotation following the logic of PopV_GSE173682.ipynb.
@@ -976,8 +984,24 @@ def run_popv_annotation(
         extract a better column automatically, or supply your own h5ad with
         a batch column already in adata.obs and pass its name here. Use the
         SAME parameter name — batch_key — in both Module 1 and Module 2.
+    seed : int
+        Random seed for reproducibility (default 0). Sets python's and
+        numpy's global RNG state before annotation, so any PopV step that
+        draws on it (subsampling for n_samples_per_label, RF/SVM training,
+        k-means clustering inside Harmony-based methods) is reproducible
+        across runs given the same inputs and package versions. Also passed
+        through to Process_Query / annotate_data as random_state or seed if
+        the installed popv version accepts one of those kwargs — silently
+        skipped otherwise (older popv releases don't expose this).
     """
     os.makedirs(output_dir, exist_ok=True)
+
+    # CLAUDE EDIT — global seed for reproducibility. Mirrors the same
+    # pattern as run_harmony_integration.py / Module 3's cc_seed: seed
+    # python's and numpy's RNGs before anything stochastic runs.
+    random.seed(seed)
+    np.random.seed(seed)
+    logger.info(f"Global random seed set to {seed} (python random + numpy).")
 
     # ── Resolve OBO file ────────────────────────────────────────────────────
     obo_file      = _resolve_obo_file()
@@ -1142,6 +1166,8 @@ def run_popv_annotation(
         ("save_path_trained_models", _tmp_dir),
         ("prediction_mode",          "retrain"),
         ("accelerator",              "cpu"),
+        ("random_state",             seed),
+        ("seed",                     seed),
     ]:
         try:
             import inspect
@@ -1213,10 +1239,23 @@ def run_popv_annotation(
 
         method_name = _resolve_method_name(candidates)
         try:
-            # annotate_data signature varies: try with save_path, fall back without
+            # annotate_data signature varies across popv versions: probe for
+            # a seed-like kwarg the same defensive way Process_Query's
+            # optional kwargs are probed above, then fall back progressively
+            # if this popv version doesn't accept save_path/seed at all.
+            _annotate_kwargs = {"methods": [method_name], "save_path": _tmp_save}
             try:
-                annotate_data(adata_combined, methods=[method_name],
-                              save_path=_tmp_save)
+                import inspect
+                _ad_sig = inspect.signature(annotate_data)
+                for _seed_kwarg in ("random_state", "seed"):
+                    if _seed_kwarg in _ad_sig.parameters:
+                        _annotate_kwargs[_seed_kwarg] = seed
+                        break
+            except Exception:
+                pass
+
+            try:
+                annotate_data(adata_combined, **_annotate_kwargs)
             except TypeError:
                 annotate_data(adata_combined, methods=[method_name])
 
@@ -1363,6 +1402,7 @@ def auto_run_popv(
     user_popv_prediction:   str  = None,
     n_jobs:                 int  = 1,
     batch_key:              str  = None,
+    seed:                   int  = 0,
 ) -> anndata.AnnData:
     """
     Fully automatic entry-point for Module 2.
@@ -1396,6 +1436,11 @@ def auto_run_popv(
         (e.g. one GSM pools multiple patients/donors) — e.g.
         batch_key="patient_id". Use the SAME parameter name — batch_key —
         in both Module 1 and Module 2.
+    seed : int
+        Random seed for reproducibility (default 0). Passed straight
+        through to run_popv_annotation — see there for exactly what it
+        seeds. Ignored when user_popv_prediction is used, since no
+        annotation runs in that path.
 
     Usage
     -----
@@ -1475,4 +1520,5 @@ def auto_run_popv(
         drop_reference_columns  = drop_reference_columns,
         n_jobs                  = n_jobs,
         batch_key                = batch_key,
+        seed                     = seed,
     )
