@@ -9,7 +9,7 @@ Key notebook logic preserved:
   1. OBO parsed with obonet (same as notebook) → proper name2id / id2name dicts
   2. Reference obs columns prefixed with 'ref_' before Process_Query
   3. ref_labels_key = 'ref_cell_ontology_class' (post-prefix)
-  4. query_batch_key auto-detected from obs (mirrors notebook's 'sample' key)
+  4. batch_key auto-detected from obs (mirrors notebook's 'sample' key)
   5. n_samples_per_label = max(min_celltype_size, 300)  — dynamic like notebook
   6. Layer alignment: query gets placeholder layers to match reference structure
   7. ref var index set to gene_symbol if available (notebook step)
@@ -557,9 +557,8 @@ def _detect_query_batch_key(adata_query: anndata.AnnData,
       1. user_batch_key, if explicitly supplied — lets a user with their
          own h5ad point to whatever sample/donor column they actually have,
          even if its name isn't in _BATCH_KEY_CANDIDATES. This is also how
-         a Module 1 batch_key_hint value (e.g. "donor") gets used here —
-         pass query_batch_key equal to whatever name you gave
-         batch_key_hint= in SampleAnnotator.
+         a Module 1 batch_key value (e.g. "donor") gets used here — pass
+         the SAME name as batch_key to this module too.
       2. 'gsm_id' — written by Module 1 (geo_fetcher.SampleAnnotator) into
          every GEO-derived tumor h5ad (single GSE or multi-GSE combined),
          so GEO-sourced runs are batch-corrected automatically with no
@@ -570,26 +569,26 @@ def _detect_query_batch_key(adata_query: anndata.AnnData,
 
     If GSM ID is not a valid batch for your data (e.g. one GSM actually
     contains multiple pooled patients/donors), either:
-      (a) re-run Module 1 with batch_key_hint='<keyword>' (e.g. 'donor')
+      (a) re-run Module 1 with batch_key='<keyword>' (e.g. 'donor')
           to extract a better column from GEO metadata automatically, or
       (b) supply your own h5ad with a batch column already in adata.obs,
-          then pass query_batch_key='<your column name>' here.
+          then pass batch_key='<your column name>' here.
     """
     if user_batch_key is not None:
         if user_batch_key not in adata_query.obs.columns:
             raise ValueError(
-                f"query_batch_key='{user_batch_key}' not found in query h5ad obs.\n"
+                f"batch_key='{user_batch_key}' not found in query h5ad obs.\n"
                 f"Available columns: {list(adata_query.obs.columns)}"
             )
         n_unique = adata_query.obs[user_batch_key].nunique()
         if n_unique < 2:
             logger.warning(
-                f"query_batch_key='{user_batch_key}' has only {n_unique} unique "
+                f"batch_key='{user_batch_key}' has only {n_unique} unique "
                 "value(s) — running without batch correction."
             )
             return None
         logger.info(
-            f"query_batch_key user-specified: '{user_batch_key}' "
+            f"batch_key user-specified: '{user_batch_key}' "
             f"({n_unique} unique values)."
         )
         return user_batch_key
@@ -599,27 +598,27 @@ def _detect_query_batch_key(adata_query: anndata.AnnData,
             n_unique = adata_query.obs[key].nunique()
             if n_unique >= 2:
                 logger.info(
-                    f"query_batch_key auto-detected: '{key}' "
+                    f"batch_key auto-detected: '{key}' "
                     f"({n_unique} unique values)."
                 )
                 if key == "gsm_id":
                     logger.info(
                         "Using GSM ID as the batch key (default — no "
-                        "query_batch_key or Module 1 batch_key_hint given). "
+                        "batch_key given in either Module 1 or Module 2). "
                         "If one GSM actually contains multiple pooled "
                         "patients/donors, this is too coarse: re-run Module 1 "
-                        "with batch_key_hint='donor' (or similar), or supply "
+                        "with batch_key='donor' (or similar), or supply "
                         "your own h5ad with a proper batch column and pass "
-                        "query_batch_key= here instead."
+                        "batch_key= here instead."
                     )
                 return key
     logger.warning(
-        "No suitable query_batch_key found — running without batch correction. "
+        "No suitable batch_key found — running without batch correction. "
         f"Checked: {_BATCH_KEY_CANDIDATES}\n"
         "If this h5ad came from Module 1 with a GEO ID, 'gsm_id' should "
         "normally be present — check it has >=2 unique values. If you need "
         "a different batch column, either re-run Module 1 with "
-        "batch_key_hint='<keyword>', or pass query_batch_key='<column name>' "
+        "batch_key='<keyword>', or pass batch_key='<column name>' "
         "here directly."
     )
     return None
@@ -938,7 +937,7 @@ def run_popv_annotation(
     nsamples:               int  = 300,
     drop_reference_columns: bool = True,
     n_jobs:                 int  = 1,
-    query_batch_key:        str  = None,
+    batch_key:              str  = None,
 ) -> anndata.AnnData:
     """
     Run PopV cell-type annotation following the logic of PopV_GSE173682.ipynb.
@@ -963,19 +962,20 @@ def run_popv_annotation(
         Remove Tabula Sapiens metadata columns from output.
     n_jobs : int
         CPU threads (-1 = all cores).
-    query_batch_key : str, optional
+    batch_key : str, optional
         Column in adata_query.obs to use as the batch key for PopV's
         batch-corrected methods (knn_on_harmony, knn_on_scanorama).
         If not supplied, auto-detected — 'gsm_id' (written automatically
         by Module 1 for GEO-derived data) is checked first, then other
         common names, falling back to 'gse_id'.
-        DEFAULT BEHAVIOUR: if you give no query_batch_key here AND gave no
-        batch_key_hint to Module 1's SampleAnnotator, GSM ID is used as the
+        DEFAULT BEHAVIOUR: if you give no batch_key here AND gave no
+        batch_key to Module 1's SampleAnnotator, GSM ID is used as the
         batch (one value per GEO sample). If that's too coarse for your
         data (e.g. one GSM contains multiple pooled patients/donors), either
-        re-run Module 1 with batch_key_hint='<keyword>' (e.g. 'donor') to
+        re-run Module 1 with batch_key='<keyword>' (e.g. 'donor') to
         extract a better column automatically, or supply your own h5ad with
-        a batch column already in adata.obs and pass its name here.
+        a batch column already in adata.obs and pass its name here. Use the
+        SAME parameter name — batch_key — in both Module 1 and Module 2.
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -1040,7 +1040,7 @@ def run_popv_annotation(
     adata_ref.var_names_make_unique()
 
     # ── Step 8: auto-detect query batch key (notebook uses 'sample') ─────────
-    query_batch_key = _detect_query_batch_key(adata_query, user_batch_key=query_batch_key)
+    batch_key = _detect_query_batch_key(adata_query, user_batch_key=batch_key)
 
     # ── Step 9: compute n_samples_per_label dynamically (notebook formula) ───
     # Notebook: min_celltype_size computed on ref_labels_key AFTER prefixing
@@ -1100,7 +1100,7 @@ def run_popv_annotation(
 
     pq_kwargs = dict(
         query_labels_key      = None,
-        query_batch_key       = query_batch_key,
+        query_batch_key       = batch_key,  # Process_Query's own kwarg name — must stay as-is
         ref_labels_key        = ref_labels_key,
         ref_batch_key         = None,
         unknown_celltype_label= "unknown",
@@ -1362,7 +1362,7 @@ def auto_run_popv(
     drop_reference_columns: bool = True,
     user_popv_prediction:   str  = None,
     n_jobs:                 int  = 1,
-    query_batch_key:        str  = None,
+    batch_key:              str  = None,
 ) -> anndata.AnnData:
     """
     Fully automatic entry-point for Module 2.
@@ -1386,14 +1386,16 @@ def auto_run_popv(
         Path to an already-annotated h5ad.  Skips the entire PopV pipeline.
     n_jobs : int
         CPU threads (-1 = all cores).
-    query_batch_key : str, optional
+    batch_key : str, optional
         Column in your query h5ad's .obs to use as the PopV batch key.
-        DEFAULT: if omitted (and Module 1 was given no batch_key_hint
-        either), GSM ID ('gsm_id') is used as the batch automatically for
-        GEO-derived data. Only needed if you're passing a custom h5ad (not
-        produced by Module 1) whose sample/donor column isn't auto-detected,
-        or if GSM ID isn't a valid batch for your data (e.g. one GSM pools
-        multiple patients/donors) — e.g. query_batch_key="patient_id".
+        DEFAULT: if omitted (and Module 1's SampleAnnotator was given no
+        batch_key either), GSM ID ('gsm_id') is used as the batch
+        automatically for GEO-derived data. Only needed if you're passing a
+        custom h5ad (not produced by Module 1) whose sample/donor column
+        isn't auto-detected, or if GSM ID isn't a valid batch for your data
+        (e.g. one GSM pools multiple patients/donors) — e.g.
+        batch_key="patient_id". Use the SAME parameter name — batch_key —
+        in both Module 1 and Module 2.
 
     Usage
     -----
@@ -1412,16 +1414,16 @@ def auto_run_popv(
     adata = popv_annotation.auto_run_popv(
         nsamples         = 300,
         user_reference   = "/data/Ovary_TSP1_30_version2d_10X_smartseq_scvi.h5ad",
-        query_batch_key  = "patient_id"
+        batch_key        = "patient_id"
     )
 
     # GEO data where GSM ID isn't a valid batch (pooled multi-donor GSMs):
-    # first re-run Module 1 with batch_key_hint="donor" (or similar), then
-    # point query_batch_key at that same name here so Module 2 uses it too.
+    # first re-run Module 1 with batch_key="donor" (or similar), then
+    # pass the SAME name here so Module 2 uses it too.
     adata = popv_annotation.auto_run_popv(
         nsamples         = 300,
         user_reference   = "/data/Ovary_TSP1_30_version2d_10X_smartseq_scvi.h5ad",
-        query_batch_key  = "donor"
+        batch_key        = "donor"
     )
 
     # Skip pipeline — use pre-computed PopV result
@@ -1472,5 +1474,5 @@ def auto_run_popv(
         nsamples                = nsamples,
         drop_reference_columns  = drop_reference_columns,
         n_jobs                  = n_jobs,
-        query_batch_key         = query_batch_key,
+        batch_key                = batch_key,
     )
