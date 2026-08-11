@@ -167,7 +167,17 @@ setup(
         # via popv (PopV's own knn_on_harmony method runs Harmony), but
         # listed explicitly since preprocessing.py now imports it directly —
         # same rationale as matplotlib above.
-        "harmonypy",
+        # PINNED <0.1.0: harmonypy's PyPI page currently advertises
+        # "pre-built wheels for Linux and macOS" only, requiring a
+        # C++/Armadillo + cmake + OpenBLAS build otherwise — no Windows
+        # wheel. The <0.1.0 line is pure Python/numpy/pandas/scikit-learn
+        # (no compiled backend), so it installs cleanly on Windows with no
+        # source build, matching the same caution already applied to
+        # torch/tensorflow/annoy elsewhere in this file. Our code's
+        # Z_corr-shape-detection (handles both PCs×cells and cells×PCs)
+        # is compatible with this older orientation, so no functionality
+        # is lost by pinning here.
+        "harmonypy<0.1.0",
 
         # JAX ecosystem — pinned for scvi-tools 1.1.6 + Windows compat
         "jax[cpu]==0.4.23",
