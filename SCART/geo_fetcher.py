@@ -155,7 +155,7 @@ def _safe_concat(adatas: list) -> ad.AnnData:
 
 class SampleAnnotator:
     def __init__(self, *inputs, cancer_type: str, min_genes=None,
-                 max_mt=None, manual_annotation_col=None, batch_key_hint=None):
+                 max_mt=None, manual_annotation_col=None, batch_key=None):
         self.inputs   = list(inputs)
         self.base_dir = "GSE_data"
         self.min_genes = min_genes
@@ -180,7 +180,7 @@ class SampleAnnotator:
         # on user-supplied h5ad inputs, since those already carry their own
         # obs columns untouched. If not set, 'gsm_id' remains the batch
         # column downstream (Module 2 picks it up automatically).
-        self.batch_key_hint = batch_key_hint.strip() if isinstance(batch_key_hint, str) else batch_key_hint
+        self.batch_key = batch_key.strip() if isinstance(batch_key, str) else batch_key
 
         os.makedirs(self.base_dir, exist_ok=True)
 
@@ -273,12 +273,12 @@ class SampleAnnotator:
             )
 
     # CLAUDE EDIT — search a GSM's GEO metadata for a field matching
-    # self.batch_key_hint (case-insensitive substring on the field's key),
+    # self.batch_key (case-insensitive substring on the field's key),
     # GEO characteristics are typically formatted as "key: value" strings
     # (e.g. "donor: P1", "patient id: 3"). Returns the value, or None if
     # no matching field was found anywhere in this GSM's metadata.
     def _extract_batch_hint_value(self, gsm):
-        hint = self.batch_key_hint.lower()
+        hint = self.batch_key.lower()
 
         # Priority fields first (same fields _classify_gsm already trusts)
         priority_fields = []
@@ -321,28 +321,28 @@ class SampleAnnotator:
     def _print_batch_guidance(self):
         print("\n========== BATCH KEY GUIDANCE ==========")
         if self.h5ad_inputs and not self.gse_ids:
-            print("Input was h5ad file(s) — batch_key_hint does not apply (GEO-only feature).")
+            print("Input was h5ad file(s) — batch_key does not apply (GEO-only feature).")
             print("If your h5ad has its own batch/donor column, pass its name as")
-            print("query_batch_key='<column name>' to Module 2 (popv_annotation.auto_run_popv).")
+            print("batch_key='<column name>' to Module 2 (popv_annotation.auto_run_popv).")
             return
 
-        if self.batch_key_hint:
-            print(f"batch_key_hint='{self.batch_key_hint}' was requested for GEO-derived data.")
-            print(f"  Where a match was found, it was saved as adata.obs['{self.batch_key_hint}'].")
+        if self.batch_key:
+            print(f"batch_key='{self.batch_key}' was requested for GEO-derived data.")
+            print(f"  Where a match was found, it was saved as adata.obs['{self.batch_key}'].")
             print(f"  Where no match was found, that sample falls back to 'unknown' for this column.")
-            print(f"  → Pass query_batch_key='{self.batch_key_hint}' to Module 2 to use it.")
+            print(f"  → Pass batch_key='{self.batch_key}' to Module 2 to use it.")
         else:
-            print("No batch_key_hint provided — Module 2 will default to using")
+            print("No batch_key provided — Module 2 will default to using")
             print("GSM ID ('gsm_id', one value per sample) as the batch key.")
             print("This is usually correct (one GSM = one library/capture run).")
             print()
             print("If GSM ID is NOT a valid batch for your data — e.g. one GSM actually")
             print("contains multiple pooled patients/donors — you have two options:")
-            print("  1. Re-run Module 1 with batch_key_hint='<keyword>' (e.g. 'donor',")
+            print("  1. Re-run Module 1 with batch_key='<keyword>' (e.g. 'donor',")
             print("     'patient') to try extracting it automatically from GEO sample")
             print("     metadata (characteristics_ch1 / title / source_name_ch1).")
             print("  2. Supply your own h5ad with a batch column already in adata.obs,")
-            print("     then pass query_batch_key='<your column name>' to Module 2.")
+            print("     then pass batch_key='<your column name>' to Module 2.")
 
     # ── Public entry-point ────────────────────────────────────────────────
 
@@ -593,9 +593,9 @@ class SampleAnnotator:
                 unspecified.append(gsm_id)
             annotation_info[gsm_id] = label
 
-            # CLAUDE EDIT — try to extract the requested batch_key_hint
+            # CLAUDE EDIT — try to extract the requested batch_key
             # value from this GSM's own metadata text.
-            if self.batch_key_hint:
+            if self.batch_key:
                 batch_hint_map[gsm_id] = self._extract_batch_hint_value(gsm)
 
         print(f"\n========== SAMPLE SUMMARY: {gse_id} ==========")
@@ -606,13 +606,13 @@ class SampleAnnotator:
         print("Excluded (non-human):", ", ".join(excluded_non_human) or "None")
         print("Excluded (non-scRNA):", ", ".join(excluded_non_scrna) or "None")
 
-        if self.batch_key_hint:
+        if self.batch_key:
             found   = [g for g, v in batch_hint_map.items() if v is not None]
             missing = [g for g, v in batch_hint_map.items() if v is None]
-            print(f"Batch key hint '{self.batch_key_hint}': "
+            print(f"batch_key '{self.batch_key}': "
                   f"found in {len(found)}/{len(batch_hint_map)} samples")
             if missing:
-                print(f"  WARNING: no '{self.batch_key_hint}' field found for: "
+                print(f"  WARNING: no '{self.batch_key}' field found for: "
                       f"{', '.join(missing)} — these will be tagged 'unknown'.")
 
         return normal, tumor, unspecified, annotation_info, batch_hint_map
@@ -1062,33 +1062,33 @@ class SampleAnnotator:
                     # CLAUDE EDIT — Tier 0 has no per-GSM GEO metadata text
                     # to scan (that's the per-GSM path's job); instead, look
                     # for a column in the bundled cell-metadata file whose
-                    # NAME matches batch_key_hint (case-insensitive
-                    # substring), and copy/rename it to batch_key_hint so
-                    # Module 2's query_batch_key can find it consistently.
-                    if self.batch_key_hint:
-                        if self.batch_key_hint in adata.obs.columns:
-                            print(f"  [Tier 0] batch_key_hint '{self.batch_key_hint}' "
+                    # NAME matches batch_key (case-insensitive
+                    # substring), and copy/rename it to batch_key so
+                    # Module 2's batch_key can find it consistently.
+                    if self.batch_key:
+                        if self.batch_key in adata.obs.columns:
+                            print(f"  [Tier 0] batch_key '{self.batch_key}' "
                                   f"matched a metadata column of the same name.")
                         else:
-                            hint_lower  = self.batch_key_hint.lower()
+                            hint_lower  = self.batch_key.lower()
                             matched_col = next(
                                 (c for c in aligned.columns if hint_lower in c.lower()),
                                 None
                             )
                             if matched_col:
-                                adata.obs[self.batch_key_hint] = aligned.loc[tumor_bc, matched_col].values
-                                print(f"  [Tier 0] batch_key_hint '{self.batch_key_hint}' matched "
+                                adata.obs[self.batch_key] = aligned.loc[tumor_bc, matched_col].values
+                                print(f"  [Tier 0] batch_key '{self.batch_key}' matched "
                                       f"metadata column '{matched_col}' — copied as "
-                                      f"'{self.batch_key_hint}'.")
+                                      f"'{self.batch_key}'.")
                             else:
-                                print(f"  [Tier 0] WARNING: batch_key_hint "
-                                      f"'{self.batch_key_hint}' not found in metadata file "
+                                print(f"  [Tier 0] WARNING: batch_key "
+                                      f"'{self.batch_key}' not found in metadata file "
                                       f"columns: {list(aligned.columns)}")
         else:
             print("  [Tier 0] No metadata/GSM mapping — using all cells.")
             adata.obs["gse_id"] = gse_id
-            if self.batch_key_hint:
-                print(f"  [Tier 0] WARNING: batch_key_hint '{self.batch_key_hint}' requested "
+            if self.batch_key:
+                print(f"  [Tier 0] WARNING: batch_key '{self.batch_key}' requested "
                       f"but no cell-metadata file was found for this GSE-level matrix.")
 
         return adata
@@ -1236,12 +1236,12 @@ class SampleAnnotator:
 
                 adata.obs["gsm_id"] = gsm_id
                 adata.obs["gse_id"] = gse_id
-                # CLAUDE EDIT — stamp the requested batch_key_hint value
+                # CLAUDE EDIT — stamp the requested batch_key value
                 # (extracted per-GSM in _process_gse) onto every cell from
                 # this sample, same pattern as gsm_id/gse_id above.
-                if self.batch_key_hint:
+                if self.batch_key:
                     hint_val = (batch_hint_map or {}).get(gsm_id)
-                    adata.obs[self.batch_key_hint] = hint_val if hint_val is not None else "unknown"
+                    adata.obs[self.batch_key] = hint_val if hint_val is not None else "unknown"
                 adata.layers["counts"] = adata.X.copy()
                 adata.raw = adata
                 adata.obs_names_make_unique()
@@ -1265,9 +1265,9 @@ class SampleAnnotator:
             combined.obs["gsm_id"] = combined.obs["gsm_id"].astype("category")
         if "gse_id" in combined.obs.columns:
             combined.obs["gse_id"] = combined.obs["gse_id"].astype("category")
-        if self.batch_key_hint and self.batch_key_hint in combined.obs.columns:
-            combined.obs[self.batch_key_hint] = combined.obs[self.batch_key_hint].astype("category")
-            print(f"... storing '{self.batch_key_hint}' (batch_key_hint) as categorical")
+        if self.batch_key and self.batch_key in combined.obs.columns:
+            combined.obs[self.batch_key] = combined.obs[self.batch_key].astype("category")
+            print(f"... storing '{self.batch_key}' (batch_key) as categorical")
 
         combined.uns["cancer_type"] = self._user_cancer_type
         print(f"... stored cancer_type in h5ad: {self._user_cancer_type}")
