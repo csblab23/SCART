@@ -181,14 +181,20 @@ def _verify_python():
     print("Verifying Python packages ...")
     print(SEP2)
     # Matches: python -c "import jax; import flax; import scvi; import SCART; ..."
+    # NEW: harmonypy added — it's imported locally inside preprocessing.py's
+    # run_harmony_integration() (Module 3 Step 8b, Cancer Composition Score),
+    # not at module level, so `from SCART import preprocessing` below would
+    # succeed even with a broken harmonypy install. Checking it explicitly
+    # here surfaces that at verify-time instead of only when Step 8b runs.
     _run(
         [
             sys.executable, "-c",
             (
-                "import jax, flax, scvi, SCART; "
+                "import jax, flax, scvi, SCART, harmonypy; "
                 "print('jax:', jax.__version__); "
                 "import numpy; print('numpy:', numpy.__version__); "
-                "print('scvi:', scvi.__version__)"
+                "print('scvi:', scvi.__version__); "
+                "print('harmonypy:', harmonypy.__version__)"
             ),
         ],
         label="verify",
@@ -561,43 +567,50 @@ def _show_manual_steps(os_choice: str):
  MANUAL STEPS REQUIRED — Windows
 {SEP2}
 
+ A NOTE ON SHELLS: "Anaconda Prompt" (the prompt shown as
+ "(scart_env) C:\\...>") is cmd.exe, NOT PowerShell. cmd.exe does not
+ support multi-line quoted commands — every command below is written to
+ work correctly when pasted into cmd.exe. If you use PowerShell instead,
+ these same commands also work there.
+
  BEFORE running this script (in this exact order):
 
-   [0] Install Microsoft Visual C++ Redistributable
-       (required for TensorFlow + PyTorch — needs admin rights)
-       In PowerShell:
+   [0] Install Microsoft Visual C++ Redistributable (one-time, needs admin rights)
+       Easiest — just download and run it yourself, no terminal needed:
+         https://aka.ms/vs/17/release/vc_redist.x64.exe
+       Double-click the downloaded file, click through the installer,
+       then RESTART your terminal.
+
+       (PowerShell users who prefer the command line can do this instead —
+       this does NOT work in Anaconda Prompt / cmd.exe:
          Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile "vc_redist.exe"
          .\\vc_redist.exe /install /quiet /norestart
-       Then RESTART your terminal.
+       )
 
    [1] Create and activate conda environment:
          conda create -n scart_env python=3.10 -y
          conda activate scart_env
 
-   [2] Pre-install Python dependencies (Windows only — must be BEFORE pip install SCART):
+   [2] Pre-install Python dependencies, then annoy — all of this must
+       happen BEFORE pip install SCART. Run each line in order (works in
+       both Anaconda Prompt/cmd.exe and PowerShell):
          pip install "numpy>=1.24,<2.0"
          pip install "scipy==1.12.0"
          pip install "orbax-checkpoint<0.5" "flax<0.8"
          pip install scvi-tools==1.1.6.post2
          pip install "jax[cpu]==0.4.23" "jaxlib==0.4.23" "optax==0.1.7" "flax==0.7.5" "orbax-checkpoint<0.5" "numpyro<=0.13.2" "numpy>=1.24,<2.0" "scipy==1.12.0" --force-reinstall
-
-   [3] Install annoy via conda (NO C++ compiler needed — PyPI has no Windows wheel):
          conda install -c conda-forge python-annoy -y
-         python -c "
-import site, os
-sp = site.getsitepackages()[0]
-di = os.path.join(sp, 'annoy-1.17.3.dist-info')
-os.makedirs(di, exist_ok=True)
-open(os.path.join(di, 'METADATA'), 'w').write('Metadata-Version: 2.1\nName: annoy\nVersion: 1.17.3\n')
-open(os.path.join(di, 'RECORD'), 'w').write('')
-open(os.path.join(di, 'INSTALLER'), 'w').write('conda\n')
-print('annoy registered with pip')
-"
-       NOTE: Do NOT skip this step. pip will try to build annoy from source
-       when installing SCART (via popv dependency), which requires C++ Build Tools.
-       The conda install + pip registration prevents that entirely.
+         python -c "import site, os; sp = site.getsitepackages()[0]; di = os.path.join(sp, 'annoy-1.17.3.dist-info'); os.makedirs(di, exist_ok=True); open(os.path.join(di, 'METADATA'), 'w').write('Metadata-Version: 2.1\\nName: annoy\\nVersion: 1.17.3\\n'); open(os.path.join(di, 'RECORD'), 'w').write(''); open(os.path.join(di, 'INSTALLER'), 'w').write('conda\\n'); print('annoy registered with pip')"
 
-   [4] Install SCART (annoy is now pre-installed — no source build triggered):
+       NOTE: Do NOT skip the last two lines (conda install + the python -c
+       line). Without them, pip will try to build annoy from source when
+       installing SCART (via the popv dependency), which requires C++
+       Build Tools you likely don't have. Those two lines prevent that.
+       IMPORTANT: that python -c command must be pasted as ONE single
+       line — do not split it across multiple lines, cmd.exe will not
+       run it correctly if you do.
+
+   [3] Install SCART (annoy is now pre-installed — no source build triggered):
          pip install git+https://github.com/csblab23/SCART.git
 
  AUTOMATED by this script:
@@ -662,6 +675,28 @@ def _ask(prompt: str, valid: list) -> str:
 
 
 def main():
+    # CLAUDE EDIT — non-interactive mode. --os skips the OS prompt, --yes
+    # skips the confirmation prompt. Together, `python -m SCART.install
+    # --os windows --yes` runs fully unattended — this is what lets an
+    # external bootstrap script (or CI, or a first-time setup wizard) chain
+    # straight into this installer with zero further prompts. Without
+    # --os, the OS prompt is still interactive (deliberately — the OS
+    # should never be silently guessed), but --yes alone still skips the
+    # final confirmation once an OS choice exists.
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="SCART interactive post-installation setup.",
+    )
+    parser.add_argument(
+        "--os", choices=["linux", "windows", "mac"], default=None,
+        help="Run setup for this OS directly, skipping the OS prompt.",
+    )
+    parser.add_argument(
+        "--yes", "-y", action="store_true",
+        help="Skip the final confirmation prompt and proceed automatically.",
+    )
+    args = parser.parse_args()
+
     print(f"""
 {SEP}
   SCART Post-Installation Setup
@@ -670,26 +705,38 @@ def main():
 This script sets up all dependencies for SCART.
 It will show you exactly what runs automatically and
 what you need to do manually, then ask for confirmation.
+""")
 
-Select your operating system:
+    os_map   = {"linux": "1", "windows": "2", "mac": "3"}
+    os_names = {"1": "Linux", "2": "Windows", "3": "Mac"}
+
+    if args.os is not None:
+        os_choice = os_map[args.os]
+        os_name   = os_names[os_choice]
+        print(f"  --os={args.os} given — skipping the OS prompt. Selected: {os_name}\n")
+    else:
+        print("""Select your operating system:
 
   [1]  Linux
   [2]  Windows
   [3]  Mac
 
 """)
-
-    os_choice = _ask("Enter choice (1 / 2 / 3): ", ["1", "2", "3"])
-    os_names  = {"1": "Linux", "2": "Windows", "3": "Mac"}
-    os_name   = os_names[os_choice]
-    print(f"\n  You selected: {os_name}")
+        os_choice = _ask("Enter choice (1 / 2 / 3): ", ["1", "2", "3"])
+        os_name   = os_names[os_choice]
+        print(f"\n  You selected: {os_name}")
 
     _show_manual_steps(os_choice)
 
-    confirm = _ask(
-        f"Proceed with automated setup for {os_name}? [y/n]: ",
-        ["y", "n"],
-    )
+    if args.yes:
+        confirm = "y"
+        print(f"\n  --yes given — proceeding with automated setup for {os_name} "
+              f"without prompting.")
+    else:
+        confirm = _ask(
+            f"Proceed with automated setup for {os_name}? [y/n]: ",
+            ["y", "n"],
+        )
 
     if confirm == "n":
         print("\n  Setup cancelled. Run again when ready: python -m SCART.install\n")
