@@ -556,13 +556,24 @@ def _detect_query_batch_key(adata_query: anndata.AnnData,
     Resolution order:
       1. user_batch_key, if explicitly supplied — lets a user with their
          own h5ad point to whatever sample/donor column they actually have,
-         even if its name isn't in _BATCH_KEY_CANDIDATES.
+         even if its name isn't in _BATCH_KEY_CANDIDATES. This is also how
+         a Module 1 batch_key_hint value (e.g. "donor") gets used here —
+         pass query_batch_key equal to whatever name you gave
+         batch_key_hint= in SampleAnnotator.
       2. 'gsm_id' — written by Module 1 (geo_fetcher.SampleAnnotator) into
          every GEO-derived tumor h5ad (single GSE or multi-GSE combined),
          so GEO-sourced runs are batch-corrected automatically with no
-         extra argument needed.
+         extra argument needed. THIS IS THE DEFAULT: if neither Module 1
+         nor Module 2 is given a batch key, GSM ID is what gets used.
       3. Remaining candidates in _BATCH_KEY_CANDIDATES, 'gse_id' checked
          last since GSE-level grouping is coarser than GSM-level.
+
+    If GSM ID is not a valid batch for your data (e.g. one GSM actually
+    contains multiple pooled patients/donors), either:
+      (a) re-run Module 1 with batch_key_hint='<keyword>' (e.g. 'donor')
+          to extract a better column from GEO metadata automatically, or
+      (b) supply your own h5ad with a batch column already in adata.obs,
+          then pass query_batch_key='<your column name>' here.
     """
     if user_batch_key is not None:
         if user_batch_key not in adata_query.obs.columns:
@@ -591,10 +602,25 @@ def _detect_query_batch_key(adata_query: anndata.AnnData,
                     f"query_batch_key auto-detected: '{key}' "
                     f"({n_unique} unique values)."
                 )
+                if key == "gsm_id":
+                    logger.info(
+                        "Using GSM ID as the batch key (default — no "
+                        "query_batch_key or Module 1 batch_key_hint given). "
+                        "If one GSM actually contains multiple pooled "
+                        "patients/donors, this is too coarse: re-run Module 1 "
+                        "with batch_key_hint='donor' (or similar), or supply "
+                        "your own h5ad with a proper batch column and pass "
+                        "query_batch_key= here instead."
+                    )
                 return key
     logger.warning(
         "No suitable query_batch_key found — running without batch correction. "
-        f"Checked: {_BATCH_KEY_CANDIDATES}"
+        f"Checked: {_BATCH_KEY_CANDIDATES}\n"
+        "If this h5ad came from Module 1 with a GEO ID, 'gsm_id' should "
+        "normally be present — check it has >=2 unique values. If you need "
+        "a different batch column, either re-run Module 1 with "
+        "batch_key_hint='<keyword>', or pass query_batch_key='<column name>' "
+        "here directly."
     )
     return None
 
@@ -942,9 +968,14 @@ def run_popv_annotation(
         batch-corrected methods (knn_on_harmony, knn_on_scanorama).
         If not supplied, auto-detected — 'gsm_id' (written automatically
         by Module 1 for GEO-derived data) is checked first, then other
-        common names, falling back to 'gse_id'. Required only if you're
-        supplying your own h5ad with a batch column under a name PopV
-        wouldn't otherwise recognize.
+        common names, falling back to 'gse_id'.
+        DEFAULT BEHAVIOUR: if you give no query_batch_key here AND gave no
+        batch_key_hint to Module 1's SampleAnnotator, GSM ID is used as the
+        batch (one value per GEO sample). If that's too coarse for your
+        data (e.g. one GSM contains multiple pooled patients/donors), either
+        re-run Module 1 with batch_key_hint='<keyword>' (e.g. 'donor') to
+        extract a better column automatically, or supply your own h5ad with
+        a batch column already in adata.obs and pass its name here.
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -1357,9 +1388,12 @@ def auto_run_popv(
         CPU threads (-1 = all cores).
     query_batch_key : str, optional
         Column in your query h5ad's .obs to use as the PopV batch key.
-        Only needed if you're passing a custom h5ad (not produced by
-        Module 1) whose sample/donor column isn't auto-detected —
-        e.g. query_batch_key="patient_id".
+        DEFAULT: if omitted (and Module 1 was given no batch_key_hint
+        either), GSM ID ('gsm_id') is used as the batch automatically for
+        GEO-derived data. Only needed if you're passing a custom h5ad (not
+        produced by Module 1) whose sample/donor column isn't auto-detected,
+        or if GSM ID isn't a valid batch for your data (e.g. one GSM pools
+        multiple patients/donors) — e.g. query_batch_key="patient_id".
 
     Usage
     -----
@@ -1379,6 +1413,15 @@ def auto_run_popv(
         nsamples         = 300,
         user_reference   = "/data/Ovary_TSP1_30_version2d_10X_smartseq_scvi.h5ad",
         query_batch_key  = "patient_id"
+    )
+
+    # GEO data where GSM ID isn't a valid batch (pooled multi-donor GSMs):
+    # first re-run Module 1 with batch_key_hint="donor" (or similar), then
+    # point query_batch_key at that same name here so Module 2 uses it too.
+    adata = popv_annotation.auto_run_popv(
+        nsamples         = 300,
+        user_reference   = "/data/Ovary_TSP1_30_version2d_10X_smartseq_scvi.h5ad",
+        query_batch_key  = "donor"
     )
 
     # Skip pipeline — use pre-computed PopV result
