@@ -1222,6 +1222,17 @@ def run_cancer_composition_step(
     print("\n--- Step 8b: Cancer Composition Score (tumor vs. healthy reference) ---")
     os.makedirs(save_dir, exist_ok=True)
 
+    # CLAUDE EDIT — global seed, matching run_harmony_integration.py's
+    # set_seed() exactly. Previously only harmonypy's own random_state was
+    # seeded (inside run_harmony_integration() below); sc.tl.umap() is also
+    # stochastic and depends on sc.settings.seed / numpy's global RNG for
+    # reproducibility, which was NOT being set — so the before/after UMAP
+    # plots weren't actually reproducible run-to-run despite passing seed=.
+    import random as _random
+    _random.seed(seed)
+    np.random.seed(seed)
+    sc.settings.seed = seed
+
     adata_combined = build_tumor_healthy_combined(
         adata_tumor_fullgene, healthy_reference_h5ad,
         tumor_batch_key=tumor_batch_key, healthy_batch_key=healthy_batch_key,
@@ -1391,9 +1402,14 @@ def run_preprocessing_pipeline(
     # STEP 2 — Read QC thresholds
     min_genes, max_mt, qc_active, qc_source = _read_qc_params(adata_full)
 
-    # STEP 3 — Extract epithelial cells → QC
-    print("\n--- Step 3: Epithelial selection" +
-          (" + QC ---" if qc_active else " ---"))
+    # STEP 3 — Extract epithelial cells
+    # CLAUDE EDIT: QC (min_genes / max_mt) is intentionally NOT re-applied
+    # here. Module 1 already filtered cells against these exact thresholds
+    # before this data ever reached Module 2/3 — re-filtering here dropped
+    # cells a second time against the same numbers (a "double QC"). The
+    # qc_params read above (Step 2) is still carried through to the final
+    # output's uns['qc_params'] purely as a record of what Module 1 did.
+    print("\n--- Step 3: Epithelial selection ---")
 
     labels  = adata_full.obs["popv_majority_vote_prediction"].astype(str)
     ep_mask = labels.str.contains("epithelial cell", case=False, na=False)
@@ -1406,34 +1422,6 @@ def run_preprocessing_pipeline(
     logger.info(f"Epithelial labels matched: {sorted(matched_labels)}")
 
     adata_epi = adata_full[ep_mask].copy()
-    before_qc = adata_epi.n_obs
-
-    if qc_active:
-        _raw_for_qc = _get_raw_counts_from_adata(adata_epi, "QC")
-        _X_backup   = adata_epi.X.copy()
-        adata_epi.X = sp.csr_matrix(_raw_for_qc)
-
-        adata_epi.var["mt"] = adata_epi.var_names.str.startswith("MT-")
-        sc.pp.calculate_qc_metrics(adata_epi, qc_vars=["mt"], inplace=True)
-        print(f"Mean MT% BEFORE QC: {adata_epi.obs['pct_counts_mt'].mean():.2f}")
-
-        adata_epi.X = _X_backup
-
-        filters = np.ones(adata_epi.n_obs, dtype=bool)
-        if min_genes is not None:
-            filters &= adata_epi.obs["n_genes_by_counts"] > min_genes
-        if max_mt is not None:
-            filters &= adata_epi.obs["pct_counts_mt"] < max_mt
-        adata_epi = adata_epi[filters].copy()
-        filter_desc = "  ".join(
-            ([f"min_genes>{min_genes}"] if min_genes is not None else []) +
-            ([f"max_mt<{max_mt}"]       if max_mt    is not None else [])
-        )
-        print(f"Epithelial cells after QC: {adata_epi.n_obs}  "
-              f"(removed {before_qc - adata_epi.n_obs}  |  {filter_desc})")
-        print(f"Mean MT% AFTER QC:  {adata_epi.obs['pct_counts_mt'].mean():.2f}\n")
-    else:
-        print(f"QC filtering SKIPPED — all {adata_epi.n_obs} epithelial cells proceed.\n")
 
     print("Setting up raw counts for epithelial cells...")
     _raw_epi = _get_raw_counts_from_adata(adata_epi, "epithelial-raw-setup")
