@@ -875,27 +875,34 @@ cat("Done!\\n")
 
 def _get_raw_counts(adata, context=""):
     tag = f"[{context}] " if context else ""
+
+    # CLAUDE EDIT — memory fix: keep sparse input sparse. The old version
+    # always called .toarray() here, producing a dense copy even though
+    # both call sites (build_tumor_healthy_combined) immediately re-wrap
+    # the result in sp.csr_matrix() — a completely wasted dense round-trip.
+    # For a ~49k-cell x 23.5k-gene healthy reference, that one .toarray()
+    # call materializes an unnecessary ~4.6 GB dense array right before
+    # Harmony/KMeans need their own memory — a very plausible cause of a
+    # kernel dying with no traceback (OS OOM-killer, not a Python error).
+    # sp.csr_matrix() accepts an already-sparse input safely and cheaply
+    # (a format/dtype conversion, not a densify), so callers are unaffected.
+    def _as_sparse_or_dense(X):
+        if sp.issparse(X):
+            return sp.csr_matrix(X, dtype=np.float32)
+        return np.array(X, dtype=np.float32)
+
     for lyr in ("counts", "raw_counts", "scvi_counts"):
         if lyr in adata.layers:
             logger.info(f"{tag}Raw counts source: layers['{lyr}']")
-            X = adata.layers[lyr]
-            if sp.issparse(X):
-                X = X.toarray()
-            return np.array(X, dtype=np.float32)
+            return _as_sparse_or_dense(adata.layers[lyr])
     if adata.raw is not None:
         logger.info(f"{tag}Raw counts source: adata.raw.X ({adata.raw.n_vars} genes)")
-        X = adata.raw.X
-        if sp.issparse(X):
-            X = X.toarray()
-        return np.array(X, dtype=np.float32)
+        return _as_sparse_or_dense(adata.raw.X)
     logger.warning(
         f"{tag}No raw counts layer found on this object — using .X as-is. "
         "If this is already log-normalised, the composition score will be wrong."
     )
-    X = adata.X
-    if sp.issparse(X):
-        X = X.toarray()
-    return np.array(X, dtype=np.float32)
+    return _as_sparse_or_dense(adata.X)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -968,6 +975,16 @@ def build_tumor_healthy_combined(
     adata_t = adata_tumor_fullgene[:, common_genes].copy()
     adata_h = adata_healthy[:, common_genes].copy()
 
+    # CLAUDE EDIT — memory fix: the full-size healthy reference (all
+    # 61,806 genes in a real run, not just the ~23,539 common ones) is no
+    # longer needed once adata_h has been extracted above. Explicitly
+    # delete + collect here instead of waiting for adata_healthy to fall
+    # out of scope at the end of this function, so that memory is freed
+    # BEFORE the concat/Harmony steps below need their own.
+    del adata_healthy
+    import gc as _gc
+    _gc.collect()
+
     adata_t.obs["Data_Type"] = "Tumor"
     adata_h.obs["Data_Type"] = "Healthy"
 
@@ -1011,23 +1028,38 @@ def build_tumor_healthy_combined(
 # ═══════════════════════════════════════════════════════════════════════════
 
 def prepare_for_harmony(adata_combined, n_top_genes=3000):
-    adata_hvg = adata_combined.copy()
-    sc.pp.normalize_total(adata_hvg, target_sum=1e4)
-    sc.pp.log1p(adata_hvg)
+    # CLAUDE EDIT — memory fix: no full-size copy before HVG subsetting.
+    # The old version did adata_combined.copy() at the FULL common-gene
+    # count (e.g. 23,539 in a real run) before ever reducing to HVGs,
+    # meaning two full-size objects (the original adata_combined plus this
+    # copy) sat in memory simultaneously right up until the HVG subset —
+    # the single largest avoidable memory spike in this step. Normalizing
+    # + log1p in place on adata_combined is safe: only .X is touched
+    # (normalize_total/log1p never touch other layers by default), and
+    # compute_cancer_composition_score() — called later on this same
+    # adata_combined object — always re-derives .X fresh from
+    # layers['counts'] regardless of what .X currently holds, so it does
+    # not care that .X was mutated here.
+    sc.pp.normalize_total(adata_combined, target_sum=1e4)
+    sc.pp.log1p(adata_combined)
 
     # FIX vs. original notebook: flavor='seurat_v3' requires raw counts.
     # The notebook passed already-log1p'd .X (silent scanpy warning). Here
     # we point it at the preserved raw-counts layer explicitly.
     sc.pp.highly_variable_genes(
-        adata_hvg,
+        adata_combined,
         batch_key="batch",
         flavor="seurat_v3",
         n_top_genes=n_top_genes,
         layer="counts",
     )
-    print(f"  Selected {int(adata_hvg.var['highly_variable'].sum())} HVGs for Harmony/UMAP embedding")
+    print(f"  Selected {int(adata_combined.var['highly_variable'].sum())} HVGs for Harmony/UMAP embedding")
 
-    adata_hvg = adata_hvg[:, adata_hvg.var["highly_variable"]].copy()
+    # The ONLY full-materializing copy in this function now happens here —
+    # already reduced to n_top_genes, not the full common-gene count.
+    adata_hvg = adata_combined[:, adata_combined.var["highly_variable"]].copy()
+    import gc as _gc
+    _gc.collect()
     sc.pp.scale(adata_hvg, max_value=10)
     return adata_hvg
 
@@ -1711,14 +1743,27 @@ def run_preprocessing_pipeline(
     adata_mal.obs["deg_group"]  = "malignant_epithelial"
     adata_rest.obs["deg_group"] = "non_epithelial_rest"
 
+    # CLAUDE EDIT — capture before freeing adata_rest later; only the cell
+    # count is needed downstream (uns['deg_params']), not the object itself.
+    n_rest_cells = adata_rest.n_obs
+
     adata_deg = sc.concat([adata_mal, adata_rest], join="outer", label=None)
     adata_deg.obs_names_make_unique()
     adata_deg.var = adata_mal.var.copy()
 
+    # CLAUDE EDIT — memory fix: same anti-pattern as _get_raw_counts (now
+    # fixed above) — densify -> nan_to_num -> resparsify wasted a full
+    # dense copy (for 7,528 cells x 23,539 genes here, ~700MB+) purely to
+    # sanitize NaNs. scanpy's rank_genes_groups works fine on sparse input;
+    # NaN-cleaning only needs to touch the sparse matrix's .data array
+    # (just the non-zero values), never the full dense matrix.
     if sp.issparse(adata_deg.X):
-        adata_deg.X = adata_deg.X.toarray()
-    adata_deg.X = np.nan_to_num(np.array(adata_deg.X, dtype=np.float32), nan=0.0)
-    adata_deg.X = sp.csr_matrix(adata_deg.X)
+        adata_deg.X = adata_deg.X.tocsr().astype(np.float32)
+        np.nan_to_num(adata_deg.X.data, copy=False, nan=0.0)
+    else:
+        adata_deg.X = sp.csr_matrix(
+            np.nan_to_num(np.asarray(adata_deg.X, dtype=np.float32), nan=0.0)
+        )
 
     print(f"DEG AnnData: {adata_deg.n_obs} cells × {adata_deg.n_vars} genes")
     print(f"  malignant_epithelial: "
@@ -1737,6 +1782,15 @@ def run_preprocessing_pipeline(
     deg = sc.get.rank_genes_groups_df(adata_deg, group="malignant_epithelial")
     print(f"\nTotal DEG candidates: {deg.shape[0]}")
     print(f"Applying filters: log2FC > {log2fc_threshold}, pvals_adj < {pval_adj_threshold}")
+
+    # CLAUDE EDIT — memory fix: adata_deg and adata_rest are not referenced
+    # anywhere after this point (deg's stats are already extracted above;
+    # n_rest_cells was captured earlier) — free them explicitly now,
+    # before Step 8b's much larger Harmony/PCA/KMeans allocations begin,
+    # instead of letting them sit in memory unused for the rest of the run.
+    del adata_deg, adata_rest
+    import gc as _gc
+    _gc.collect()
 
     filtered_deg = deg[
         (deg["logfoldchanges"] > log2fc_threshold) &
@@ -1844,7 +1898,7 @@ def run_preprocessing_pipeline(
         "pval_adj_threshold" : pval_adj_threshold,
         "method"             : "wilcoxon",
         "n_malignant"        : int(adata_mal.n_obs),
-        "n_rest"             : int(adata_rest.n_obs),
+        "n_rest"             : int(n_rest_cells),
         "n_genes_tested"     : int(adata_mal.var_names.shape[0]),
         "n_surfaceome_genes_total"      : int(len(surf_genes_set)),
         "n_surfaceome_genes_in_dataset" : int(len(surf_in_mal)),
