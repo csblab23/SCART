@@ -130,9 +130,73 @@ FIX 13  Step 9's gene subsetting is now a 3-way intersection between THREE
         final intersection for traceability. If run_cancer_composition=False
         or no healthy reference is available, this falls back to a 2-way
         DEG ∩ surfaceome intersection.
+
+═══════════════════════════════════════════════════════════════════════════════
+CLAUDE EDIT — Thread-oversubscription segfault fix + uns serialization fix
+═══════════════════════════════════════════════════════════════════════════════
+
+FIX 14  Root cause of the "Command terminated by signal 11" / kernel-dead
+        crash right at "Computing initial centroids with sklearn.KMeans"
+        inside run_harmony_integration(): setting
+        OMP_NUM_THREADS/OPENBLAS_NUM_THREADS/MKL_NUM_THREADS via
+        os.environ[...] INSIDE that function happens too late — OpenBLAS's
+        thread pool is initialized lazily on first BLAS call, which by that
+        point has already happened (Step 8's Wilcoxon DEG test runs earlier
+        in the same process). Re-assigning the env var afterward does not
+        reliably shrink an already-initialized OpenBLAS thread pool, so
+        sklearn's internal KMeans (used by harmonypy for centroid init)
+        still oversubscribes threads on top of joblib's own parallelism —
+        a classic native segfault trigger, confirmed by 487% CPU usage
+        despite n_jobs=1 being requested.
+
+        Two-part fix:
+          (a) Thread-limit env vars are now also set at MODULE IMPORT TIME,
+              before numpy/scipy/scanpy are imported, so a fresh process
+              starts constrained from the very first BLAS call onward
+              (belt-and-suspenders — helps most when nothing already
+              exported the vars in the shell/SLURM script).
+          (b) threadpoolctl.threadpool_limits(...) now wraps the actual
+              sc.pp.pca() + harmonypy.run_harmony() calls in
+              run_harmony_integration(), and the sc.pp.neighbors()/
+              sc.tl.umap() calls in plot_umap_before_after(). Unlike
+              os.environ, threadpoolctl patches the ALREADY-LOADED native
+              BLAS library directly, so it reliably enforces the thread
+              limit regardless of what ran earlier in the process. This is
+              the change that was verified live: with OMP/OPENBLAS/MKL
+              threads pinned to 1, the same run that previously died with
+              signal 11 at KMeans-init instead completed Harmony (10/10
+              iterations), both UMAPs, and the Cancer Composition Score
+              successfully.
+              Requires: pip install threadpoolctl   (in scart_env)
+
+FIX 15  adata.uns['cc_params']['umap_plot_paths'] was stored as a raw
+        Python tuple (pdf_path, png_path) returned from
+        plot_umap_before_after(). anndata's HDF5 writer has no registered
+        writer for `tuple`, so adata_mal.write(final_path) — the very last
+        line of the pipeline — raised IORegistryError AFTER every
+        expensive step (SCEVAN, Harmony, UMAP, Cancer Composition, DEG,
+        Step 9 gene selection) had already completed, silently discarding
+        the entire run's output (final_tumor.h5ad was never written).
+        Fixed by casting to list(...) before storing in uns, since h5py/
+        anndata support list (and array-like) but not tuple.
 """
 
 import os
+
+# CLAUDE EDIT — FIX 14(a): set BLAS/OMP thread-limit env vars at import
+# time, BEFORE numpy/scipy/scanpy get imported below. This is a
+# belt-and-suspenders default only — os.environ.setdefault() never
+# overrides a value already exported by the calling shell or SLURM script,
+# it only fills in the gap when nothing was set. The real, reliable
+# enforcement is the threadpoolctl wrapper (FIX 14b) further down in
+# run_harmony_integration() / plot_umap_before_after(), since env vars set
+# after an OpenBLAS thread pool has already initialized (e.g. after Step
+# 8's Wilcoxon DEG test runs its own BLAS calls) do not reliably shrink it.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
 import sys
 import glob
 import shutil
@@ -1079,33 +1143,42 @@ def run_harmony_integration(
     n_jobs=1,
 ):
     import harmonypy
+    # CLAUDE EDIT — FIX 14(b): threadpoolctl patches the already-loaded
+    # native BLAS library directly (unlike os.environ, which only affects
+    # thread pools not yet initialized). This is what fixed the confirmed
+    # segfault ("Command terminated by signal 11") at
+    # "Computing initial centroids with sklearn.KMeans..." inside
+    # harmonypy — sklearn's internal KMeans call was oversubscribing
+    # threads on top of an OpenBLAS pool that had already been sized by
+    # Step 8's earlier Wilcoxon DEG test, despite n_jobs=1 being requested
+    # (487% CPU observed vs. the intended 1 thread).
+    # Requires: pip install threadpoolctl
+    from threadpoolctl import threadpool_limits
 
-    # CLAUDE EDIT — thread-limiting, mirrors popv_annotation.py's Step 14
-    # exactly (same env vars, same pattern). Without this, numpy/sklearn's
-    # BLAS backend defaults to using ALL available cores for PCA and for
-    # harmonypy's internal sklearn.KMeans centroid initialization. On a
-    # multi-core HPC node with a per-job memory limit, that oversubscription
-    # (each thread/worker duplicating chunks of the data) is a classic
-    # silent OOM-killer trigger — the process is killed with no Python
-    # traceback, which looks exactly like "the kernel just died".
+    # CLAUDE EDIT — memory/thread fix, mirrors popv_annotation.py's Step 14
+    # exactly (same env vars, same pattern). Kept as a first line of
+    # defense for any BLAS calls made by libraries that don't go through
+    # threadpoolctl's supported APIs; the threadpool_limits() context below
+    # is the primary, reliable enforcement mechanism.
     import os as _os
     n_threads = str(n_jobs if n_jobs > 0 else (_os.cpu_count() or 1))
     for env_var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
         _os.environ[env_var] = n_threads
     print(f"  Parallelism: n_jobs={n_jobs} ({n_threads} threads) for PCA + Harmony")
 
-    print(f"  Running PCA (n_comps={n_pcs}, svd_solver={svd_solver})")
-    sc.pp.pca(adata_hvg, n_comps=n_pcs, svd_solver=svd_solver)
+    with threadpool_limits(limits=n_jobs, user_api="blas"):
+        print(f"  Running PCA (n_comps={n_pcs}, svd_solver={svd_solver})")
+        sc.pp.pca(adata_hvg, n_comps=n_pcs, svd_solver=svd_solver)
 
-    harmony_kwargs = {"max_iter_harmony": max_iter_harmony, "random_state": seed}
-    if theta is not None:
-        harmony_kwargs["theta"] = theta
+        harmony_kwargs = {"max_iter_harmony": max_iter_harmony, "random_state": seed}
+        if theta is not None:
+            harmony_kwargs["theta"] = theta
 
-    print(f"  Running Harmony (vars_use=['{batch_key}'], "
-          f"max_iter_harmony={max_iter_harmony}, theta={theta}, random_state={seed})")
-    ho = harmonypy.run_harmony(
-        adata_hvg.obsm["X_pca"], adata_hvg.obs, vars_use=[batch_key], **harmony_kwargs,
-    )
+        print(f"  Running Harmony (vars_use=['{batch_key}'], "
+              f"max_iter_harmony={max_iter_harmony}, theta={theta}, random_state={seed})")
+        ho = harmonypy.run_harmony(
+            adata_hvg.obsm["X_pca"], adata_hvg.obs, vars_use=[batch_key], **harmony_kwargs,
+        )
 
     Z = np.asarray(ho.Z_corr)
     if Z.shape == (adata_hvg.n_obs, n_pcs):
@@ -1137,20 +1210,27 @@ def _scatter(ax, coords, labels, title, legend=True):
         ax.legend(markerscale=4, fontsize=6, loc="best", frameon=False)
 
 
-def plot_umap_before_after(adata_hvg, save_dir, sample_name="cancer_composition"):
+def plot_umap_before_after(adata_hvg, save_dir, sample_name="cancer_composition", n_jobs=1):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    # CLAUDE EDIT — FIX 14(b): same threadpoolctl protection as
+    # run_harmony_integration(). sc.pp.neighbors()/sc.tl.umap() also call
+    # into BLAS/sklearn nearest-neighbor code right after Harmony in the
+    # same process, so they're wrapped for consistency and safety even
+    # though the confirmed crash site was specifically the KMeans call.
+    from threadpoolctl import threadpool_limits
 
-    print("  Computing UMAP — unintegrated (X_pca)")
-    sc.pp.neighbors(adata_hvg, use_rep="X_pca", key_added="unintegrated")
-    sc.tl.umap(adata_hvg, neighbors_key="unintegrated")
-    umap_unintegrated = adata_hvg.obsm["X_umap"].copy()
+    with threadpool_limits(limits=n_jobs, user_api="blas"):
+        print("  Computing UMAP — unintegrated (X_pca)")
+        sc.pp.neighbors(adata_hvg, use_rep="X_pca", key_added="unintegrated")
+        sc.tl.umap(adata_hvg, neighbors_key="unintegrated")
+        umap_unintegrated = adata_hvg.obsm["X_umap"].copy()
 
-    print("  Computing UMAP — Harmony-integrated (X_pca_harmony)")
-    sc.pp.neighbors(adata_hvg, use_rep="X_pca_harmony", key_added="harmony")
-    sc.tl.umap(adata_hvg, neighbors_key="harmony")
-    umap_harmony = adata_hvg.obsm["X_umap"].copy()
+        print("  Computing UMAP — Harmony-integrated (X_pca_harmony)")
+        sc.pp.neighbors(adata_hvg, use_rep="X_pca_harmony", key_added="harmony")
+        sc.tl.umap(adata_hvg, neighbors_key="harmony")
+        umap_harmony = adata_hvg.obsm["X_umap"].copy()
 
     adata_hvg.obsm["X_umap_unintegrated"] = umap_unintegrated
     adata_hvg.obsm["X_umap_harmony"]      = umap_harmony
@@ -1264,12 +1344,13 @@ def run_cancer_composition_step(
     n_jobs : int
         CPU threads for PCA + Harmony (default 1 — deliberately
         conservative). Passed to OMP_NUM_THREADS/OPENBLAS_NUM_THREADS/
-        MKL_NUM_THREADS the same way Module 2 already does. Raise this only
-        if you know you have the RAM headroom for it: sklearn's KMeans
-        (used internally by harmonypy) duplicates data across threads/
-        workers, and on a shared multi-core HPC node with a per-job memory
-        cap, an unconstrained thread count is a common cause of the kernel
-        silently dying (OOM-killed) with no Python traceback.
+        MKL_NUM_THREADS the same way Module 2 already does, AND enforced
+        via threadpoolctl.threadpool_limits() inside run_harmony_integration()
+        and plot_umap_before_after() (see FIX 14). Raise this only if you
+        know you have the RAM/CPU headroom for it: sklearn's KMeans (used
+        internally by harmonypy) duplicates data across threads/workers,
+        and an unconstrained thread count previously caused a confirmed
+        segfault (signal 11) at KMeans initialization.
 
     Returns
     -------
@@ -1303,7 +1384,11 @@ def run_cancer_composition_step(
         adata_hvg, batch_key="batch", n_pcs=n_pcs,
         max_iter_harmony=max_iter_harmony, theta=theta, seed=seed, n_jobs=n_jobs,
     )
-    plot_paths = plot_umap_before_after(adata_hvg, save_dir, sample_name=sample_name)
+    # CLAUDE EDIT — n_jobs threaded through to plot_umap_before_after()
+    # (FIX 14b) so its threadpoolctl wrap actually enforces the same
+    # thread limit as run_harmony_integration(), instead of silently
+    # defaulting to n_jobs=1 regardless of what the caller requested.
+    plot_paths = plot_umap_before_after(adata_hvg, save_dir, sample_name=sample_name, n_jobs=n_jobs)
     print(f"  UMAP (unintegrated vs Harmony-integrated) saved to:\n"
           f"    {plot_paths[0]}\n    {plot_paths[1]}")
 
@@ -1917,7 +2002,17 @@ def run_preprocessing_pipeline(
         "healthy_reference"   : _cc_healthy_ref,
         "cc_score_threshold"  : cc_score_threshold,
         "n_cc_genes"          : int(len(cc_genes)) if cc_genes is not None else None,
-        "umap_plot_paths"     : cc_plot_paths,
+        # CLAUDE EDIT — FIX 15: cast tuple -> list. anndata's HDF5 writer
+        # (write_elem) has no registered writer for the built-in `tuple`
+        # type, so storing cc_plot_paths (a (pdf_path, png_path) tuple
+        # returned by plot_umap_before_after) directly here caused
+        # adata_mal.write(final_path) to raise IORegistryError on the very
+        # last line of the pipeline — AFTER every expensive upstream step
+        # (SCEVAN, Harmony, UMAP, Cancer Composition, DEG, Step 9 gene
+        # selection) had already completed, silently discarding the whole
+        # run's output. list is a supported/registered type; the values
+        # and order are unchanged.
+        "umap_plot_paths"     : list(cc_plot_paths) if cc_plot_paths is not None else None,
     }
     adata_mal.uns["final_gene_selection"] = {
         "sets_used"   : {label: int(len(gset)) for label, gset in selection_sets.items()},
