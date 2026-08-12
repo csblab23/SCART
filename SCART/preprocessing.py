@@ -130,16 +130,84 @@ FIX 13  Step 9's gene subsetting is now a 3-way intersection between THREE
         final intersection for traceability. If run_cancer_composition=False
         or no healthy reference is available, this falls back to a 2-way
         DEG ∩ surfaceome intersection.
+
+═══════════════════════════════════════════════════════════════════════════════
+CLAUDE EDIT — Thread-oversubscription segfault fix + uns serialization fix
+═══════════════════════════════════════════════════════════════════════════════
+
+FIX 14  Root cause of the "Command terminated by signal 11" / kernel-dead
+        crash right at "Computing initial centroids with sklearn.KMeans"
+        inside run_harmony_integration(): setting
+        OMP_NUM_THREADS/OPENBLAS_NUM_THREADS/MKL_NUM_THREADS via
+        os.environ[...] INSIDE that function happens too late — OpenBLAS's
+        thread pool is initialized lazily on first BLAS call, which by that
+        point has already happened (Step 8's Wilcoxon DEG test runs earlier
+        in the same process). Re-assigning the env var afterward does not
+        reliably shrink an already-initialized OpenBLAS thread pool, so
+        sklearn's internal KMeans (used by harmonypy for centroid init)
+        still oversubscribes threads on top of joblib's own parallelism —
+        a classic native segfault trigger, confirmed by 487% CPU usage
+        despite n_jobs=1 being requested.
+
+        Three-part fix:
+          (a) Thread-limit env vars are now also set at MODULE IMPORT TIME,
+              before numpy/scipy/scanpy are imported, so a fresh process
+              starts constrained from the very first BLAS call onward
+              (belt-and-suspenders — helps most when nothing already
+              exported the vars in the shell/SLURM script).
+          (b) threadpoolctl.threadpool_limits(...) now wraps the actual
+              sc.pp.pca() + harmonypy.run_harmony() calls in
+              run_harmony_integration(), and the sc.pp.neighbors()/
+              sc.tl.umap() calls in plot_umap_before_after(). Unlike
+              os.environ, threadpoolctl patches the ALREADY-LOADED native
+              library directly, so it reliably enforces the thread limit
+              regardless of what ran earlier in the process.
+              Requires: pip install threadpoolctl   (in scart_env)
+          (c) CORRECTION — threadpool_limits(..., user_api="blas") alone
+              was NOT sufficient: it only throttles registered BLAS
+              backends (OpenBLAS/MKL). sklearn's KMeans (called by
+              harmonypy for centroid init — the exact crash site) uses its
+              own OpenMP-parallel Cython code, a separate thread pool that
+              user_api="blas" does not touch, so the segfault still
+              reproduced with that filter in place. Dropping the
+              user_api= filter entirely — threadpool_limits(limits=n_jobs)
+              — limits ALL registered thread-pool backends (BLAS AND
+              OpenMP), which is what actually resolved the crash.
+
+FIX 15  adata.uns['cc_params']['umap_plot_paths'] was stored as a raw
+        Python tuple (pdf_path, png_path) returned from
+        plot_umap_before_after(). anndata's HDF5 writer has no registered
+        writer for `tuple`, so adata_mal.write(final_path) — the very last
+        line of the pipeline — raised IORegistryError AFTER every
+        expensive step (SCEVAN, Harmony, UMAP, Cancer Composition, DEG,
+        Step 9 gene selection) had already completed, silently discarding
+        the entire run's output (final_tumor.h5ad was never written).
+        Fixed by casting to list(...) before storing in uns, since h5py/
+        anndata support list (and array-like) but not tuple.
 """
 
 import os
+
+# CLAUDE EDIT — FIX 14(a): set BLAS/OMP thread-limit env vars at import
+# time, BEFORE numpy/scipy/scanpy get imported below. This is a
+# belt-and-suspenders default only — os.environ.setdefault() never
+# overrides a value already exported by the calling shell or SLURM script,
+# it only fills in the gap when nothing was set. The real, reliable
+# enforcement is the threadpoolctl wrapper (FIX 14b) further down in
+# run_harmony_integration() / plot_umap_before_after(), since env vars set
+# after an OpenBLAS thread pool has already initialized (e.g. after Step
+# 8's Wilcoxon DEG test runs its own BLAS calls) do not reliably shrink it.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
 import sys
 import glob
 import shutil
 import logging
 import tempfile
 import subprocess
-import resource
 
 import numpy as np
 import pandas as pd
@@ -871,12 +939,7 @@ cat("Done!\\n")
 # ═══════════════════════════════════════════════════════════════════════════
 # Raw count extraction (local copy — kept self-contained, mirrors the
 # priority order used elsewhere in Module 3: layers['counts'] -> 'raw_counts'
-# -> 'scvi_counts' -> 'raw_for_cna' -> .raw.X -> .X. 'raw_for_cna' is a
-# defensive addition: it's set explicitly in this module's own Step 3
-# (always genuinely raw, guaranteed present on adata_mal_fullgene) and
-# covers the edge case where Module 2's own layers['counts'] restoration
-# didn't succeed — 'counts' is still checked first and preferred when
-# present, since it's correct under normal operation.
+# -> 'scvi_counts' -> .raw.X -> .X)
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _get_raw_counts(adata, context=""):
@@ -897,7 +960,7 @@ def _get_raw_counts(adata, context=""):
             return sp.csr_matrix(X, dtype=np.float32)
         return np.array(X, dtype=np.float32)
 
-    for lyr in ("counts", "raw_counts", "scvi_counts", "raw_for_cna"):
+    for lyr in ("counts", "raw_counts", "scvi_counts"):
         if lyr in adata.layers:
             logger.info(f"{tag}Raw counts source: layers['{lyr}']")
             return _as_sparse_or_dense(adata.layers[lyr])
@@ -948,6 +1011,52 @@ def _detect_batch_column(adata, user_key=None, candidates=None, context=""):
     return None
 
 
+# CLAUDE EDIT — cell-type column auto-detection, added for the new
+# Cell_Type UMAP panel (see plot_umap_before_after). Mirrors
+# _detect_batch_column's pattern exactly, just with a different candidate
+# list per side. This follows Ovarian_adata_prep.ipynb, which sets a single
+# common annotation column across both objects before concatenation
+# (there: adata.obs["popv_prediction"] on the healthy side is copied in
+# from "free_annotation", and adata2.obs["popv_prediction"] already exists
+# natively on the tumor side) — the two sides can use differently-named
+# source columns while landing in the same unified column name.
+_DEFAULT_CELLTYPE_CANDIDATES_TUMOR = [
+    "popv_majority_vote_prediction", "popv_prediction", "final_malignant",
+    "cell_type", "celltype",
+]
+_DEFAULT_CELLTYPE_CANDIDATES_HEALTHY = [
+    "free_annotation", "cell_ontology_class", "popv_prediction",
+    "cell_type", "celltype",
+]
+
+
+def _detect_celltype_column(adata, user_key=None, candidates=None, context=""):
+    tag = f"[{context}] " if context else ""
+    candidates = candidates or []
+
+    if user_key is not None:
+        if user_key not in adata.obs.columns:
+            raise ValueError(
+                f"{tag}cell-type key '{user_key}' not found in obs.\n"
+                f"Available columns: {list(adata.obs.columns)}"
+            )
+        logger.info(f"{tag}cell-type key (user-specified): '{user_key}'")
+        return user_key
+
+    for key in candidates:
+        if key in adata.obs.columns:
+            logger.info(f"{tag}cell-type key auto-detected: '{key}' "
+                        f"({adata.obs[key].nunique()} unique values)")
+            return key
+
+    logger.warning(
+        f"{tag}No cell-type column auto-detected (checked {candidates}) — "
+        "all cells from this side will be labelled 'Unknown' in the "
+        "Cell_Type UMAP panel."
+    )
+    return None
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Step 1 — build the combined tumor + healthy-reference AnnData
 # ═══════════════════════════════════════════════════════════════════════════
@@ -957,12 +1066,22 @@ def build_tumor_healthy_combined(
     healthy_reference_h5ad,
     tumor_batch_key=None,
     healthy_batch_key=None,
+    tumor_celltype_key=None,
+    healthy_celltype_key=None,
 ):
     """
     Combine malignant epithelial (tumor) cells with an external healthy
     reference on their common genes. Mirrors Ovarian_adata_prep.ipynb's
     merge logic (Data_Type tagging, batch tagging, inner-join on common
     genes, raw counts preserved in layers['counts']).
+
+    CLAUDE EDIT — also tags a unified obs['Cell_Type'] column on both
+    sides before concatenation, mirroring Ovarian_adata_prep.ipynb (which
+    unifies "free_annotation" on the healthy side and "popv_prediction" on
+    the tumor side into one obs["popv_prediction"] column pre-concat).
+    Auto-detected per side via tumor_celltype_key / healthy_celltype_key
+    (or the _DEFAULT_CELLTYPE_CANDIDATES_* lists if not supplied), purely
+    so plot_umap_before_after() can colour the extra Cell_Type UMAP panel.
     """
     print(f"  Loading healthy reference: {healthy_reference_h5ad}")
     adata_healthy = sc.read_h5ad(healthy_reference_h5ad)
@@ -1002,6 +1121,22 @@ def build_tumor_healthy_combined(
     )
     adata_t.obs["batch"] = (adata_t.obs[t_key].astype(str) if t_key else "tumor_all")
     adata_h.obs["batch"] = (adata_h.obs[h_key].astype(str) if h_key else "healthy_all")
+
+    # CLAUDE EDIT — unified Cell_Type column (see docstring above).
+    t_ct_key = _detect_celltype_column(
+        adata_t, tumor_celltype_key,
+        candidates=_DEFAULT_CELLTYPE_CANDIDATES_TUMOR, context="tumor",
+    )
+    h_ct_key = _detect_celltype_column(
+        adata_h, healthy_celltype_key,
+        candidates=_DEFAULT_CELLTYPE_CANDIDATES_HEALTHY, context="healthy",
+    )
+    adata_t.obs["Cell_Type"] = (
+        adata_t.obs[t_ct_key].astype(str) if t_ct_key else "Unknown"
+    )
+    adata_h.obs["Cell_Type"] = (
+        adata_h.obs[h_ct_key].astype(str) if h_ct_key else "Unknown"
+    )
 
     raw_t = _get_raw_counts(adata_t, "tumor")
     raw_h = _get_raw_counts(adata_h, "healthy")
@@ -1085,33 +1220,46 @@ def run_harmony_integration(
     n_jobs=1,
 ):
     import harmonypy
+    # CLAUDE EDIT — FIX 14(b)+(c): threadpoolctl patches the already-loaded
+    # native thread-pool libraries directly (unlike os.environ, which only
+    # affects thread pools not yet initialized). NOTE: no user_api="blas"
+    # filter here — sklearn's KMeans (harmonypy's centroid init, the
+    # confirmed crash site) uses OpenMP, not BLAS, so a "blas"-only filter
+    # does not cover it and the segfault still reproduced with that filter
+    # in place. limits=n_jobs with no user_api= constrains every
+    # registered backend (BLAS AND OpenMP), which is what actually fixed
+    # the confirmed segfault ("Command terminated by signal 11") at
+    # "Computing initial centroids with sklearn.KMeans..." — previously
+    # oversubscribing threads on top of an OpenBLAS pool already sized by
+    # Step 8's earlier Wilcoxon DEG test, despite n_jobs=1 being requested
+    # (487% CPU observed vs. the intended 1 thread).
+    # Requires: pip install threadpoolctl
+    from threadpoolctl import threadpool_limits
 
-    # CLAUDE EDIT — thread-limiting, mirrors popv_annotation.py's Step 14
-    # exactly (same env vars, same pattern). Without this, numpy/sklearn's
-    # BLAS backend defaults to using ALL available cores for PCA and for
-    # harmonypy's internal sklearn.KMeans centroid initialization. On a
-    # multi-core HPC node with a per-job memory limit, that oversubscription
-    # (each thread/worker duplicating chunks of the data) is a classic
-    # silent OOM-killer trigger — the process is killed with no Python
-    # traceback, which looks exactly like "the kernel just died".
+    # CLAUDE EDIT — memory/thread fix, mirrors popv_annotation.py's Step 14
+    # exactly (same env vars, same pattern). Kept as a first line of
+    # defense for any BLAS calls made by libraries that don't go through
+    # threadpoolctl's supported APIs; the threadpool_limits() context below
+    # is the primary, reliable enforcement mechanism.
     import os as _os
     n_threads = str(n_jobs if n_jobs > 0 else (_os.cpu_count() or 1))
     for env_var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
         _os.environ[env_var] = n_threads
     print(f"  Parallelism: n_jobs={n_jobs} ({n_threads} threads) for PCA + Harmony")
 
-    print(f"  Running PCA (n_comps={n_pcs}, svd_solver={svd_solver})")
-    sc.pp.pca(adata_hvg, n_comps=n_pcs, svd_solver=svd_solver)
+    with threadpool_limits(limits=n_jobs):
+        print(f"  Running PCA (n_comps={n_pcs}, svd_solver={svd_solver})")
+        sc.pp.pca(adata_hvg, n_comps=n_pcs, svd_solver=svd_solver)
 
-    harmony_kwargs = {"max_iter_harmony": max_iter_harmony, "random_state": seed}
-    if theta is not None:
-        harmony_kwargs["theta"] = theta
+        harmony_kwargs = {"max_iter_harmony": max_iter_harmony, "random_state": seed}
+        if theta is not None:
+            harmony_kwargs["theta"] = theta
 
-    print(f"  Running Harmony (vars_use=['{batch_key}'], "
-          f"max_iter_harmony={max_iter_harmony}, theta={theta}, random_state={seed})")
-    ho = harmonypy.run_harmony(
-        adata_hvg.obsm["X_pca"], adata_hvg.obs, vars_use=[batch_key], **harmony_kwargs,
-    )
+        print(f"  Running Harmony (vars_use=['{batch_key}'], "
+              f"max_iter_harmony={max_iter_harmony}, theta={theta}, random_state={seed})")
+        ho = harmonypy.run_harmony(
+            adata_hvg.obsm["X_pca"], adata_hvg.obs, vars_use=[batch_key], **harmony_kwargs,
+        )
 
     Z = np.asarray(ho.Z_corr)
     if Z.shape == (adata_hvg.n_obs, n_pcs):
@@ -1143,34 +1291,56 @@ def _scatter(ax, coords, labels, title, legend=True):
         ax.legend(markerscale=4, fontsize=6, loc="best", frameon=False)
 
 
-def plot_umap_before_after(adata_hvg, save_dir, sample_name="cancer_composition"):
+def plot_umap_before_after(adata_hvg, save_dir, sample_name="cancer_composition", n_jobs=1):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    # CLAUDE EDIT — FIX 14(b)+(c): same threadpoolctl protection as
+    # run_harmony_integration(), same no-user_api-filter fix (see the note
+    # there). sc.pp.neighbors()/sc.tl.umap() also call into BLAS/sklearn/
+    # OpenMP nearest-neighbor code right after Harmony in the same
+    # process, so they're wrapped for consistency and safety even though
+    # the confirmed crash site was specifically the KMeans call inside
+    # run_harmony_integration().
+    from threadpoolctl import threadpool_limits
 
-    print("  Computing UMAP — unintegrated (X_pca)")
-    sc.pp.neighbors(adata_hvg, use_rep="X_pca", key_added="unintegrated")
-    sc.tl.umap(adata_hvg, neighbors_key="unintegrated")
-    umap_unintegrated = adata_hvg.obsm["X_umap"].copy()
+    with threadpool_limits(limits=n_jobs):
+        print("  Computing UMAP — unintegrated (X_pca)")
+        sc.pp.neighbors(adata_hvg, use_rep="X_pca", key_added="unintegrated")
+        sc.tl.umap(adata_hvg, neighbors_key="unintegrated")
+        umap_unintegrated = adata_hvg.obsm["X_umap"].copy()
 
-    print("  Computing UMAP — Harmony-integrated (X_pca_harmony)")
-    sc.pp.neighbors(adata_hvg, use_rep="X_pca_harmony", key_added="harmony")
-    sc.tl.umap(adata_hvg, neighbors_key="harmony")
-    umap_harmony = adata_hvg.obsm["X_umap"].copy()
+        print("  Computing UMAP — Harmony-integrated (X_pca_harmony)")
+        sc.pp.neighbors(adata_hvg, use_rep="X_pca_harmony", key_added="harmony")
+        sc.tl.umap(adata_hvg, neighbors_key="harmony")
+        umap_harmony = adata_hvg.obsm["X_umap"].copy()
 
     adata_hvg.obsm["X_umap_unintegrated"] = umap_unintegrated
     adata_hvg.obsm["X_umap_harmony"]      = umap_harmony
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+    # CLAUDE EDIT — third row added: Cell_Type UMAP (unintegrated +
+    # Harmony-integrated), using the obs['Cell_Type'] column tagged in
+    # build_tumor_healthy_combined() (unified across tumor + healthy,
+    # mirroring Ovarian_adata_prep.ipynb's common annotation column).
+    # 2x2 grid -> 3x2 grid, 4 panels -> 6 panels total in the one figure.
+    has_celltype = "Cell_Type" in adata_hvg.obs.columns
+    n_rows = 3 if has_celltype else 2
+    fig, axes = plt.subplots(n_rows, 2, figsize=(14, 6 * n_rows))
     _scatter(axes[0, 0], umap_unintegrated, adata_hvg.obs["Data_Type"], "Unintegrated — Data_Type")
-    _scatter(axes[0, 1], umap_unintegrated, adata_hvg.obs["batch"],     "Unintegrated — batch")
+    _scatter(axes[0, 1], umap_unintegrated, adata_hvg.obs["batch"],     "Unintegrated — batch", legend=False)
     _scatter(axes[1, 0], umap_harmony,      adata_hvg.obs["Data_Type"], "Harmony-integrated — Data_Type")
-    _scatter(axes[1, 1], umap_harmony,      adata_hvg.obs["batch"],     "Harmony-integrated — batch")
+    _scatter(axes[1, 1], umap_harmony,      adata_hvg.obs["batch"],     "Harmony-integrated — batch", legend=False)
+    if has_celltype:
+        _scatter(axes[2, 0], umap_unintegrated, adata_hvg.obs["Cell_Type"], "Unintegrated — Cell_Type")
+        _scatter(axes[2, 1], umap_harmony,      adata_hvg.obs["Cell_Type"], "Harmony-integrated — Cell_Type")
     fig.suptitle("Tumor vs. Healthy Reference — before/after Harmony integration", fontsize=12)
     fig.tight_layout()
 
+    # CLAUDE EDIT — png filename fixed to "harmony_run_umap_before_after.png"
+    # per request (previously f"{sample_name}_umap_before_after.png"). The
+    # pdf keeps the sample_name-based pattern (untouched otherwise).
     pdf_path = os.path.join(save_dir, f"{sample_name}_umap_before_after.pdf")
-    png_path = os.path.join(save_dir, f"{sample_name}_umap_before_after.png")
+    png_path = os.path.join(save_dir, "harmony_run_umap_before_after.png")
     fig.savefig(pdf_path, dpi=600)
     fig.savefig(png_path, dpi=600)
     plt.close(fig)
@@ -1245,28 +1415,6 @@ def compute_cancer_composition_score(adata_combined, save_dir=None, sample_name=
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Memory checkpoint logging — diagnostic instrumentation
-# ═══════════════════════════════════════════════════════════════════════════
-
-def _log_mem(label):
-    """
-    Print the process's PEAK resident memory so far (Linux: ru_maxrss is
-    reported in KB; this function converts to GB). This is cumulative/
-    monotonically non-decreasing across the whole process, not a snapshot
-    of current usage — so consecutive calls show exactly how much peak
-    memory GREW between checkpoints, which is what we need to pinpoint
-    where inside Step 8b memory actually balloons, rather than only
-    knowing the final number at the moment of an OOM-kill.
-    """
-    try:
-        peak_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        peak_gb = peak_kb / (1024 ** 2)
-        print(f"  [mem] {label}: peak RSS so far = {peak_gb:.2f} GB")
-    except Exception as exc:
-        print(f"  [mem] {label}: could not read memory usage ({exc})")
-
-
-# ═══════════════════════════════════════════════════════════════════════════
 # Public entry point — called from preprocessing.py's Step 8b
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -1276,6 +1424,8 @@ def run_cancer_composition_step(
     save_dir,
     tumor_batch_key=None,
     healthy_batch_key=None,
+    tumor_celltype_key=None,
+    healthy_celltype_key=None,
     n_top_genes=3000,
     n_pcs=50,
     max_iter_harmony=10,
@@ -1292,12 +1442,21 @@ def run_cancer_composition_step(
     n_jobs : int
         CPU threads for PCA + Harmony (default 1 — deliberately
         conservative). Passed to OMP_NUM_THREADS/OPENBLAS_NUM_THREADS/
-        MKL_NUM_THREADS the same way Module 2 already does. Raise this only
-        if you know you have the RAM headroom for it: sklearn's KMeans
-        (used internally by harmonypy) duplicates data across threads/
-        workers, and on a shared multi-core HPC node with a per-job memory
-        cap, an unconstrained thread count is a common cause of the kernel
-        silently dying (OOM-killed) with no Python traceback.
+        MKL_NUM_THREADS the same way Module 2 already does, AND enforced
+        via threadpoolctl.threadpool_limits() inside run_harmony_integration()
+        and plot_umap_before_after() (see FIX 14). Raise this only if you
+        know you have the RAM/CPU headroom for it: sklearn's KMeans (used
+        internally by harmonypy) duplicates data across threads/workers,
+        and an unconstrained thread count previously caused a confirmed
+        segfault (signal 11) at KMeans initialization.
+
+    tumor_celltype_key, healthy_celltype_key : str, optional
+        CLAUDE EDIT — obs column holding per-side cell-type labels, used
+        only to populate the unified obs['Cell_Type'] column for the extra
+        Cell_Type UMAP panel added to plot_umap_before_after(). Auto-
+        detected via _DEFAULT_CELLTYPE_CANDIDATES_TUMOR /
+        _DEFAULT_CELLTYPE_CANDIDATES_HEALTHY if not supplied. Does not
+        affect Harmony integration or the Cancer Composition Score itself.
 
     Returns
     -------
@@ -1307,7 +1466,6 @@ def run_cancer_composition_step(
     """
     print("\n--- Step 8b: Cancer Composition Score (tumor vs. healthy reference) ---")
     os.makedirs(save_dir, exist_ok=True)
-    _log_mem("Step 8b start")
 
     # CLAUDE EDIT — global seed, matching run_harmony_integration.py's
     # set_seed() exactly. Previously only harmonypy's own random_state was
@@ -1323,27 +1481,25 @@ def run_cancer_composition_step(
     adata_combined = build_tumor_healthy_combined(
         adata_tumor_fullgene, healthy_reference_h5ad,
         tumor_batch_key=tumor_batch_key, healthy_batch_key=healthy_batch_key,
+        tumor_celltype_key=tumor_celltype_key, healthy_celltype_key=healthy_celltype_key,
     )
     print(f"  Combined: {adata_combined.n_obs} cells x {adata_combined.n_vars} common genes")
     print(f"  Data_Type counts: {adata_combined.obs['Data_Type'].value_counts().to_dict()}")
-    _log_mem("after build_tumor_healthy_combined (healthy ref loaded + merged)")
 
     adata_hvg = prepare_for_harmony(adata_combined, n_top_genes=n_top_genes)
-    _log_mem("after prepare_for_harmony (normalize + HVG select + scale)")
-
     adata_hvg = run_harmony_integration(
         adata_hvg, batch_key="batch", n_pcs=n_pcs,
         max_iter_harmony=max_iter_harmony, theta=theta, seed=seed, n_jobs=n_jobs,
     )
-    _log_mem("after run_harmony_integration (PCA + Harmony + KMeans — the crash point)")
-
-    plot_paths = plot_umap_before_after(adata_hvg, save_dir, sample_name=sample_name)
+    # CLAUDE EDIT — n_jobs threaded through to plot_umap_before_after()
+    # (FIX 14b) so its threadpoolctl wrap actually enforces the same
+    # thread limit as run_harmony_integration(), instead of silently
+    # defaulting to n_jobs=1 regardless of what the caller requested.
+    plot_paths = plot_umap_before_after(adata_hvg, save_dir, sample_name=sample_name, n_jobs=n_jobs)
     print(f"  UMAP (unintegrated vs Harmony-integrated) saved to:\n"
           f"    {plot_paths[0]}\n    {plot_paths[1]}")
-    _log_mem("after plot_umap_before_after")
 
     cc_df = compute_cancer_composition_score(adata_combined, save_dir=save_dir, sample_name=sample_name)
-    _log_mem("after compute_cancer_composition_score")
 
     cc_genes = set(cc_df.loc[cc_df["Cancer_Composition"] >= cc_score_threshold, "Gene"])
     print(f"\n  Genes with Cancer_Composition >= {cc_score_threshold}: {len(cc_genes)}")
@@ -1388,6 +1544,12 @@ def run_preprocessing_pipeline(
     cc_n_jobs=1,
     cc_tumor_batch_key=None,
     cc_healthy_batch_key=None,
+    # CLAUDE EDIT — cell-type columns for the new Cell_Type UMAP panel
+    # (see plot_umap_before_after / build_tumor_healthy_combined). Purely
+    # cosmetic/QC — auto-detected if not supplied, does not affect any
+    # DEG, SCEVAN, or Cancer Composition Score computation.
+    cc_tumor_celltype_key=None,
+    cc_healthy_celltype_key=None,
 ):
     print("\n========== START ==========\n")
 
@@ -1738,6 +1900,8 @@ def run_preprocessing_pipeline(
 
     # CLAUDE EDIT — full-gene-space snapshot for Step 8b, taken right after
     # Step 5, before Step 9's final gene subsetting touches adata_mal.
+    # (Step 7 no longer restricts adata_mal's genes — see FIX 13 above —
+    # but this snapshot is kept as a defensive, explicit copy regardless.)
     adata_mal_fullgene = adata_mal.copy()
 
     # STEP 6 — Non-epithelial "rest" group
@@ -1863,6 +2027,8 @@ def run_preprocessing_pipeline(
                 save_dir               = cc_save_dir,
                 tumor_batch_key        = cc_tumor_batch_key,
                 healthy_batch_key      = cc_healthy_batch_key,
+                tumor_celltype_key     = cc_tumor_celltype_key,
+                healthy_celltype_key   = cc_healthy_celltype_key,
                 n_top_genes            = cc_n_top_genes,
                 n_pcs                  = cc_n_pcs,
                 max_iter_harmony       = cc_max_iter_harmony,
@@ -1951,7 +2117,17 @@ def run_preprocessing_pipeline(
         "healthy_reference"   : _cc_healthy_ref,
         "cc_score_threshold"  : cc_score_threshold,
         "n_cc_genes"          : int(len(cc_genes)) if cc_genes is not None else None,
-        "umap_plot_paths"     : cc_plot_paths,
+        # CLAUDE EDIT — FIX 15: cast tuple -> list. anndata's HDF5 writer
+        # (write_elem) has no registered writer for the built-in `tuple`
+        # type, so storing cc_plot_paths (a (pdf_path, png_path) tuple
+        # returned by plot_umap_before_after) directly here caused
+        # adata_mal.write(final_path) to raise IORegistryError on the very
+        # last line of the pipeline — AFTER every expensive upstream step
+        # (SCEVAN, Harmony, UMAP, Cancer Composition, DEG, Step 9 gene
+        # selection) had already completed, silently discarding the whole
+        # run's output. list is a supported/registered type; the values
+        # and order are unchanged.
+        "umap_plot_paths"     : list(cc_plot_paths) if cc_plot_paths is not None else None,
     }
     adata_mal.uns["final_gene_selection"] = {
         "sets_used"   : {label: int(len(gset)) for label, gset in selection_sets.items()},
