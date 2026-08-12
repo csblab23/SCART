@@ -1011,6 +1011,52 @@ def _detect_batch_column(adata, user_key=None, candidates=None, context=""):
     return None
 
 
+# CLAUDE EDIT — cell-type column auto-detection, added for the new
+# Cell_Type UMAP panel (see plot_umap_before_after). Mirrors
+# _detect_batch_column's pattern exactly, just with a different candidate
+# list per side. This follows Ovarian_adata_prep.ipynb, which sets a single
+# common annotation column across both objects before concatenation
+# (there: adata.obs["popv_prediction"] on the healthy side is copied in
+# from "free_annotation", and adata2.obs["popv_prediction"] already exists
+# natively on the tumor side) — the two sides can use differently-named
+# source columns while landing in the same unified column name.
+_DEFAULT_CELLTYPE_CANDIDATES_TUMOR = [
+    "popv_majority_vote_prediction", "popv_prediction", "final_malignant",
+    "cell_type", "celltype",
+]
+_DEFAULT_CELLTYPE_CANDIDATES_HEALTHY = [
+    "free_annotation", "cell_ontology_class", "popv_prediction",
+    "cell_type", "celltype",
+]
+
+
+def _detect_celltype_column(adata, user_key=None, candidates=None, context=""):
+    tag = f"[{context}] " if context else ""
+    candidates = candidates or []
+
+    if user_key is not None:
+        if user_key not in adata.obs.columns:
+            raise ValueError(
+                f"{tag}cell-type key '{user_key}' not found in obs.\n"
+                f"Available columns: {list(adata.obs.columns)}"
+            )
+        logger.info(f"{tag}cell-type key (user-specified): '{user_key}'")
+        return user_key
+
+    for key in candidates:
+        if key in adata.obs.columns:
+            logger.info(f"{tag}cell-type key auto-detected: '{key}' "
+                        f"({adata.obs[key].nunique()} unique values)")
+            return key
+
+    logger.warning(
+        f"{tag}No cell-type column auto-detected (checked {candidates}) — "
+        "all cells from this side will be labelled 'Unknown' in the "
+        "Cell_Type UMAP panel."
+    )
+    return None
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Step 1 — build the combined tumor + healthy-reference AnnData
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1020,12 +1066,22 @@ def build_tumor_healthy_combined(
     healthy_reference_h5ad,
     tumor_batch_key=None,
     healthy_batch_key=None,
+    tumor_celltype_key=None,
+    healthy_celltype_key=None,
 ):
     """
     Combine malignant epithelial (tumor) cells with an external healthy
     reference on their common genes. Mirrors Ovarian_adata_prep.ipynb's
     merge logic (Data_Type tagging, batch tagging, inner-join on common
     genes, raw counts preserved in layers['counts']).
+
+    CLAUDE EDIT — also tags a unified obs['Cell_Type'] column on both
+    sides before concatenation, mirroring Ovarian_adata_prep.ipynb (which
+    unifies "free_annotation" on the healthy side and "popv_prediction" on
+    the tumor side into one obs["popv_prediction"] column pre-concat).
+    Auto-detected per side via tumor_celltype_key / healthy_celltype_key
+    (or the _DEFAULT_CELLTYPE_CANDIDATES_* lists if not supplied), purely
+    so plot_umap_before_after() can colour the extra Cell_Type UMAP panel.
     """
     print(f"  Loading healthy reference: {healthy_reference_h5ad}")
     adata_healthy = sc.read_h5ad(healthy_reference_h5ad)
@@ -1065,6 +1121,22 @@ def build_tumor_healthy_combined(
     )
     adata_t.obs["batch"] = (adata_t.obs[t_key].astype(str) if t_key else "tumor_all")
     adata_h.obs["batch"] = (adata_h.obs[h_key].astype(str) if h_key else "healthy_all")
+
+    # CLAUDE EDIT — unified Cell_Type column (see docstring above).
+    t_ct_key = _detect_celltype_column(
+        adata_t, tumor_celltype_key,
+        candidates=_DEFAULT_CELLTYPE_CANDIDATES_TUMOR, context="tumor",
+    )
+    h_ct_key = _detect_celltype_column(
+        adata_h, healthy_celltype_key,
+        candidates=_DEFAULT_CELLTYPE_CANDIDATES_HEALTHY, context="healthy",
+    )
+    adata_t.obs["Cell_Type"] = (
+        adata_t.obs[t_ct_key].astype(str) if t_ct_key else "Unknown"
+    )
+    adata_h.obs["Cell_Type"] = (
+        adata_h.obs[h_ct_key].astype(str) if h_ct_key else "Unknown"
+    )
 
     raw_t = _get_raw_counts(adata_t, "tumor")
     raw_h = _get_raw_counts(adata_h, "healthy")
@@ -1246,16 +1318,29 @@ def plot_umap_before_after(adata_hvg, save_dir, sample_name="cancer_composition"
     adata_hvg.obsm["X_umap_unintegrated"] = umap_unintegrated
     adata_hvg.obsm["X_umap_harmony"]      = umap_harmony
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+    # CLAUDE EDIT — third row added: Cell_Type UMAP (unintegrated +
+    # Harmony-integrated), using the obs['Cell_Type'] column tagged in
+    # build_tumor_healthy_combined() (unified across tumor + healthy,
+    # mirroring Ovarian_adata_prep.ipynb's common annotation column).
+    # 2x2 grid -> 3x2 grid, 4 panels -> 6 panels total in the one figure.
+    has_celltype = "Cell_Type" in adata_hvg.obs.columns
+    n_rows = 3 if has_celltype else 2
+    fig, axes = plt.subplots(n_rows, 2, figsize=(14, 6 * n_rows))
     _scatter(axes[0, 0], umap_unintegrated, adata_hvg.obs["Data_Type"], "Unintegrated — Data_Type")
     _scatter(axes[0, 1], umap_unintegrated, adata_hvg.obs["batch"],     "Unintegrated — batch", legend=False)
     _scatter(axes[1, 0], umap_harmony,      adata_hvg.obs["Data_Type"], "Harmony-integrated — Data_Type")
     _scatter(axes[1, 1], umap_harmony,      adata_hvg.obs["batch"],     "Harmony-integrated — batch", legend=False)
+    if has_celltype:
+        _scatter(axes[2, 0], umap_unintegrated, adata_hvg.obs["Cell_Type"], "Unintegrated — Cell_Type")
+        _scatter(axes[2, 1], umap_harmony,      adata_hvg.obs["Cell_Type"], "Harmony-integrated — Cell_Type")
     fig.suptitle("Tumor vs. Healthy Reference — before/after Harmony integration", fontsize=12)
     fig.tight_layout()
 
+    # CLAUDE EDIT — png filename fixed to "harmony_run_umap_before_after.png"
+    # per request (previously f"{sample_name}_umap_before_after.png"). The
+    # pdf keeps the sample_name-based pattern (untouched otherwise).
     pdf_path = os.path.join(save_dir, f"{sample_name}_umap_before_after.pdf")
-    png_path = os.path.join(save_dir, f"{sample_name}_umap_before_after.png")
+    png_path = os.path.join(save_dir, "harmony_run_umap_before_after.png")
     fig.savefig(pdf_path, dpi=600)
     fig.savefig(png_path, dpi=600)
     plt.close(fig)
@@ -1339,6 +1424,8 @@ def run_cancer_composition_step(
     save_dir,
     tumor_batch_key=None,
     healthy_batch_key=None,
+    tumor_celltype_key=None,
+    healthy_celltype_key=None,
     n_top_genes=3000,
     n_pcs=50,
     max_iter_harmony=10,
@@ -1363,6 +1450,14 @@ def run_cancer_composition_step(
         and an unconstrained thread count previously caused a confirmed
         segfault (signal 11) at KMeans initialization.
 
+    tumor_celltype_key, healthy_celltype_key : str, optional
+        CLAUDE EDIT — obs column holding per-side cell-type labels, used
+        only to populate the unified obs['Cell_Type'] column for the extra
+        Cell_Type UMAP panel added to plot_umap_before_after(). Auto-
+        detected via _DEFAULT_CELLTYPE_CANDIDATES_TUMOR /
+        _DEFAULT_CELLTYPE_CANDIDATES_HEALTHY if not supplied. Does not
+        affect Harmony integration or the Cancer Composition Score itself.
+
     Returns
     -------
     cc_df    : pd.DataFrame, every common gene, sorted by Cancer_Composition desc.
@@ -1386,6 +1481,7 @@ def run_cancer_composition_step(
     adata_combined = build_tumor_healthy_combined(
         adata_tumor_fullgene, healthy_reference_h5ad,
         tumor_batch_key=tumor_batch_key, healthy_batch_key=healthy_batch_key,
+        tumor_celltype_key=tumor_celltype_key, healthy_celltype_key=healthy_celltype_key,
     )
     print(f"  Combined: {adata_combined.n_obs} cells x {adata_combined.n_vars} common genes")
     print(f"  Data_Type counts: {adata_combined.obs['Data_Type'].value_counts().to_dict()}")
@@ -1448,6 +1544,12 @@ def run_preprocessing_pipeline(
     cc_n_jobs=1,
     cc_tumor_batch_key=None,
     cc_healthy_batch_key=None,
+    # CLAUDE EDIT — cell-type columns for the new Cell_Type UMAP panel
+    # (see plot_umap_before_after / build_tumor_healthy_combined). Purely
+    # cosmetic/QC — auto-detected if not supplied, does not affect any
+    # DEG, SCEVAN, or Cancer Composition Score computation.
+    cc_tumor_celltype_key=None,
+    cc_healthy_celltype_key=None,
 ):
     print("\n========== START ==========\n")
 
@@ -1925,6 +2027,8 @@ def run_preprocessing_pipeline(
                 save_dir               = cc_save_dir,
                 tumor_batch_key        = cc_tumor_batch_key,
                 healthy_batch_key      = cc_healthy_batch_key,
+                tumor_celltype_key     = cc_tumor_celltype_key,
+                healthy_celltype_key   = cc_healthy_celltype_key,
                 n_top_genes            = cc_n_top_genes,
                 n_pcs                  = cc_n_pcs,
                 max_iter_harmony       = cc_max_iter_harmony,
