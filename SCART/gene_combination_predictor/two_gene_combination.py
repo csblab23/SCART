@@ -75,6 +75,38 @@ Fix: a new _read_var_column() helper reads a var/ column (handling both a
 plain array dataset and pandas' categorical group encoding — categories +
 codes), and _load_h5ad_subset now prefers var['gene_symbol'] when present,
 falling back to var/_index exactly as before when it isn't.
+
+Fix applied (rpy2 / R environment — atlas="both" RRA step)
+------------------------------------------------------------
+_run_rra_via_r previously called `import rpy2.robjects` with no control
+over which R installation rpy2 binds to. On a machine with more than one R
+on the system (e.g. a system R alongside the conda env's own R), rpy2 can
+resolve a libR.so that does NOT match the R the RobustRankAggreg package
+was actually installed into, or can load it without the R_HOME/lib
+directory on the loader's search path. Both produce hard-to-read failures
+during `import rpy2.rinterface`, e.g.:
+  ImportError: .../_rinterface_cffi_api.abi3.so: undefined symbol: R_ClosureEnv
+  (falls back to ABI mode, which then also fails:)
+  error: symbol 'R_getVar' not found in library '.../lib/R/lib/libR.so'
+
+This is an environment-resolution problem, not a code bug in the RRA logic
+itself — rpy2 found *a* libR.so but the wrong/partially-linked one relative
+to LD_LIBRARY_PATH at import time.
+
+Fix: same as Module 4a (one_gene_combination.py) — a new
+_setup_r_environment() (backed by _find_r_home()) explicitly resolves
+R_HOME — preferring the R that lives inside the active conda environment
+(sys.prefix/lib/R) over PATH/system R — and prepends <R_HOME>/lib to
+LD_LIBRARY_PATH *before* rpy2 is imported anywhere in the process. Prints
+the same diagnostic line for consistency across both modules:
+  Rscript: <R_HOME>/bin/Rscript
+  R home:  <R_HOME>
+
+IMPORTANT: because Python caches failed imports in sys.modules, if rpy2 has
+already been imported once in the current process/kernel and failed as
+above, this fix will NOT retroactively repair it — restart the Python
+kernel/process before re-running so the corrected environment variables are
+in place *before* rpy2 is imported for the first time.
 """
 
 import os
@@ -950,13 +982,101 @@ def _normalize_gene_order_df(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _find_r_home() -> str:
+    """
+    Locate the R installation rpy2 should bind to for RobustRankAggreg.
+
+    Preference order:
+      1. R_HOME already set in the environment (respected as-is, if valid).
+      2. <conda env>/lib/R  — i.e. sys.prefix/lib/R — the R that lives
+         *inside the same conda environment SCART/rpy2 are installed in*.
+         This is almost always the right answer and avoids ever touching a
+         system R that may be a different version/ABI.
+      3. `Rscript` resolved from PATH, asked directly for R.home().
+
+    Raises RuntimeError with actionable install instructions if none of the
+    above resolve to a real R installation.
+
+    Identical to Module 4a (one_gene_combination.py) — see that module's
+    docstring "Fix applied (rpy2 / R environment)" for the full rationale.
+    """
+    import sys
+    import shutil
+    import subprocess
+
+    env_r_home = os.environ.get("R_HOME")
+    if env_r_home and os.path.isdir(env_r_home):
+        return env_r_home
+
+    conda_r_home = os.path.join(sys.prefix, "lib", "R")
+    if os.path.exists(os.path.join(conda_r_home, "bin", "R")):
+        return conda_r_home
+
+    rscript = shutil.which("Rscript")
+    if rscript:
+        try:
+            r_home = subprocess.check_output(
+                [rscript, "-e", "cat(R.home())"],
+                text=True, stderr=subprocess.DEVNULL,
+            ).strip()
+            if r_home and os.path.isdir(r_home):
+                return r_home
+        except Exception:
+            pass
+
+    raise RuntimeError(
+        "Could not locate an R installation for Robust Rank Aggregation "
+        "(atlas='both').\n"
+        "Install R + RobustRankAggreg into this conda environment, e.g.:\n"
+        "  conda install -c conda-forge r-base r-robustrankaggreg -y\n"
+        "or set the R_HOME environment variable to point at an existing "
+        "R installation before calling run()."
+    )
+
+
+def _setup_r_environment() -> str:
+    """
+    Point rpy2 at the correct R installation *before* rpy2 is imported.
+
+    Sets R_HOME and prepends <R_HOME>/lib (where libR.so lives) to
+    LD_LIBRARY_PATH. This must happen before the first `import rpy2...` in
+    the process — otherwise rpy2/cffi may already have resolved a
+    different, ABI-mismatched libR.so via whatever LD_LIBRARY_PATH the
+    process started with, producing:
+        undefined symbol: R_ClosureEnv   (cffi API mode)
+        undefined symbol: R_getVar       (ABI-mode fallback)
+
+    Returns the resolved R_HOME (for logging).
+    """
+    r_home = _find_r_home()
+    os.environ["R_HOME"] = r_home
+
+    r_lib_dir = os.path.join(r_home, "lib")
+    existing  = os.environ.get("LD_LIBRARY_PATH", "")
+    existing_paths = [p for p in existing.split(os.pathsep) if p]
+    if r_lib_dir not in existing_paths:
+        os.environ["LD_LIBRARY_PATH"] = os.pathsep.join([r_lib_dir] + existing_paths)
+
+    rscript_path = os.path.join(r_home, "bin", "Rscript")
+    print(f"  Rscript:                  {rscript_path}")
+    print(f"  R home:                   {r_home}")
+
+    return r_home
+
+
 def _run_rra_via_r(*rank_lists) -> dict:
     """
     Call R's RobustRankAggreg::aggregateRanks(method="RRA") via rpy2 to
     combine the per-atlas rank lists into a single robust rank score per
     candidate ID. Requires the R package 'RobustRankAggreg' (installed by
     `python -m SCART.install`, see install.py).
+
+    FIX: _setup_r_environment() runs first to make sure rpy2 binds to the
+    R installation living in this same conda environment — see module
+    docstring "Fix applied (rpy2 / R environment — atlas='both' RRA step)".
     """
+    _setup_r_environment()
+
     try:
         import rpy2.robjects as ro
         from rpy2.robjects import StrVector
@@ -965,7 +1085,13 @@ def _run_rra_via_r(*rank_lists) -> dict:
         raise ImportError(
             "rpy2 is required for Robust Rank Aggregation (atlas='both'). "
             "It is one of SCART's core dependencies — if missing, run:\n"
-            "  pip install rpy2>=3.5"
+            "  pip install rpy2>=3.5\n"
+            "If rpy2 is installed but this import still fails with an "
+            "'undefined symbol' error, the R it bound to earlier in this "
+            "Python session doesn't match this environment's R — restart "
+            "the kernel/process and re-run so the corrected R_HOME/"
+            "LD_LIBRARY_PATH set by _setup_r_environment() take effect "
+            "before rpy2 is imported."
         ) from exc
 
     try:
