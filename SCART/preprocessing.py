@@ -1157,7 +1157,15 @@ def _scatter(ax, coords, labels, title, legend=True):
     cmap = plt.get_cmap("tab20", max(len(labels.categories), 1))
     for i, cat in enumerate(labels.categories):
         mask = np.asarray(labels == cat)
-        ax.scatter(coords[mask, 0], coords[mask, 1], s=3, color=cmap(i), label=cat)
+        # CLAUDE EDIT — memory/rendering fix: rasterized=True. Without this,
+        # matplotlib keeps every point as an individual vector path object
+        # when saving to PDF — for 53k+ points per panel across up to 6
+        # panels (~300k+ path objects total), this is a severe, well-known
+        # matplotlib memory trap. Rasterizing each point-cloud collection
+        # at save time doesn't change how the plot looks, only how
+        # expensively it's stored internally.
+        ax.scatter(coords[mask, 0], coords[mask, 1], s=3, color=cmap(i),
+                   label=cat, rasterized=True)
     ax.set_title(title, fontsize=10)
     ax.set_xticks([])
     ax.set_yticks([])
@@ -1208,8 +1216,14 @@ def plot_umap_before_after(adata_hvg, save_dir, sample_name="cancer_composition"
 
     pdf_path = os.path.join(save_dir, f"{sample_name}_umap_before_after.pdf")
     png_path = os.path.join(save_dir, f"{sample_name}_umap_before_after.png")
-    fig.savefig(pdf_path, dpi=600)
-    fig.savefig(png_path, dpi=600)
+    # CLAUDE EDIT — memory fix: dpi 600 -> 150. At 600 dpi, this figure's
+    # canvas (14 x 6*n_rows inches) produces an extremely large raster
+    # buffer before any rendering overhead is even counted — combined with
+    # up to 6 panels of 53k+ points each, this was very likely the actual
+    # cause of the last kernel death, not the (cheap) underlying data. 150
+    # dpi is still clearly readable for a diagnostic QC plot.
+    fig.savefig(pdf_path, dpi=150)
+    fig.savefig(png_path, dpi=150)
     plt.close(fig)
 
     return pdf_path, png_path
