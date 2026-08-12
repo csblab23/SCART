@@ -60,6 +60,21 @@ parallelism via joblib. See _run_ga() below. There is no alternate GA mode.
 Fix applied
 -----------
 _load_h5ad_subset: same h5py sorted-indices fix as one_gene_combination.py.
+
+Fix applied (gene symbols)
+---------------------------
+_load_h5ad_subset previously always used var/_index (var_names) as the gene
+identifier. That is correct for the HPA atlas (its var_names already are
+HGNC gene symbols), but NOT for the Tabula Sapiens atlas, whose var/_index
+holds a different identifier while the actual HGNC symbol lives in the
+var['gene_symbol'] column. This caused a "No overlap between target genes
+and h5ad var_names" ValueError for Tabula Sapiens even though the genes are
+present under a different column.
+
+Fix: a new _read_var_column() helper reads a var/ column (handling both a
+plain array dataset and pandas' categorical group encoding — categories +
+codes), and _load_h5ad_subset now prefers var['gene_symbol'] when present,
+falling back to var/_index exactly as before when it isn't.
 """
 
 import os
@@ -156,12 +171,40 @@ def _hpa_tsv_to_binary_matrix(tsv_path: str):
     return matrix, genes, cells
 
 
+def _read_var_column(var_grp, key):
+    """
+    Read a single column out of an h5ad 'var' h5py group, handling both
+    storage layouts AnnData/h5py can use:
+
+      - Plain array dataset (var_grp[key] is an h5py.Dataset).
+      - Pandas categorical column, stored as a sub-group with 'categories'
+        and 'codes' datasets (var_grp[key] is an h5py.Group).
+
+    Returns a list[str] (decoding bytes -> str as needed). Categorical
+    codes of -1 (missing) map to None.
+    """
+    import h5py
+
+    node = var_grp[key]
+    if isinstance(node, h5py.Group):
+        categories = [c.decode() if isinstance(c, bytes) else c
+                      for c in node["categories"][:]]
+        codes = node["codes"][:]
+        return [categories[c] if c >= 0 else None for c in codes]
+    else:
+        return [g.decode() if isinstance(g, bytes) else g for g in node[:]]
+
+
 def _load_h5ad_subset(h5ad_path: str, target_genes: list = None):
     """
     Fast, memory-safe h5ad loader.
 
     FIX: col_indices sorted before h5py dense indexing; un-permuted after.
     Scipy sparse paths use raw (unsorted) indices — they accept any order.
+
+    FIX (gene symbols): gene identifiers are read from var['gene_symbol']
+    when that column exists (HGNC symbols), falling back to var/_index
+    otherwise — see module docstring "Fix applied (gene symbols)".
 
     Returns: matrix (int8 ndarray), genes (list[str])
     """
@@ -171,13 +214,24 @@ def _load_h5ad_subset(h5ad_path: str, target_genes: list = None):
     if target_genes is None:
         adata = sc.read_h5ad(h5ad_path)
         X = adata.X.toarray() if not isinstance(adata.X, np.ndarray) else adata.X
-        return (X > 0).astype(np.int8), list(adata.var_names)
+        if "gene_symbol" in adata.var.columns:
+            genes = list(adata.var["gene_symbol"])
+        else:
+            genes = list(adata.var_names)
+        return (X > 0).astype(np.int8), genes
 
     with h5py.File(h5ad_path, "r") as f:
 
+        # Read var names — prefer the 'gene_symbol' column (HGNC symbols)
+        # when present, since var_names/_index is not guaranteed to be a
+        # gene symbol (e.g. Tabula Sapiens indexes on a different ID, while
+        # HPA already indexes on gene symbols). Falls back to _index/first
+        # column exactly as before when 'gene_symbol' isn't available.
         if "var" in f:
             var_grp = f["var"]
-            if "_index" in var_grp:
+            if "gene_symbol" in var_grp:
+                all_genes = _read_var_column(var_grp, "gene_symbol")
+            elif "_index" in var_grp:
                 all_genes = [g.decode() if isinstance(g, bytes) else g
                              for g in var_grp["_index"][:]]
             else:
