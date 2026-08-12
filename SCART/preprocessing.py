@@ -1756,7 +1756,19 @@ def run_preprocessing_pipeline(
     _fullgene_sidecar_path = adata_full.uns.get("full_counts_h5ad_path", None)
     if _fullgene_sidecar_path and os.path.exists(_fullgene_sidecar_path):
         try:
-            _sidecar = sc.read_h5ad(_fullgene_sidecar_path)
+            _log_mem("before loading full-gene sidecar")
+            # CLAUDE EDIT — memory fix: backed mode. The previous version
+            # called sc.read_h5ad(path) with no backed mode, loading the
+            # ENTIRE sidecar file (ALL query cells x the full gene panel —
+            # potentially far more than the ~4-5k malignant cells actually
+            # needed here) into memory before ever subsetting it down.
+            # Same class of bug already fixed twice elsewhere in this file
+            # (_get_raw_counts, Step 8's DEG matrix) — load everything,
+            # then throw most of it away. backed="r" defers reading .X
+            # from disk until the subset below is materialized via
+            # .copy(), so only the malignant cells' rows ever actually
+            # load into real memory.
+            _sidecar = sc.read_h5ad(_fullgene_sidecar_path, backed="r")
             _mal_barcodes     = adata_mal_fullgene.obs_names
             _common_barcodes  = _sidecar.obs_names.intersection(_mal_barcodes)
             if len(_common_barcodes) == adata_mal_fullgene.n_obs:
@@ -1780,6 +1792,18 @@ def run_preprocessing_pipeline(
                     f"cells matched) — keeping Module 2 gene-space snapshot "
                     f"for adata_mal_fullgene."
                 )
+            # CLAUDE EDIT — release the backed file handle explicitly.
+            # backed="r" keeps an open h5py file handle on _sidecar; once
+            # the subset above has been materialized via .copy(), this
+            # object (and its handle) is no longer needed.
+            try:
+                _sidecar.file.close()
+            except Exception:
+                pass
+            del _sidecar
+            import gc as _gc
+            _gc.collect()
+            _log_mem("after loading full-gene sidecar")
         except Exception as exc:
             print(
                 f"  WARNING: could not load full-gene sidecar ({exc}) — "
