@@ -22,6 +22,7 @@ Key notebook logic preserved:
 """
 
 import os
+import gc
 import glob
 import random
 import logging
@@ -1266,6 +1267,22 @@ def run_popv_annotation(
                 f"✗ Skipping {canonical} ({method_name}): "
                 f"{type(exc).__name__}: {exc}"
             )
+        finally:
+            # CLAUDE EDIT — explicit memory reclamation between methods.
+            # All 7 methods run in sequence on the SAME adata_combined
+            # object, each building its own embedding/neighbor graph/
+            # intermediate arrays. Without an explicit collect() here,
+            # short-lived objects from an EARLIER method (e.g. celltypist's
+            # training data, bbknn's graph-construction temporaries) can
+            # still be sitting in memory when a LATER, heavier method
+            # (harmony) starts — memory usage climbs across the sequence
+            # rather than being released as each method finishes. This
+            # doesn't change what any method computes; it only reduces
+            # peak memory. Meaningful on memory-constrained machines
+            # (Windows laptops, capped HPC allocations) where "kernel
+            # died" with no traceback is usually the OS/OOM-killer ending
+            # the process, not a Python-level error.
+            gc.collect()
 
     logger.info(f"Annotation complete. Successful methods: {successful}")
 
