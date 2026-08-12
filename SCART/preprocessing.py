@@ -149,7 +149,7 @@ FIX 14  Root cause of the "Command terminated by signal 11" / kernel-dead
         a classic native segfault trigger, confirmed by 487% CPU usage
         despite n_jobs=1 being requested.
 
-        Two-part fix:
+        Three-part fix:
           (a) Thread-limit env vars are now also set at MODULE IMPORT TIME,
               before numpy/scipy/scanpy are imported, so a fresh process
               starts constrained from the very first BLAS call onward
@@ -160,14 +160,19 @@ FIX 14  Root cause of the "Command terminated by signal 11" / kernel-dead
               run_harmony_integration(), and the sc.pp.neighbors()/
               sc.tl.umap() calls in plot_umap_before_after(). Unlike
               os.environ, threadpoolctl patches the ALREADY-LOADED native
-              BLAS library directly, so it reliably enforces the thread
-              limit regardless of what ran earlier in the process. This is
-              the change that was verified live: with OMP/OPENBLAS/MKL
-              threads pinned to 1, the same run that previously died with
-              signal 11 at KMeans-init instead completed Harmony (10/10
-              iterations), both UMAPs, and the Cancer Composition Score
-              successfully.
+              library directly, so it reliably enforces the thread limit
+              regardless of what ran earlier in the process.
               Requires: pip install threadpoolctl   (in scart_env)
+          (c) CORRECTION — threadpool_limits(..., user_api="blas") alone
+              was NOT sufficient: it only throttles registered BLAS
+              backends (OpenBLAS/MKL). sklearn's KMeans (called by
+              harmonypy for centroid init — the exact crash site) uses its
+              own OpenMP-parallel Cython code, a separate thread pool that
+              user_api="blas" does not touch, so the segfault still
+              reproduced with that filter in place. Dropping the
+              user_api= filter entirely — threadpool_limits(limits=n_jobs)
+              — limits ALL registered thread-pool backends (BLAS AND
+              OpenMP), which is what actually resolved the crash.
 
 FIX 15  adata.uns['cc_params']['umap_plot_paths'] was stored as a raw
         Python tuple (pdf_path, png_path) returned from
@@ -1143,13 +1148,17 @@ def run_harmony_integration(
     n_jobs=1,
 ):
     import harmonypy
-    # CLAUDE EDIT — FIX 14(b): threadpoolctl patches the already-loaded
-    # native BLAS library directly (unlike os.environ, which only affects
-    # thread pools not yet initialized). This is what fixed the confirmed
-    # segfault ("Command terminated by signal 11") at
-    # "Computing initial centroids with sklearn.KMeans..." inside
-    # harmonypy — sklearn's internal KMeans call was oversubscribing
-    # threads on top of an OpenBLAS pool that had already been sized by
+    # CLAUDE EDIT — FIX 14(b)+(c): threadpoolctl patches the already-loaded
+    # native thread-pool libraries directly (unlike os.environ, which only
+    # affects thread pools not yet initialized). NOTE: no user_api="blas"
+    # filter here — sklearn's KMeans (harmonypy's centroid init, the
+    # confirmed crash site) uses OpenMP, not BLAS, so a "blas"-only filter
+    # does not cover it and the segfault still reproduced with that filter
+    # in place. limits=n_jobs with no user_api= constrains every
+    # registered backend (BLAS AND OpenMP), which is what actually fixed
+    # the confirmed segfault ("Command terminated by signal 11") at
+    # "Computing initial centroids with sklearn.KMeans..." — previously
+    # oversubscribing threads on top of an OpenBLAS pool already sized by
     # Step 8's earlier Wilcoxon DEG test, despite n_jobs=1 being requested
     # (487% CPU observed vs. the intended 1 thread).
     # Requires: pip install threadpoolctl
@@ -1166,7 +1175,7 @@ def run_harmony_integration(
         _os.environ[env_var] = n_threads
     print(f"  Parallelism: n_jobs={n_jobs} ({n_threads} threads) for PCA + Harmony")
 
-    with threadpool_limits(limits=n_jobs, user_api="blas"):
+    with threadpool_limits(limits=n_jobs):
         print(f"  Running PCA (n_comps={n_pcs}, svd_solver={svd_solver})")
         sc.pp.pca(adata_hvg, n_comps=n_pcs, svd_solver=svd_solver)
 
@@ -1214,14 +1223,16 @@ def plot_umap_before_after(adata_hvg, save_dir, sample_name="cancer_composition"
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    # CLAUDE EDIT — FIX 14(b): same threadpoolctl protection as
-    # run_harmony_integration(). sc.pp.neighbors()/sc.tl.umap() also call
-    # into BLAS/sklearn nearest-neighbor code right after Harmony in the
-    # same process, so they're wrapped for consistency and safety even
-    # though the confirmed crash site was specifically the KMeans call.
+    # CLAUDE EDIT — FIX 14(b)+(c): same threadpoolctl protection as
+    # run_harmony_integration(), same no-user_api-filter fix (see the note
+    # there). sc.pp.neighbors()/sc.tl.umap() also call into BLAS/sklearn/
+    # OpenMP nearest-neighbor code right after Harmony in the same
+    # process, so they're wrapped for consistency and safety even though
+    # the confirmed crash site was specifically the KMeans call inside
+    # run_harmony_integration().
     from threadpoolctl import threadpool_limits
 
-    with threadpool_limits(limits=n_jobs, user_api="blas"):
+    with threadpool_limits(limits=n_jobs):
         print("  Computing UMAP — unintegrated (X_pca)")
         sc.pp.neighbors(adata_hvg, use_rep="X_pca", key_added="unintegrated")
         sc.tl.umap(adata_hvg, neighbors_key="unintegrated")
