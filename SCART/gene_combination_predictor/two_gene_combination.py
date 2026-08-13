@@ -76,37 +76,53 @@ plain array dataset and pandas' categorical group encoding — categories +
 codes), and _load_h5ad_subset now prefers var['gene_symbol'] when present,
 falling back to var/_index exactly as before when it isn't.
 
-Fix applied (rpy2 / R environment — atlas="both" RRA step)
-------------------------------------------------------------
-_run_rra_via_r previously called `import rpy2.robjects` with no control
+Fix applied (rpy2 / R environment — atlas="both" RRA step) [SUPERSEDED]
+-------------------------------------------------------------------------
+_run_rra_via_r originally called `import rpy2.robjects` with no control
 over which R installation rpy2 binds to. On a machine with more than one R
-on the system (e.g. a system R alongside the conda env's own R), rpy2 can
-resolve a libR.so that does NOT match the R the RobustRankAggreg package
-was actually installed into, or can load it without the R_HOME/lib
-directory on the loader's search path. Both produce hard-to-read failures
-during `import rpy2.rinterface`, e.g.:
+on the system (e.g. a system R alongside the conda env's own R), rpy2 could
+resolve a libR.so that did NOT match the R the RobustRankAggreg package was
+actually installed into, or could load it without the R_HOME/lib directory
+on the loader's search path. Both produced hard-to-read failures during
+`import rpy2.rinterface`, e.g.:
   ImportError: .../_rinterface_cffi_api.abi3.so: undefined symbol: R_ClosureEnv
   (falls back to ABI mode, which then also fails:)
   error: symbol 'R_getVar' not found in library '.../lib/R/lib/libR.so'
 
-This is an environment-resolution problem, not a code bug in the RRA logic
-itself — rpy2 found *a* libR.so but the wrong/partially-linked one relative
-to LD_LIBRARY_PATH at import time.
+A first fix attempt (_setup_r_environment(), resolving R_HOME and
+prepending <R_HOME>/lib to LD_LIBRARY_PATH before importing rpy2) reduced
+but did not eliminate this — in practice the failure persisted even with
+R_HOME/LD_LIBRARY_PATH correctly resolved and logged, because rpy2's
+in-process embedding of libR.so is sensitive to whatever else has already
+been loaded/linked into the same Python process (e.g. other native
+extensions pulling in a conflicting BLAS/LAPACK, or rpy2 having cached a
+partially-failed import earlier in a long-lived kernel — the joblib
+multiprocessing workers used by the GA make this worse, since a fork can
+inherit an already-partially-initialised rpy2 state). Because Python caches
+failed imports in sys.modules, once rpy2 fails once in a process it cannot
+be retroactively repaired without restarting the kernel — which is fragile
+for a long pipeline run.
 
-Fix: same as Module 4a (one_gene_combination.py) — a new
-_setup_r_environment() (backed by _find_r_home()) explicitly resolves
-R_HOME — preferring the R that lives inside the active conda environment
-(sys.prefix/lib/R) over PATH/system R — and prepends <R_HOME>/lib to
-LD_LIBRARY_PATH *before* rpy2 is imported anywhere in the process. Prints
-the same diagnostic line for consistency across both modules:
-  Rscript: <R_HOME>/bin/Rscript
-  R home:  <R_HOME>
+Fix (current): the RRA step no longer embeds R in-process via rpy2 at all.
+Instead — mirroring exactly how the SCART preprocessing module already
+drives R successfully for scMalignantFinder and SCEVAN, and identical to
+the fix applied in Module 4a (one_gene_combination.py) — it now:
+  1. writes each per-atlas ranked candidate-ID list out to a small CSV file,
+  2. writes a short auto-generated R driver script that loads
+     RobustRankAggreg, reads those CSVs, calls aggregateRanks(), and
+     writes the result back out to a CSV,
+  3. launches that driver script as an external `Rscript` subprocess
+     (with R_HOME / LD_LIBRARY_PATH set on the subprocess's own env, not
+     the Python process's), and
+  4. reads the resulting CSV back into a Python dict.
+A fresh `Rscript` subprocess always loads its own libR.so cleanly, so this
+sidesteps the in-process ABI/symbol-resolution problem entirely, and one
+failed R call can no longer poison the rest of the Python session the way
+a bad rpy2 import could.
 
-IMPORTANT: because Python caches failed imports in sys.modules, if rpy2 has
-already been imported once in the current process/kernel and failed as
-above, this fix will NOT retroactively repair it — restart the Python
-kernel/process before re-running so the corrected environment variables are
-in place *before* rpy2 is imported for the first time.
+IMPORTANT: rpy2 is no longer a dependency of this module. R itself (with
+the RobustRankAggreg package installed) plus a working `Rscript` on PATH
+or inside the active conda environment are still required for atlas="both".
 """
 
 import os
@@ -936,8 +952,10 @@ def _run_single_atlas(
 #   - "___" ID separator (avoids collision with the literal "|" inside the
 #     "A | B" gate string)
 #   - the actual RRA rho-scoring is delegated to R's RobustRankAggreg
-#     package (aggregateRanks(method="RRA")) via rpy2, so the statistics are
-#     identical to the reference implementation.
+#     package (aggregateRanks(method="RRA")), now launched as an external
+#     Rscript subprocess rather than embedded in-process via rpy2 — see
+#     module docstring "Fix applied (rpy2 / R environment) [SUPERSEDED]" —
+#     so the statistics are still identical to the reference implementation.
 # ─────────────────────────────────────────────────────────────────────────────
 
 _SYMMETRIC_GATES = {"A | B", "A & B"}
@@ -984,12 +1002,12 @@ def _normalize_gene_order_df(df: pd.DataFrame) -> pd.DataFrame:
 
 def _find_r_home() -> str:
     """
-    Locate the R installation rpy2 should bind to for RobustRankAggreg.
+    Locate the R installation Rscript should bind to for RobustRankAggreg.
 
     Preference order:
       1. R_HOME already set in the environment (respected as-is, if valid).
       2. <conda env>/lib/R  — i.e. sys.prefix/lib/R — the R that lives
-         *inside the same conda environment SCART/rpy2 are installed in*.
+         *inside the same conda environment SCART is installed in*.
          This is almost always the right answer and avoids ever touching a
          system R that may be a different version/ABI.
       3. `Rscript` resolved from PATH, asked directly for R.home().
@@ -1034,89 +1052,182 @@ def _find_r_home() -> str:
     )
 
 
-def _setup_r_environment() -> str:
+def _find_rscript() -> str:
     """
-    Point rpy2 at the correct R installation *before* rpy2 is imported.
-
-    Sets R_HOME and prepends <R_HOME>/lib (where libR.so lives) to
-    LD_LIBRARY_PATH. This must happen before the first `import rpy2...` in
-    the process — otherwise rpy2/cffi may already have resolved a
-    different, ABI-mismatched libR.so via whatever LD_LIBRARY_PATH the
-    process started with, producing:
-        undefined symbol: R_ClosureEnv   (cffi API mode)
-        undefined symbol: R_getVar       (ABI-mode fallback)
-
-    Returns the resolved R_HOME (for logging).
+    Locate the Rscript executable to launch as a subprocess for the RRA
+    step. Mirrors the preprocessing module's own Rscript resolution
+    (SCART.preprocessing "Rscript found via sys.executable dir" logic) and
+    Module 4a's identical helper: prefer the Rscript living inside the same
+    conda environment SCART is installed in, falling back to whatever
+    Rscript is on PATH.
     """
-    r_home = _find_r_home()
-    os.environ["R_HOME"] = r_home
+    import sys
+    import shutil
 
-    r_lib_dir = os.path.join(r_home, "lib")
-    existing  = os.environ.get("LD_LIBRARY_PATH", "")
+    conda_rscript = os.path.join(sys.prefix, "bin", "Rscript")
+    if os.path.exists(conda_rscript):
+        return conda_rscript
+
+    rscript = shutil.which("Rscript")
+    if rscript:
+        return rscript
+
+    raise RuntimeError(
+        "Could not locate an 'Rscript' executable for Robust Rank "
+        "Aggregation (atlas='both').\n"
+        "Install R + RobustRankAggreg into this conda environment, e.g.:\n"
+        "  conda install -c conda-forge r-base r-robustrankaggreg -y"
+    )
+
+
+def _build_r_subprocess_env(r_home: str) -> dict:
+    """
+    Build the environment dict passed to the Rscript subprocess: sets
+    R_HOME and prepends <R_HOME>/lib (where libR.so lives) to
+    LD_LIBRARY_PATH, on top of a copy of the current process environment.
+
+    Unlike the earlier rpy2-based approach, this only affects the child
+    subprocess's environment — it never mutates os.environ for the parent
+    Python process, so it can't interact with anything else already
+    running in this Python session (including the joblib multiprocessing
+    workers used by the GA step above).
+    """
+    env = os.environ.copy()
+    env["R_HOME"] = r_home
+
+    r_lib_dir      = os.path.join(r_home, "lib")
+    existing       = env.get("LD_LIBRARY_PATH", "")
     existing_paths = [p for p in existing.split(os.pathsep) if p]
     if r_lib_dir not in existing_paths:
-        os.environ["LD_LIBRARY_PATH"] = os.pathsep.join([r_lib_dir] + existing_paths)
+        env["LD_LIBRARY_PATH"] = os.pathsep.join([r_lib_dir] + existing_paths)
 
-    rscript_path = os.path.join(r_home, "bin", "Rscript")
+    return env
+
+
+def _run_rra_via_r(*rank_lists, output_dir: str) -> dict:
+    """
+    Run R's RobustRankAggreg::aggregateRanks(method="RRA") as an external
+    Rscript SUBPROCESS (not via in-process rpy2 embedding — see module
+    docstring "Fix applied (rpy2 / R environment ...) [SUPERSEDED]").
+
+    This mirrors exactly how the SCART preprocessing module already calls
+    R for scMalignantFinder and SCEVAN, and is identical to the fix applied
+    in Module 4a (one_gene_combination.py): write inputs to disk, write a
+    small R driver script, launch `Rscript <driver>.R` as a subprocess,
+    then read the R-written output CSV back into Python.
+
+    Requires the R package 'RobustRankAggreg' to be installed in whichever
+    R installation Rscript resolves to (installed automatically by
+    `python -m SCART.install`, see install.py).
+
+    Parameters
+    ----------
+    *rank_lists : list[str]
+        One ranked candidate-ID list (best -> worst) per atlas.
+    output_dir : str
+        Directory to write the RRA driver script / input & output CSVs
+        into (a "rra_rscript" subfolder is created here).
+
+    Returns
+    -------
+    dict[str, float]  — candidate ID -> RRA score (lower = better, matching
+    RobustRankAggreg's convention, same as before).
+    """
+    import subprocess
+    import csv
+
+    rscript_path = _find_rscript()
+    r_home       = _find_r_home()
+    env          = _build_r_subprocess_env(r_home)
+
     print(f"  Rscript:                  {rscript_path}")
     print(f"  R home:                   {r_home}")
 
-    return r_home
+    rra_dir = os.path.join(output_dir, "rra_rscript")
+    os.makedirs(rra_dir, exist_ok=True)
 
+    # Write each rank list to its own single-column CSV (no header, one
+    # candidate ID per row, best -> worst), same idea as SCEVAN's
+    # counts/barcodes CSVs handed off to its driver R script.
+    input_paths = []
+    for i, rl in enumerate(rank_lists):
+        path = os.path.join(rra_dir, f"rank_list_{i + 1}.csv")
+        with open(path, "w", newline="") as f:
+            writer = csv.writer(f)
+            for candidate_id in rl:
+                writer.writerow([candidate_id])
+        input_paths.append(path)
+        print(f"  RRA input list {i + 1} ({len(rl)} candidates) written to: {path}")
 
-def _run_rra_via_r(*rank_lists) -> dict:
-    """
-    Call R's RobustRankAggreg::aggregateRanks(method="RRA") via rpy2 to
-    combine the per-atlas rank lists into a single robust rank score per
-    candidate ID. Requires the R package 'RobustRankAggreg' (installed by
-    `python -m SCART.install`, see install.py).
+    output_path   = os.path.join(rra_dir, "rra_result.csv")
+    r_script_path = os.path.join(rra_dir, "run_rra.R")
 
-    FIX: _setup_r_environment() runs first to make sure rpy2 binds to the
-    R installation living in this same conda environment — see module
-    docstring "Fix applied (rpy2 / R environment — atlas='both' RRA step)".
-    """
-    _setup_r_environment()
+    r_input_vector = ", ".join(f'"{p}"' for p in input_paths)
+    r_code = f'''# Auto-generated driver script — Robust Rank Aggregation (SCART Module 4b)
+# Mirrors the driver-script pattern used by SCEVAN's run_scevan.R.
+suppressMessages(library(RobustRankAggreg))
+
+input_files <- c({r_input_vector})
+glist <- lapply(input_files, function(f) {{
+  read.csv(f, header = FALSE, stringsAsFactors = FALSE)[[1]]
+}})
+
+result <- aggregateRanks(glist = glist, method = "RRA")
+write.csv(result, file = "{output_path}", row.names = FALSE)
+cat("RRA aggregation completed. Rows:", nrow(result), "\\n")
+'''
+    with open(r_script_path, "w") as f:
+        f.write(r_code)
+    print(f"  RRA driver script written: {r_script_path}")
+    print("  Launching Rscript subprocess for RobustRankAggreg::aggregateRanks() ...")
 
     try:
-        import rpy2.robjects as ro
-        from rpy2.robjects import StrVector
-        from rpy2.robjects.packages import importr
-    except ImportError as exc:
-        raise ImportError(
-            "rpy2 is required for Robust Rank Aggregation (atlas='both'). "
-            "It is one of SCART's core dependencies — if missing, run:\n"
-            "  pip install rpy2>=3.5\n"
-            "If rpy2 is installed but this import still fails with an "
-            "'undefined symbol' error, the R it bound to earlier in this "
-            "Python session doesn't match this environment's R — restart "
-            "the kernel/process and re-run so the corrected R_HOME/"
-            "LD_LIBRARY_PATH set by _setup_r_environment() take effect "
-            "before rpy2 is imported."
-        ) from exc
-
-    try:
-        rra_pkg = importr("RobustRankAggreg")
-    except Exception as exc:
+        proc = subprocess.run(
+            [rscript_path, r_script_path],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:
         raise RuntimeError(
-            "The R package 'RobustRankAggreg' is required for Robust Rank "
-            "Aggregation (atlas='both') but was not found in your R "
-            "environment.\n"
-            "Install it with:\n"
-            "  conda install -c conda-forge r-robustrankaggreg -y\n"
-            "or from an R console:\n"
-            "  install.packages('RobustRankAggreg')\n"
-            "This is also installed automatically by: python -m SCART.install"
+            f"Failed to launch Rscript subprocess at {rscript_path}: {exc}"
         ) from exc
 
-    r_glist = ro.ListVector({
-        f"list{i + 1}": StrVector(rl) for i, rl in enumerate(rank_lists)
-    })
+    if proc.stdout:
+        print(proc.stdout.strip())
 
-    r_result = rra_pkg.aggregateRanks(glist=r_glist, method="RRA")
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "Rscript subprocess for Robust Rank Aggregation failed "
+            f"(exit code {proc.returncode}).\n"
+            f"--- Rscript stderr ---\n{proc.stderr}\n"
+            "Make sure the R package 'RobustRankAggreg' is installed in "
+            f"the R at {r_home}, e.g.:\n"
+            "  conda install -c conda-forge r-robustrankaggreg -y\n"
+            "or from an R console: install.packages('RobustRankAggreg')"
+        )
 
-    names  = [str(n) for n in r_result.rx2("Name")]
-    scores = [float(s) for s in r_result.rx2("Score")]
-    return dict(zip(names, scores))
+    if proc.stderr:
+        # R (and library()) often write benign package-load / startup
+        # messages to stderr even on success — log, don't fail on these.
+        logger.info(f"Rscript stderr (non-fatal):\n{proc.stderr.strip()}")
+
+    if not os.path.exists(output_path):
+        raise RuntimeError(
+            "Rscript subprocess exited successfully but the expected RRA "
+            f"output file was not found: {output_path}"
+        )
+
+    df_out = pd.read_csv(output_path)
+    if not {"Name", "Score"}.issubset(df_out.columns):
+        raise RuntimeError(
+            f"Unexpected RRA output columns in {output_path}: "
+            f"{list(df_out.columns)} (expected 'Name' and 'Score')"
+        )
+
+    print(f"  RRA result CSV read back from: {output_path}")
+
+    return dict(zip(df_out["Name"].astype(str), df_out["Score"].astype(float)))
 
 
 def _plot_top_rra_candidates(df_ranked: pd.DataFrame, output_dir: str, top_n: int = 20):
@@ -1246,7 +1357,7 @@ def _robust_rank_aggregation(
     hpa_rank    = strict.sort_values(by="hpa_combined",    ascending=False)["ID"].tolist()
     tabula_rank = strict.sort_values(by="tabula_combined", ascending=False)["ID"].tolist()
 
-    rra_scores = _run_rra_via_r(hpa_rank, tabula_rank)
+    rra_scores = _run_rra_via_r(hpa_rank, tabula_rank, output_dir=output_dir)
 
     strict["RRA_Score"] = strict["ID"].map(rra_scores)
     n_missing = strict["RRA_Score"].isna().sum()
