@@ -1587,18 +1587,41 @@ def run_preprocessing_pipeline(
         surfaceome_path = _auto_surfaceome_path()
     logger.info(f"Surfaceome (GESP) path: {surfaceome_path}")
 
-    # STEP 1 — Load full PopV h5ad
+    # STEP 1 — Load full PopV h5ad (or, in manual-annotation mode, Module 1's
+    # skip_popv=True output).
+    #
+    # CLAUDE EDIT — _auto_popv_h5ad() only ever looks for PopV's own output
+    # filename (popv_results/final_popv_annotated.h5ad / final_popv_annotated
+    # .h5ad). When Module 1 (SampleAnnotator) is run with manual_annotation_col=
+    # set, it takes the skip_popv=True branch and PopV never runs at all — it
+    # writes "input_tumor.h5ad" (matched by _auto_tumor_h5ad()'s own patterns,
+    # already used elsewhere in this module as a rescue path) to cwd instead,
+    # so the old auto_popv-only search here always missed it and raised
+    # FileNotFoundError even though a valid input h5ad was sitting in cwd.
+    # auto_tumor is now tried as a fallback candidate, after popv_path and
+    # auto_popv, so the normal Module 2 (PopV) flow is completely unaffected.
     if adata is None:
-        auto_popv = _auto_popv_h5ad()
-        for path in ([popv_path] if popv_path else []) + ([auto_popv] if auto_popv else []):
+        auto_popv  = _auto_popv_h5ad()
+        auto_tumor = _auto_tumor_h5ad()
+        candidates = (
+            ([popv_path] if popv_path else [])
+            + ([auto_popv] if auto_popv else [])
+            + ([auto_tumor] if auto_tumor else [])
+        )
+        for path in candidates:
             if path and os.path.exists(path):
-                print(f"Loading PopV output: {path}")
+                print(f"Loading input h5ad: {path}")
                 adata = sc.read_h5ad(path)
                 break
         if adata is None:
             raise FileNotFoundError(
-                "Could not auto-detect PopV output.\n"
-                "Expected: popv_results/final_popv_annotated.h5ad\n"
+                "Could not auto-detect an input h5ad.\n"
+                "Expected one of:\n"
+                "  popv_results/final_popv_annotated.h5ad  (Module 2 / PopV output)\n"
+                "  final_popv_annotated.h5ad\n"
+                "  <cwd>/*_tumor.h5ad, combined_tumor.h5ad, input_tumor.h5ad "
+                "(Module 1 manual-annotation-mode output)\n"
+                "  <cwd>/GSE_data/*_tumor.h5ad, combined_tumor.h5ad, input_tumor.h5ad\n"
                 "Pass adata= or popv_path= explicitly."
             )
 
