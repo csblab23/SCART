@@ -876,11 +876,9 @@ def _robust_rank_aggregation_single_gene(
     tabula_df = _prepare_rra_input_single_gene(df_results_tabula, "tabula")
 
     hpa_candidates = hpa_df[
-        (hpa_df["hpa_efficacy"] > efficacy_threshold) &
         (hpa_df["hpa_safety"]   > safety_threshold)
     ]
     tabula_candidates = tabula_df[
-        (tabula_df["tabula_efficacy"] > efficacy_threshold) &
         (tabula_df["tabula_safety"]   > safety_threshold)
     ]
 
@@ -906,10 +904,10 @@ def _robust_rank_aggregation_single_gene(
     # STRICT FILTER: keep only genes passing efficacy > threshold AND
     # safety > threshold in BOTH atlases.
     strict = combined[
-        (combined["hpa_efficacy"]    > efficacy_threshold) & (combined["hpa_safety"]    > safety_threshold) &
-        (combined["tabula_efficacy"] > efficacy_threshold) & (combined["tabula_safety"] > safety_threshold)
+        (combined["hpa_safety"]    > safety_threshold) &
+        (combined["tabula_safety"] > safety_threshold)
     ].copy()
-    print(f"Genes passing efficacy>{efficacy_threshold} & safety>{safety_threshold} "
+    print(f"Genes passing safety>{safety_threshold} "
           f"in BOTH atlases: {len(strict)}")
 
     out_csv = os.path.join(output_dir, "final_single_gene_candidates_RRA_HPA_Tabula.csv")
