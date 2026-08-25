@@ -1264,18 +1264,19 @@ cat("RRA aggregation completed. Rows:", nrow(result), "\\n")
 # ─────────────────────────────────────────────────────────────────────────────
 # RRA result plots
 #
-# Restyled to match, as closely as matplotlib allows, the reference
-# R/ggplot2 + cowplot + ggrepel scatter script (avg. safety vs HPA
-# efficacy; every candidate shown as grey background on the left panel;
+# Restyled to match, as closely as matplotlib allows, the look of the
+# reference R/ggplot2 + cowplot + ggrepel scatter script (avg. safety vs
+# HPA efficacy; every candidate shown as grey background on the left panel;
 # selected candidates highlighted as black-outlined diamonds in a
-# colour-blind-friendly per-candidate palette; a dashed rectangle on the
-# left panel marking the zoomed-in region shown, without background
-# points, on the right panel; white ggrepel-style label chips):
+# colour-blind-friendly per-candidate palette — the same six-colour
+# Okabe-Ito-derived vector as the reference script, assigned in row order;
+# a dashed rectangle on the left panel marking the zoomed-in region shown,
+# without background points, on the right panel; white ggrepel-style label
+# chips):
 #
 #   _plot_top_gate_rra_candidates() — top 3 AND, top 3 OR, and top 3 NAND
-#       (A & !B) candidates by RRA_Rank. Unlike the reference script
-#       (which only highlights AND/OR and excludes NAND), NAND is
-#       included here.
+#       (A & !B) candidates by RRA_Rank. Unlike the reference script (which
+#       only highlights AND/OR and excludes NAND), NAND is included here.
 #   _plot_top10_rra_candidates()    — top 10 candidates overall by
 #       RRA_Rank, regardless of gate type.
 #
@@ -1288,11 +1289,11 @@ _GATE_TYPE_MAP = {"A & B": "AND", "A | B": "OR", "A & !B": "NAND"}
 
 # Colour-blind-friendly (Okabe-Ito derived) palette, assigned one colour
 # per highlighted CANDIDATE (not per gate type) in row order — exactly the
-# same convention as the reference script's
-# `highlight_colors[seq_len(n())]`. The first six entries are identical,
-# in the same order, to the reference script's `highlight_colors` vector;
-# entries 7-9 extend the palette so NAND candidates (highlighted here,
-# unlike in the reference script) also get a distinct colour.
+# same convention as the reference script's `highlight_colors[seq_len(n())]`.
+# The first six entries are identical, in the same order, to the reference
+# script's `highlight_colors` vector; entries 7-9 extend the palette so
+# NAND candidates (highlighted here, unlike in the reference script) also
+# get a distinct colour.
 _HIGHLIGHT_COLORS = [
     "#0072B2",  # blue
     "#56B4E9",  # sky blue
