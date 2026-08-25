@@ -123,6 +123,23 @@ a bad rpy2 import could.
 IMPORTANT: rpy2 is no longer a dependency of this module. R itself (with
 the RobustRankAggreg package installed) plus a working `Rscript` on PATH
 or inside the active conda environment are still required for atlas="both".
+
+Fix applied (RRA plots)
+------------------------
+The single grouped-bar "Top 20 RRA candidates" plot has been replaced with
+two dual-panel scatter plots, adapted from a reference R/ggplot2+ggrepel
+script (avg. safety vs HPA efficacy, all candidates as background, selected
+candidates as labelled diamonds with a dashed rectangle marking the zoomed
+region on the left panel):
+
+  _plot_top_gate_rra_candidates() — top 3 AND, top 3 OR, and top 3 NAND
+      (A & !B) candidates by RRA_Rank, one colour per gate type. Unlike the
+      reference script (which excludes NAND), NAND is included here.
+  _plot_top10_rra_candidates()    — top 10 candidates overall by RRA_Rank,
+      regardless of gate type.
+
+Both are shown inline (in addition to being saved to disk) when run inside
+a Jupyter kernel; see _configure_matplotlib_backend().
 """
 
 import os
@@ -1230,64 +1247,366 @@ cat("RRA aggregation completed. Rows:", nrow(result), "\\n")
     return dict(zip(df_out["Name"].astype(str), df_out["Score"].astype(float)))
 
 
-def _plot_top_rra_candidates(df_ranked: pd.DataFrame, output_dir: str, top_n: int = 20):
-    """Grouped bar chart of the top-N RRA-ranked candidates (efficacy +
-    per-atlas safety), mirroring the ggplot2 plot in the reference R script."""
+# ─────────────────────────────────────────────────────────────────────────────
+# RRA result plots
+#
+# Replaces the earlier single grouped-bar "Top 20 RRA candidates" plot with
+# two dual-panel scatter plots, adapted from the user's reference
+# R/ggplot2+ggrepel script (avg. safety vs HPA efficacy; every candidate
+# shown as background; selected candidates highlighted as labelled diamonds
+# with a dashed rectangle on the left panel marking the zoomed-in region
+# shown on the right panel). Same core idea as the reference script, just
+# ported to matplotlib and restyled:
+#
+#   _plot_top_gate_rra_candidates() — top 3 AND, top 3 OR, and top 3 NAND
+#       (A & !B) candidates by RRA_Rank, one colour per gate type. Unlike
+#       the reference script (which excludes NAND), NAND is included here.
+#   _plot_top10_rra_candidates()    — top 10 candidates overall by
+#       RRA_Rank, regardless of gate type.
+#
+# Both save PDF + PNG (with a `_claude` suffix) and, when run inside a
+# Jupyter kernel, also display inline via plt.show() — see
+# _configure_matplotlib_backend().
+# ─────────────────────────────────────────────────────────────────────────────
+
+_GATE_TYPE_MAP = {"A & B": "AND", "A | B": "OR", "A & !B": "NAND"}
+
+_GATE_COLORS = {
+    "AND":  "#2E86AB",   # blue
+    "OR":   "#06A77D",   # teal-green
+    "NAND": "#D5896F",   # coral
+}
+
+# Distinct rank-ordered palette for the top-10-overall plot (rank 1 first).
+_RANK_PALETTE = [
+    "#264653", "#2A9D8F", "#8AB17D", "#E9C46A", "#F4A261",
+    "#EE8959", "#E76F51", "#C1121F", "#780000", "#4A0404",
+]
+
+
+def _configure_matplotlib_backend() -> bool:
+    """
+    Headless-safe by default — mirrors the previous hard-coded
+    `matplotlib.use("Agg")` so unattended/HPC script runs never try (and
+    fail) to open a GUI window. Inside a Jupyter kernel, the backend is
+    left alone instead, so the inline/widget backend already configured
+    there is free to actually display the figure.
+
+    Returns True if running inside a Jupyter kernel (safe to call
+    plt.show()), False otherwise.
+    """
     import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
 
-    top = df_ranked.sort_values(by="RRA_Rank").head(top_n).copy()
-    if top.empty:
-        print("No RRA-ranked candidates to plot — skipping plot.")
+    try:
+        from IPython import get_ipython
+        ip = get_ipython()
+        in_notebook = ip is not None and "IPKernelApp" in ip.config
+    except Exception:
+        in_notebook = False
+
+    if not in_notebook:
+        matplotlib.use("Agg")
+
+    return in_notebook
+
+
+def _prep_rra_plot_df(df_ranked: pd.DataFrame) -> pd.DataFrame:
+    """Shared prep for both RRA plots: average safety across atlases, a
+    display label per candidate, and a coarse gate-type category."""
+    df = df_ranked.dropna(subset=["hpa_safety", "tabula_safety", "hpa_efficacy"]).copy()
+    df["avg_safety"] = (df["hpa_safety"] + df["tabula_safety"]) / 2.0
+    df["efficacy"]   = df["hpa_efficacy"]  # atlas-invariant by construction
+    df["gate_type"]  = df["gate"].map(_GATE_TYPE_MAP).fillna("OTHER")
+
+    def _label(row):
+        if row["gate"] == "A & !B":
+            return f"{row['geneA']} & !{row['geneB']}"
+        symbol = row["gate"].replace("A", "").replace("B", "").strip()
+        return f"{row['geneA']} {symbol} {row['geneB']}"
+
+    df["candidate"] = df.apply(_label, axis=1)
+    return df
+
+
+def _style_scatter_axes(ax, title, xlabel, ylabel):
+    """Shared modern styling for one scatter panel: clean spines, subtle
+    grid, bold sans-serif titles."""
+    from matplotlib.ticker import FuncFormatter
+
+    ax.set_title(title, fontsize=14.5, fontweight="bold", pad=12, color="#1a1a1a")
+    ax.set_xlabel(xlabel, fontsize=12, fontweight="semibold", color="#333333")
+    ax.set_ylabel(ylabel, fontsize=12, fontweight="semibold", color="#333333")
+    ax.tick_params(labelsize=10.5, colors="#333333")
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.0f}%"))
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.0f}%"))
+
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    for spine in ("left", "bottom"):
+        ax.spines[spine].set_linewidth(1.1)
+        ax.spines[spine].set_color("#4a4a4a")
+
+    ax.grid(True, linewidth=0.6, alpha=0.30, color="#999999")
+    ax.set_axisbelow(True)
+
+
+def _repel_labels(ax, xs, ys, labels, colors, x_range, y_range, side="right"):
+    """
+    Lightweight, dependency-free label placement approximating ggrepel:
+    labels are distributed evenly down one side of the panel as tinted
+    "chips" (each coloured to match its point) and connected to their
+    point with a thin, matching-colour leader line. Uses the optional
+    `adjustText` package instead, when it's installed, for a tighter
+    layout.
+    """
+    from matplotlib.colors import to_rgba
+
+    try:
+        from adjustText import adjust_text
+
+        texts = [
+            ax.text(
+                x, y, label, fontsize=9.5, fontweight="bold", color=color,
+                bbox=dict(boxstyle="round,pad=0.3", facecolor=to_rgba(color, 0.14),
+                          edgecolor=color, linewidth=1.3),
+            )
+            for x, y, label, color in zip(xs, ys, labels, colors)
+        ]
+        adjust_text(texts, ax=ax,
+                    arrowprops=dict(arrowstyle="-", color="#888888", lw=0.9))
         return
+    except ImportError:
+        pass
 
-    def _combo_label(row):
-        gate_symbol = row["gate"].replace("A", "").replace("B", "")
-        if row["geneA"] == "MSLN":
-            return f"{row['geneA']}{gate_symbol}{row['geneB']}"
-        if row["geneB"] == "MSLN":
-            return f"{row['geneB']}{gate_symbol}{row['geneA']}"
-        return f"{row['geneA']}{gate_symbol}{row['geneB']}"
+    order      = np.argsort(ys)[::-1]
+    n          = len(order)
+    y_lo, y_hi = y_range
+    margin     = 0.06 * (y_hi - y_lo)
+    slots      = (np.linspace(y_hi - margin, y_lo + margin, n)
+                  if n > 1 else [ys[order[0]]])
+    x_text     = (x_range[1] + 0.16 * (x_range[1] - x_range[0]) if side == "right"
+                  else x_range[0] - 0.16 * (x_range[1] - x_range[0]))
 
-    top["Combo"] = top.apply(_combo_label, axis=1)
+    for slot_y, idx in zip(slots, order):
+        x, y, label, color = xs[idx], ys[idx], labels[idx], colors[idx]
+        ax.annotate(
+            label, xy=(x, y), xytext=(x_text, slot_y),
+            fontsize=9.5, fontweight="bold", color=color,
+            ha="left" if side == "right" else "right", va="center",
+            bbox=dict(boxstyle="round,pad=0.35", facecolor=to_rgba(color, 0.14),
+                      edgecolor=color, linewidth=1.3),
+            arrowprops=dict(arrowstyle="-", color=to_rgba(color, 0.65), lw=1.1,
+                             shrinkA=7, shrinkB=7),
+            annotation_clip=False,
+        )
 
-    # efficacy is atlas-invariant by construction (same GA fitness definition
-    # in both runs), hpa_efficacy is used as the single "Efficacy" series.
-    metrics = {
-        "Efficacy":      top["hpa_efficacy"],
-        "HPA Safety":    top["hpa_safety"],
-        "Tabula Safety": top["tabula_safety"],
-    }
-    colors = {
-        "Efficacy":      "#0072B2",
-        "HPA Safety":    "#009E73",
-        "Tabula Safety": "#CC79A7",
-    }
+    if side == "right":
+        ax.set_xlim(x_range[0], x_text + 0.06 * (x_range[1] - x_range[0]))
+    else:
+        ax.set_xlim(x_text - 0.06 * (x_range[1] - x_range[0]), x_range[1])
 
-    x     = np.arange(len(top))
-    width = 0.25
-    fig, ax = plt.subplots(figsize=(16, 8))
 
-    for i, (label, values) in enumerate(metrics.items()):
-        bars = ax.bar(x + (i - 1) * width, values, width, label=label,
-                       color=colors[label], edgecolor="black", linewidth=0.4)
-        ax.bar_label(bars, fmt="%.2f", rotation=90, padding=3, fontsize=8)
+def _dual_panel_rra_figure(
+    plot_df: pd.DataFrame,
+    highlighted: pd.DataFrame,
+    colors: list,
+    out_stub: str,
+    output_dir: str,
+    suptitle: str,
+    left_title: str,
+    right_title: str,
+    legend_handles=None,
+):
+    """
+    Shared dual-panel figure builder used by both RRA plots below.
+    Left panel: every candidate as background, highlighted candidates as
+    colour-coded diamonds, with a dashed rectangle marking the zoomed
+    region. Right panel: just the highlighted candidates, zoomed in, with
+    leader-line labels.
+    """
+    in_notebook = _configure_matplotlib_backend()
+    import matplotlib.pyplot as plt
+    import matplotlib.patheffects as pe
+    from matplotlib.colors import to_rgba
 
-    ax.set_xticks(x)
-    ax.set_xticklabels(top["Combo"], rotation=45, ha="right")
-    ax.set_ylabel("Score")
-    ax.set_title("Top 20 RRA-Ranked Dual Candidates (HPA + Tabula Sapiens)")
-    ax.legend()
+    plt.rcParams.update({
+        "font.family":       "DejaVu Sans",
+        "figure.facecolor":  "white",
+        "axes.facecolor":    "white",
+    })
+
+    fig, (ax_l, ax_r) = plt.subplots(1, 2, figsize=(17, 8.5))
+    fig.suptitle(suptitle, fontsize=17, fontweight="bold", y=1.03, color="#1a1a1a")
+
+    xs_all = (plot_df["avg_safety"] * 100).to_numpy()
+    ys_all = (plot_df["efficacy"] * 100).to_numpy()
+    xs_hi  = (highlighted["avg_safety"] * 100).to_numpy()
+    ys_hi  = (highlighted["efficacy"] * 100).to_numpy()
+
+    # Partition thresholds — the lowest safety / efficacy among the
+    # highlighted candidates, exactly as in the reference script (its
+    # `rank6_safety` / `min_highlight_efficacy`), drawn as full dashed
+    # cross-lines. The shaded zoom rectangle uses a 1-point floor/ceil
+    # margin around the highlighted candidates, also matching the
+    # reference script's `zoom_x_min/max`, `zoom_y_min/max`.
+    threshold_x = float(xs_hi.min())
+    threshold_y = float(ys_hi.min())
+    x_lo = max(0.0, np.floor(xs_hi.min()) - 1)
+    x_hi = min(100.0, np.ceil(xs_hi.max()) + 1)
+    y_lo = max(0.0, np.floor(ys_hi.min()) - 1)
+    y_hi = min(100.0, np.ceil(ys_hi.max()) + 1)
+
+    # ---- left panel: full candidate universe, with partition -------------
+    ax_l.scatter(xs_all, ys_all, s=30, color="#B5B5B5", alpha=0.45,
+                 linewidths=0, zorder=2, label=None)
+
+    ax_l.axvline(threshold_x, linestyle="--", linewidth=1.2, color="#555555", zorder=3)
+    ax_l.axhline(threshold_y, linestyle="--", linewidth=1.2, color="#555555", zorder=3)
+    ax_l.add_patch(plt.Rectangle(
+        (x_lo, y_lo), max(x_hi - x_lo, 0.5), max(y_hi - y_lo, 0.5),
+        fill=True, facecolor="#777777", alpha=0.15,
+        edgecolor="#222222", linestyle="--", linewidth=1.6, zorder=3,
+    ))
+
+    ax_l.scatter(xs_hi, ys_hi, s=150, marker="o", color=colors,
+                 edgecolor="black", linewidth=1.0, zorder=5)
+
+    ax_l.set_box_aspect(1)
+    _style_scatter_axes(ax_l, left_title, "Average safety", "Efficacy")
+    ax_l.set_xlim(left=90)
+    ax_l.set_ylim(bottom=70)
+
+    # ---- right panel: zoomed, labelled highlighted candidates -------------
+    # Modernised vs. the reference script's plain boxed labels: soft drop
+    # shadow under each point, a light halo ring in the point's own
+    # colour, colour-tinted label "chips" (see _repel_labels), and — same
+    # as the left panel — the grey backdrop of every other candidate plus
+    # the dashed partition lines, so it's clear these are the top
+    # candidates picked out of the full population, just zoomed in.
+    ax_r.set_facecolor("#FAFAFA")
+    for spine in ax_r.spines.values():
+        spine.set_zorder(0)
+
+    ax_r.scatter(xs_all, ys_all, s=30, color="#B5B5B5", alpha=0.45,
+                 linewidths=0, zorder=2)
+    ax_r.axvline(threshold_x, linestyle="--", linewidth=1.2, color="#555555", zorder=3)
+    ax_r.axhline(threshold_y, linestyle="--", linewidth=1.2, color="#555555", zorder=3)
+
+    ax_r.scatter(xs_hi, ys_hi, s=340, marker="o", color=[to_rgba(c, 0.16) for c in colors],
+                 edgecolor="none", zorder=4)
+    pts = ax_r.scatter(xs_hi, ys_hi, s=175, marker="o", color=colors,
+                        edgecolor="white", linewidth=1.6, zorder=5)
+    pts.set_path_effects([
+        pe.SimplePatchShadow(offset=(1.8, -1.8), shadow_rgbFace="#333333", alpha=0.28),
+        pe.Normal(),
+    ])
+
+    pad_x = 0.12 * max(x_hi - x_lo, 1.0)
+    pad_y = 0.16 * max(y_hi - y_lo, 1.0)
+    x_range = (x_lo - pad_x, x_hi + pad_x)
+    y_range = (y_lo - pad_y, y_hi + pad_y)
+    ax_r.set_ylim(*y_range)
+    ax_r.set_xlim(*x_range)
+
+    _repel_labels(
+        ax_r, xs_hi, ys_hi, highlighted["candidate"].tolist(), colors,
+        x_range=x_range, y_range=y_range,
+    )
+
+    ax_r.set_box_aspect(1)
+    _style_scatter_axes(ax_r, right_title, "Average safety", "HPA efficacy")
+    ax_r.grid(True, linewidth=0.6, alpha=0.4, color="#dddddd", linestyle=":")
+
+    if legend_handles:
+        ax_r.legend(handles=legend_handles, loc="upper left", frameon=True,
+                    fontsize=10, title_fontsize=10.5, framealpha=0.95)
+
     fig.tight_layout()
 
-    pdf_path = os.path.join(output_dir, "Top20_RRA_Dual_Candidates_HPA_Tabula.pdf")
-    png_path = os.path.join(output_dir, "Top20_RRA_Dual_Candidates_HPA_Tabula.png")
-    fig.savefig(pdf_path, dpi=600)
-    fig.savefig(png_path, dpi=600)
+    pdf_path = os.path.join(output_dir, f"{out_stub}_claude.pdf")
+    png_path = os.path.join(output_dir, f"{out_stub}_claude.png")
+    fig.savefig(pdf_path, dpi=300, bbox_inches="tight")
+    fig.savefig(png_path, dpi=300, bbox_inches="tight")
+    print(f"RRA plot saved to:\n  {pdf_path}\n  {png_path}")
+
+    if in_notebook:
+        plt.show()
     plt.close(fig)
 
-    print(f"Top-20 RRA plot saved to:\n  {pdf_path}\n  {png_path}")
+
+def _plot_top_gate_rra_candidates(df_ranked: pd.DataFrame, output_dir: str, top_n_per_gate: int = 3):
+    """
+    Top `top_n_per_gate` (default 3) candidates by RRA_Rank within EACH
+    gate type — AND, OR, and NAND (A & !B) — highlighted together on one
+    dual-panel scatter plot, colour-coded by gate type. Adapted from the
+    reference R/ggplot2 scatter script; unlike that script, NAND is
+    included here rather than excluded.
+    """
+    from matplotlib.lines import Line2D
+
+    plot_df = _prep_rra_plot_df(df_ranked)
+
+    pieces = []
+    for gate_type in ("AND", "OR", "NAND"):
+        sub = plot_df[plot_df["gate_type"] == gate_type].sort_values("RRA_Rank").head(top_n_per_gate)
+        if sub.empty:
+            print(f"No {gate_type}-gate candidates available for highlighting — skipping.")
+            continue
+        pieces.append(sub)
+
+    if not pieces:
+        print("No AND/OR/NAND candidates available — skipping top-gate RRA plot.")
+        return
+
+    highlighted = pd.concat(pieces).sort_values(["gate_type", "RRA_Rank"]).reset_index(drop=True)
+    colors      = [_GATE_COLORS[g] for g in highlighted["gate_type"]]
+
+    legend_handles = [
+        Line2D([0], [0], marker="o", color="w", markerfacecolor=_GATE_COLORS[g],
+               markeredgecolor="black", markersize=10, label=g)
+        for g in ("AND", "OR", "NAND") if g in highlighted["gate_type"].unique()
+    ]
+
+    _dual_panel_rra_figure(
+        plot_df, highlighted, colors,
+        out_stub="Top3_AND_OR_NAND_RRA_Candidates",
+        output_dir=output_dir,
+        suptitle="Top 3 AND / OR / NAND Candidates — Robust Rank Aggregation",
+        left_title="All candidate combinations",
+        right_title="Top 3 per gate (AND / OR / NAND)",
+        legend_handles=legend_handles,
+    )
+
+
+def _plot_top10_rra_candidates(df_ranked: pd.DataFrame, output_dir: str, top_n: int = 10):
+    """
+    Top `top_n` (default 10) candidates overall by RRA_Rank, regardless of
+    gate type. Same dual-panel look as _plot_top_gate_rra_candidates(),
+    with points coloured by rank (best = darkest) and rank numbers baked
+    into each label.
+    """
+    plot_df     = _prep_rra_plot_df(df_ranked)
+    highlighted = plot_df.sort_values("RRA_Rank").head(top_n).reset_index(drop=True)
+
+    if highlighted.empty:
+        print("No RRA-ranked candidates available — skipping top-10 RRA plot.")
+        return
+
+    highlighted = highlighted.copy()
+    highlighted["candidate"] = [
+        f"#{i + 1}  {c}" for i, c in enumerate(highlighted["candidate"])
+    ]
+    colors = _RANK_PALETTE[:len(highlighted)]
+
+    _dual_panel_rra_figure(
+        plot_df, highlighted, colors,
+        out_stub="Top10_RRA_Candidates",
+        output_dir=output_dir,
+        suptitle="Top 10 Candidates Overall — Robust Rank Aggregation",
+        left_title="All candidate combinations",
+        right_title="Top 10 by RRA rank",
+        legend_handles=None,
+    )
 
 
 def _robust_rank_aggregation(
@@ -1374,7 +1693,8 @@ def _robust_rank_aggregation(
     print("\nTop 10 RRA-ranked candidates:")
     print(strict.head(10).to_string(index=False))
 
-    _plot_top_rra_candidates(strict, output_dir)
+    _plot_top_gate_rra_candidates(strict, output_dir)
+    _plot_top10_rra_candidates(strict, output_dir)
 
     return strict
 
