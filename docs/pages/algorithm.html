@@ -45,17 +45,18 @@
 /* ── Algorithm-page specific styles ── */
 .algo-figure {
   margin: 28px 0 8px 0;
-  border: 1px solid #e5e9ef;
+  border: none;
   border-radius: 10px;
   overflow: hidden;
-  background: #f8f9fb;
+  background: transparent;
 }
 .algo-figure img {
   width: 100%;
   display: block;
-  max-height: 480px;
-  object-fit: contain;
-  padding: 20px;
+  max-height: none;
+  object-fit: cover;
+  padding: 0;
+  margin: 0;
   box-sizing: border-box;
 }
 .algo-figure figcaption {
@@ -326,7 +327,7 @@ result = A &amp; not_B_int           <span class="c"># [1, 0, 0, 0]</span>
     <p>SCART uses a <strong>DEAP</strong> (Distributed Evolutionary Algorithms in Python, v1.4.3) genetic algorithm to search the space of two-gene + logic gate combinations. The algorithm mimics natural evolution — initialisation, selection, crossover, and mutation — to iteratively discover high-scoring CAR-T targets.</p>
 
     <figure class="algo-figure">
-      <img src="../../SCART/external/image4.png"
+      <img src="../../SCART/external/scart_ga.png"
            alt="One iteration of the genetic algorithm in SCART"
            onerror="this.style.display='none'">
       <figcaption>Figure 1. Diagrammatic representation of one iteration of the genetic algorithm in SCART.</figcaption>
