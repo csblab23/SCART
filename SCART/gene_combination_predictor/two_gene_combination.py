@@ -140,20 +140,6 @@ region on the left panel):
 
 Both are shown inline (in addition to being saved to disk) when run inside
 a Jupyter kernel; see _configure_matplotlib_backend().
-
-Fix applied (RRA plot styling)
---------------------------------
-The two dual-panel RRA plots above have been restyled to match, as closely
-as matplotlib allows, the look and feel of the reference R/ggplot2 +
-cowplot + ggrepel scatter script (theme_classic, diamond-shaped highlighted
-points, a colour-blind-friendly Okabe-Ito-derived highlight palette
-assigned per-candidate rather than per-gate-type, white ggrepel-style label
-chips, a light-grey "grey96" background on the zoomed right panel, and the
-same axis-limit / zoom-rectangle logic — including the reference script's
-somewhat unusual choice of leaving the left panel's x-axis unrestricted
-while still clamping its y-axis to the zoom_y range). Only the plotting
-helpers below were touched; the GA, RRA aggregation, and data-loading logic
-are unchanged.
 """
 
 import os
@@ -1264,19 +1250,17 @@ cat("RRA aggregation completed. Rows:", nrow(result), "\\n")
 # ─────────────────────────────────────────────────────────────────────────────
 # RRA result plots
 #
-# Restyled to match, as closely as matplotlib allows, the look of the
-# reference R/ggplot2 + cowplot + ggrepel scatter script (avg. safety vs
-# HPA efficacy; every candidate shown as grey background on the left panel;
-# selected candidates highlighted as black-outlined diamonds in a
-# colour-blind-friendly per-candidate palette — the same six-colour
-# Okabe-Ito-derived vector as the reference script, assigned in row order;
-# a dashed rectangle on the left panel marking the zoomed-in region shown,
-# without background points, on the right panel; white ggrepel-style label
-# chips):
+# Replaces the earlier single grouped-bar "Top 20 RRA candidates" plot with
+# two dual-panel scatter plots, adapted from the user's reference
+# R/ggplot2+ggrepel script (avg. safety vs HPA efficacy; every candidate
+# shown as background; selected candidates highlighted as labelled diamonds
+# with a dashed rectangle on the left panel marking the zoomed-in region
+# shown on the right panel). Same core idea as the reference script, just
+# ported to matplotlib and restyled:
 #
 #   _plot_top_gate_rra_candidates() — top 3 AND, top 3 OR, and top 3 NAND
-#       (A & !B) candidates by RRA_Rank. Unlike the reference script (which
-#       only highlights AND/OR and excludes NAND), NAND is included here.
+#       (A & !B) candidates by RRA_Rank, one colour per gate type. Unlike
+#       the reference script (which excludes NAND), NAND is included here.
 #   _plot_top10_rra_candidates()    — top 10 candidates overall by
 #       RRA_Rank, regardless of gate type.
 #
@@ -1287,27 +1271,17 @@ cat("RRA aggregation completed. Rows:", nrow(result), "\\n")
 
 _GATE_TYPE_MAP = {"A & B": "AND", "A | B": "OR", "A & !B": "NAND"}
 
-# Colour-blind-friendly (Okabe-Ito derived) palette, assigned one colour
-# per highlighted CANDIDATE (not per gate type) in row order — exactly the
-# same convention as the reference script's `highlight_colors[seq_len(n())]`.
-# The first six entries are identical, in the same order, to the reference
-# script's `highlight_colors` vector; entries 7-9 extend the palette so
-# NAND candidates (highlighted here, unlike in the reference script) also
-# get a distinct colour.
-_HIGHLIGHT_COLORS = [
-    "#0072B2",  # blue
-    "#56B4E9",  # sky blue
-    "#009E73",  # green
-    "#D55E00",  # vermillion
-    "#CC79A7",  # pink
-    "#E69F00",  # orange
-    "#000000",  # black
-    "#F0E442",  # yellow
-    "#999999",  # grey
-]
+_GATE_COLORS = {
+    "AND":  "#0072B2",   # blue
+    "OR":   "#009E73",   # teal-green
+    "NAND": "#D55E00",   # coral
+}
 
-# Same palette, extended to 10 entries for the top-10-overall plot.
-_RANK_HIGHLIGHT_COLORS = _HIGHLIGHT_COLORS + ["#7F3C8D"]
+# Distinct rank-ordered palette for the top-10-overall plot (rank 1 first).
+_RANK_PALETTE = [
+    "#264653", "#2A9D8F", "#8AB17D", "#E9C46A", "#F4A261",
+    "#EE8959", "#E76F51", "#C1121F", "#780000", "#4A0404",
+]
 
 
 def _configure_matplotlib_backend() -> bool:
@@ -1338,9 +1312,7 @@ def _configure_matplotlib_backend() -> bool:
 
 def _prep_rra_plot_df(df_ranked: pd.DataFrame) -> pd.DataFrame:
     """Shared prep for both RRA plots: average safety across atlases, a
-    display label per candidate, and a coarse gate-type category. Label
-    format mirrors the reference script's `candidate` column exactly
-    (including its `geneA & ! geneB` NAND spacing)."""
+    display label per candidate, and a coarse gate-type category."""
     df = df_ranked.dropna(subset=["hpa_safety", "tabula_safety", "hpa_efficacy"]).copy()
     df["avg_safety"] = (df["hpa_safety"] + df["tabula_safety"]) / 2.0
     df["efficacy"]   = df["hpa_efficacy"]  # atlas-invariant by construction
@@ -1348,7 +1320,7 @@ def _prep_rra_plot_df(df_ranked: pd.DataFrame) -> pd.DataFrame:
 
     def _label(row):
         if row["gate"] == "A & !B":
-            return f"{row['geneA']} & ! {row['geneB']}"
+            return f"{row['geneA']} & !{row['geneB']}"
         symbol = row["gate"].replace("A", "").replace("B", "").strip()
         return f"{row['geneA']} {symbol} {row['geneB']}"
 
@@ -1356,89 +1328,164 @@ def _prep_rra_plot_df(df_ranked: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _nice_step(data_range: float, target_ticks: int = 6) -> float:
+    """Pick a 'nice' round tick increment (1/2/2.5/5/10 x 10^n) for an
+    axis span of this size, so tick marks land on clean, evenly-spaced
+    values — matching the reference script's explicit `seq(..., by=2)`
+    breaks — instead of matplotlib's default (sometimes irregular)
+    auto-ticks."""
+    import math
+
+    if data_range <= 0:
+        return 1.0
+    raw_step  = data_range / target_ticks
+    magnitude = 10 ** math.floor(math.log10(raw_step))
+    residual  = raw_step / magnitude
+    if residual <= 1:
+        nice = 1
+    elif residual <= 2:
+        nice = 2
+    elif residual <= 2.5:
+        nice = 2.5
+    elif residual <= 5:
+        nice = 5
+    else:
+        nice = 10
+    return nice * magnitude
+
+
 def _style_scatter_axes(ax, title, xlabel, ylabel):
     """
-    Reproduces the reference script's `theme_classic(base_size = 18)` +
-    explicit theme() overrides: bold centred title (size 20), bold axis
-    titles (size 17), black axis text (size 13), a full black panel
-    border/axis line (linewidth 1), no gridlines, and a square aspect
-    ratio (handled by the caller via set_box_aspect(1)).
+    Shared panel styling matching the reference script's
+    theme_classic() + explicit panel.border/axis.line: a full black box
+    border on all four sides, no panel grid, bold titles, and evenly
+    spaced ('nice') tick marks on both axes. Must be called AFTER the
+    panel's final xlim/ylim are set, since the tick step is computed from
+    the current axis range.
     """
-    from matplotlib.ticker import FuncFormatter
+    from matplotlib.ticker import FuncFormatter, MultipleLocator
 
-    ax.set_title(title, fontsize=20, fontweight="bold", pad=14, color="black", loc="center")
-    ax.set_xlabel(xlabel, fontsize=17, fontweight="bold", color="black")
-    ax.set_ylabel(ylabel, fontsize=17, fontweight="bold", color="black")
-    ax.tick_params(labelsize=13, colors="black")
+    ax.set_title(title, fontsize=15, fontweight="bold", pad=12, color="black")
+    ax.set_xlabel(xlabel, fontsize=12.5, fontweight="bold", color="black")
+    ax.set_ylabel(ylabel, fontsize=12.5, fontweight="bold", color="black")
+    ax.tick_params(labelsize=11, colors="black")
     ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.0f}%"))
     ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.0f}%"))
 
-    # theme_classic draws only left/bottom axis lines, but the reference
-    # script layers an explicit panel.border rectangle on top of that, so
-    # the net visual effect is a full black box around each panel.
     for spine in ax.spines.values():
         spine.set_visible(True)
-        spine.set_linewidth(1.0)
         spine.set_color("black")
+        spine.set_linewidth(1.2)
 
-    ax.grid(False)
-    ax.set_axisbelow(True)
+    x_lo, x_hi = ax.get_xlim()
+    y_lo, y_hi = ax.get_ylim()
+    ax.xaxis.set_major_locator(MultipleLocator(_nice_step(x_hi - x_lo)))
+    ax.yaxis.set_major_locator(MultipleLocator(_nice_step(y_hi - y_lo)))
 
 
-def _repel_labels(ax, xs, ys, labels, colors, x_range, y_range, side="right"):
+def _place_labels_near_points(ax, fig, xs, ys, labels, colors, offset_frac: float = 0.02,
+                               max_iter: int = 300):
     """
-    Lightweight, dependency-free label placement approximating
-    ggrepel::geom_label_repel as configured in the reference script: white
-    label fill, a border and text coloured to match each point's own
-    highlight colour, bold text, and a thin leader line back to the point.
-    Uses the optional `adjustText` package instead, when installed, for a
-    tighter layout.
+    Place each label immediately next to its point — no leader line drawn
+    — matching the reference script's tight ggrepel placement (whose
+    `min.segment.length = 0` in practice renders no visible connector for
+    well-separated points, since the label sits right at the point).
+
+    Prefers the optional `adjustText` package when installed (moved with
+    no arrowprops, so it repels overlaps without ever drawing a line);
+    otherwise falls back to a dependency-free local nudge pass that
+    separates any colliding label boxes using their real rendered extents.
     """
-    from matplotlib.colors import to_rgba
+    x_lo, x_hi = ax.get_xlim()
+    y_lo, y_hi = ax.get_ylim()
+    dx0 = offset_frac * (x_hi - x_lo)
+    dy0 = offset_frac * (y_hi - y_lo)
+
+    texts = []
+    for x, y, label, color in zip(xs, ys, labels, colors):
+        t = ax.text(
+            x + dx0, y + dy0, label, fontsize=10.5, fontweight="bold",
+            color=color, ha="left", va="bottom", zorder=6,
+            bbox=dict(boxstyle="round,pad=0.28", facecolor="white",
+                      edgecolor=color, linewidth=1.4),
+        )
+        texts.append(t)
 
     try:
         from adjustText import adjust_text
-
-        texts = [
-            ax.text(
-                x, y, label, fontsize=11, fontweight="bold", color=color,
-                bbox=dict(boxstyle="round,pad=0.35", facecolor="white",
-                          edgecolor=color, linewidth=1.4),
-            )
-            for x, y, label, color in zip(xs, ys, labels, colors)
-        ]
-        adjust_text(texts, ax=ax,
-                    arrowprops=dict(arrowstyle="-", color="#4D4D4D", lw=1.0))
-        return
+        fig.canvas.draw()
+        pts_xy = list(zip(xs, ys))
+        adjust_text(texts, x=[p[0] for p in pts_xy], y=[p[1] for p in pts_xy], ax=ax)
+        return texts
     except ImportError:
         pass
 
-    order      = np.argsort(ys)[::-1]
-    n          = len(order)
-    y_lo, y_hi = y_range
-    margin     = 0.06 * (y_hi - y_lo)
-    slots      = (np.linspace(y_hi - margin, y_lo + margin, n)
-                  if n > 1 else [ys[order[0]]])
-    x_text     = (x_range[1] + 0.16 * (x_range[1] - x_range[0]) if side == "right"
-                  else x_range[0] - 0.16 * (x_range[1] - x_range[0]))
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
 
-    for slot_y, idx in zip(slots, order):
-        x, y, label, color = xs[idx], ys[idx], labels[idx], colors[idx]
-        ax.annotate(
-            label, xy=(x, y), xytext=(x_text, slot_y),
-            fontsize=11, fontweight="bold", color=color,
-            ha="left" if side == "right" else "right", va="center",
-            bbox=dict(boxstyle="round,pad=0.4", facecolor="white",
-                      edgecolor=color, linewidth=1.4),
-            arrowprops=dict(arrowstyle="-", color="#4D4D4D", lw=1.0,
-                             shrinkA=7, shrinkB=7),
-            annotation_clip=False,
-        )
+    # Small display-space box around each point's own marker, so labels
+    # also get nudged off of OTHER points' markers, not just each other.
+    marker_half_px = 9
 
-    if side == "right":
-        ax.set_xlim(x_range[0], x_text + 0.06 * (x_range[1] - x_range[0]))
-    else:
-        ax.set_xlim(x_text - 0.06 * (x_range[1] - x_range[0]), x_range[1])
+    def _point_box(px, py):
+        from matplotlib.transforms import Bbox
+        dx_, dy_ = ax.transData.transform((px, py))
+        return Bbox.from_extents(dx_ - marker_half_px, dy_ - marker_half_px,
+                                  dx_ + marker_half_px, dy_ + marker_half_px)
+
+    point_boxes = [_point_box(px, py) for px, py in zip(xs, ys)]
+
+    for _ in range(max_iter):
+        moved = False
+        boxes = [t.get_window_extent(renderer) for t in texts]
+
+        for i in range(len(texts)):
+            for j in range(i + 1, len(texts)):
+                if boxes[i].overlaps(boxes[j]):
+                    moved = True
+                    cxi = boxes[i].x0 + boxes[i].width / 2
+                    cyi = boxes[i].y0 + boxes[i].height / 2
+                    cxj = boxes[j].x0 + boxes[j].width / 2
+                    cyj = boxes[j].y0 + boxes[j].height / 2
+                    ddx, ddy = cxj - cxi, cyj - cyi
+                    dist = max((ddx ** 2 + ddy ** 2) ** 0.5, 1e-6)
+                    ux, uy = ddx / dist, ddy / dist
+                    xi, yi = texts[i].get_position()
+                    xj, yj = texts[j].get_position()
+                    disp_i = ax.transData.transform((xi, yi))
+                    disp_j = ax.transData.transform((xj, yj))
+                    disp_i = (disp_i[0] - ux * 2.5, disp_i[1] - uy * 2.5)
+                    disp_j = (disp_j[0] + ux * 2.5, disp_j[1] + uy * 2.5)
+                    inv = ax.transData.inverted()
+                    texts[i].set_position(inv.transform(disp_i))
+                    texts[j].set_position(inv.transform(disp_j))
+
+        # Nudge any label off of a point marker it now overlaps (its own
+        # or another's), pushing it away from that point's centre.
+        boxes = [t.get_window_extent(renderer) for t in texts]
+        for i in range(len(texts)):
+            for pbox, (px, py) in zip(point_boxes, zip(xs, ys)):
+                if boxes[i].overlaps(pbox):
+                    moved = True
+                    cxi = boxes[i].x0 + boxes[i].width / 2
+                    cyi = boxes[i].y0 + boxes[i].height / 2
+                    pdx, pdy = ax.transData.transform((px, py))
+                    ddx, ddy = cxi - pdx, cyi - pdy
+                    dist = max((ddx ** 2 + ddy ** 2) ** 0.5, 1e-6)
+                    ux, uy = ddx / dist, ddy / dist
+                    xi, yi = texts[i].get_position()
+                    disp_i = ax.transData.transform((xi, yi))
+                    disp_i = (disp_i[0] + ux * 2.5, disp_i[1] + uy * 2.5)
+                    inv = ax.transData.inverted()
+                    texts[i].set_position(inv.transform(disp_i))
+                    boxes[i] = texts[i].get_window_extent(renderer)
+
+        if not moved:
+            break
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+
+    return texts
 
 
 def _dual_panel_rra_figure(
@@ -1450,24 +1497,15 @@ def _dual_panel_rra_figure(
     suptitle: str,
     left_title: str,
     right_title: str,
-    legend_handles=None,
 ):
     """
-    Shared dual-panel figure builder used by both RRA plots below,
-    reproducing the reference script's `p_left` / `p_right` + `plot_grid`
-    layout as closely as matplotlib allows:
-
-      Left panel  ("All candidate combinations"): every candidate as a
-        grey background scatter, highlighted candidates as black-outlined
-        coloured diamonds, dashed threshold cross-lines, and a dashed
-        grey zoom rectangle. X-axis is left unrestricted (full candidate
-        range, matching the reference script's un-limited scale_x); the
-        Y-axis is clamped to the zoom_y range with even-numbered breaks,
-        matching the reference script's scale_y_continuous(limits=...).
-
-      Right panel (zoomed): only the highlighted diamonds (no grey
-        background), on a light "grey96" panel background, both axes
-        clamped to the zoom region, with ggrepel-style white label chips.
+    Dual-panel figure matching the reference R/ggplot2+ggrepel script:
+    left panel shows every candidate as background, highlighted
+    candidates as colour-coded diamonds, dashed partition lines (lowest
+    safety/efficacy among the highlighted set), and a shaded dashed-border
+    zoom rectangle. Right panel is the same partition zoomed in on just
+    the highlighted candidates, on a light grey background, with labels
+    placed immediately next to each point and no leader lines.
     """
     in_notebook = _configure_matplotlib_backend()
     import matplotlib.pyplot as plt
@@ -1478,7 +1516,7 @@ def _dual_panel_rra_figure(
         "axes.facecolor":    "white",
     })
 
-    fig, (ax_l, ax_r) = plt.subplots(1, 2, figsize=(16, 8))
+    fig, (ax_l, ax_r) = plt.subplots(1, 2, figsize=(17, 8.5))
     fig.suptitle(suptitle, fontsize=17, fontweight="bold", y=1.03, color="black")
 
     xs_all = (plot_df["avg_safety"] * 100).to_numpy()
@@ -1486,72 +1524,54 @@ def _dual_panel_rra_figure(
     xs_hi  = (highlighted["avg_safety"] * 100).to_numpy()
     ys_hi  = (highlighted["efficacy"] * 100).to_numpy()
 
-    # Threshold cross-lines and zoom rectangle — identical logic to the
-    # reference script's `rank6_safety` / `min_highlight_efficacy` and
-    # `zoom_x_min/max`, `zoom_y_min/max`.
+    # Partition thresholds — the lowest safety / efficacy among the
+    # highlighted candidates, exactly as in the reference script (its
+    # `rank6_safety` / `min_highlight_efficacy`), drawn as full dashed
+    # cross-lines on both panels. The shaded zoom rectangle uses a
+    # 1-point floor/ceil margin around the highlighted candidates, also
+    # matching the reference script's `zoom_x_min/max`, `zoom_y_min/max`.
     threshold_x = float(xs_hi.min())
     threshold_y = float(ys_hi.min())
-    zoom_x_lo = max(0.0, np.floor(xs_hi.min()) - 1)
-    zoom_x_hi = min(100.0, np.ceil(xs_hi.max()) + 1)
-    zoom_y_lo = max(0.0, np.floor(ys_hi.min()) - 1)
-    zoom_y_hi = min(100.0, np.ceil(ys_hi.max()) + 1)
+    x_lo = max(0.0, np.floor(xs_hi.min()) - 1)
+    x_hi = min(100.0, np.ceil(xs_hi.max()) + 1)
+    y_lo = max(0.0, np.floor(ys_hi.min()) - 1)
+    y_hi = min(100.0, np.ceil(ys_hi.max()) + 1)
 
     # ---- left panel: full candidate universe, with partition -------------
-    ax_l.scatter(xs_all, ys_all, s=26, color="#A6A6A6", alpha=0.6,
+    ax_l.scatter(xs_all, ys_all, s=26, color="#8c8c8c", alpha=0.6,
                  linewidths=0, zorder=2)
-
-    ax_l.axvline(threshold_x, linestyle="--", linewidth=0.8, color="#4D4D4D", zorder=3)
-    ax_l.axhline(threshold_y, linestyle="--", linewidth=0.8, color="#4D4D4D", zorder=3)
+    ax_l.axvline(threshold_x, linestyle="--", linewidth=1.1, color="#4d4d4d", zorder=3)
+    ax_l.axhline(threshold_y, linestyle="--", linewidth=1.1, color="#4d4d4d", zorder=3)
     ax_l.add_patch(plt.Rectangle(
-        (zoom_x_lo, zoom_y_lo), max(zoom_x_hi - zoom_x_lo, 0.5), max(zoom_y_hi - zoom_y_lo, 0.5),
-        fill=True, facecolor="#808080", alpha=0.15,
-        edgecolor="black", linestyle="--", linewidth=1.0, zorder=3,
+        (x_lo, y_lo), max(x_hi - x_lo, 0.5), max(y_hi - y_lo, 0.5),
+        fill=True, facecolor="#777777", alpha=0.15,
+        edgecolor="black", linestyle="--", linewidth=1.4, zorder=3,
     ))
+    ax_l.scatter(xs_hi, ys_hi, s=170, marker="D", color=colors,
+                 edgecolor="black", linewidth=0.9, zorder=5)
 
-    ax_l.scatter(xs_hi, ys_hi, s=190, marker="D", color=colors,
-                 edgecolor="black", linewidth=1.2, zorder=5)
-
+    ax_l.set_xlim(left=90)
+    ax_l.set_ylim(bottom=70)
     ax_l.set_box_aspect(1)
     _style_scatter_axes(ax_l, left_title, "Average safety", "Efficacy")
 
-    # X-axis: unrestricted (full range), small expansion margin — mirrors
-    # the reference script leaving scale_x_continuous without limits.
-    x_span = xs_all.max() - xs_all.min()
-    x_pad  = 0.03 * (x_span if x_span > 0 else 1.0)
-    ax_l.set_xlim(xs_all.min() - x_pad, xs_all.max() + x_pad)
+    # ---- right panel: zoomed, labelled highlighted candidates -------------
+    ax_r.set_facecolor("#F5F5F5")
+    ax_r.axvline(threshold_x, linestyle="--", linewidth=1.1, color="#4d4d4d", zorder=3)
+    ax_r.axhline(threshold_y, linestyle="--", linewidth=1.1, color="#4d4d4d", zorder=3)
+    ax_r.scatter(xs_hi, ys_hi, s=190, marker="D", color=colors,
+                 edgecolor="black", linewidth=0.9, zorder=5)
 
-    # Y-axis: clamped to the zoom_y range, even-numbered breaks — mirrors
-    # the reference script's scale_y_continuous(limits = zoom_y range).
-    y_break_lo = (zoom_y_lo // 2) * 2
-    y_break_hi = -(-zoom_y_hi // 2) * 2  # ceil to nearest even
-    y_pad = 0.08 * ((zoom_y_hi - zoom_y_lo) if zoom_y_hi > zoom_y_lo else 1.0)
-    ax_l.set_ylim(zoom_y_lo - y_pad, zoom_y_hi + y_pad)
-    ax_l.set_yticks(np.arange(y_break_lo, y_break_hi + 1, 2))
+    pad_x = 0.10 * max(x_hi - x_lo, 1.0)
+    pad_y = 0.12 * max(y_hi - y_lo, 1.0)
+    ax_r.set_xlim(x_lo - pad_x, x_hi + pad_x)
+    ax_r.set_ylim(y_lo - pad_y, y_hi + pad_y)
+    ax_r.set_box_aspect(1)
 
-    # ---- right panel: zoomed, labelled highlighted candidates only -------
-    # No grey background scatter here — matches the reference script's
-    # p_right, which is built purely from `highlighted`.
-    ax_r.set_facecolor("#F5F5F5")  # ggplot "grey96"
-
-    ax_r.axvline(threshold_x, linestyle="--", linewidth=0.8, color="#4D4D4D", zorder=3)
-    ax_r.axhline(threshold_y, linestyle="--", linewidth=0.8, color="#4D4D4D", zorder=3)
-
-    ax_r.scatter(xs_hi, ys_hi, s=210, marker="D", color=colors,
-                 edgecolor="black", linewidth=1.2, zorder=5)
-
-    x_pad_r = 0.08 * ((zoom_x_hi - zoom_x_lo) if zoom_x_hi > zoom_x_lo else 1.0)
-    y_pad_r = 0.08 * ((zoom_y_hi - zoom_y_lo) if zoom_y_hi > zoom_y_lo else 1.0)
-    x_range = (zoom_x_lo - x_pad_r, zoom_x_hi + x_pad_r)
-    y_range = (zoom_y_lo - y_pad_r, zoom_y_hi + y_pad_r)
-    ax_r.set_ylim(*y_range)
-    ax_r.set_xlim(*x_range)
-
-    _repel_labels(
-        ax_r, xs_hi, ys_hi, highlighted["candidate"].tolist(), colors,
-        x_range=x_range, y_range=y_range,
+    _place_labels_near_points(
+        ax_r, fig, xs_hi, ys_hi, highlighted["candidate"].tolist(), colors,
     )
 
-    ax_r.set_box_aspect(1)
     _style_scatter_axes(ax_r, right_title, "Average safety", "HPA efficacy")
 
     fig.tight_layout()
@@ -1571,12 +1591,11 @@ def _plot_top_gate_rra_candidates(df_ranked: pd.DataFrame, output_dir: str, top_
     """
     Top `top_n_per_gate` (default 3) candidates by RRA_Rank within EACH
     gate type — AND, OR, and NAND (A & !B) — highlighted together on one
-    dual-panel scatter plot. Styling mirrors the reference R/ggplot2
-    scatter script (diamond markers, per-candidate colour palette, white
-    ggrepel-style labels); unlike that script, NAND is included here
-    rather than excluded, and each highlighted candidate gets its own
-    colour (matching the reference script's row-order colour assignment)
-    rather than one colour per gate type.
+    dual-panel scatter plot, colour-coded by gate type. Matches the
+    reference R/ggplot2 scatter script's look; unlike that script, NAND
+    is included here rather than excluded, and there is no colour legend
+    since each label's own "&" / "|" / "& !" operator already conveys the
+    gate type (matching the reference script, which also has no legend).
     """
     plot_df = _prep_rra_plot_df(df_ranked)
 
@@ -1593,7 +1612,7 @@ def _plot_top_gate_rra_candidates(df_ranked: pd.DataFrame, output_dir: str, top_
         return
 
     highlighted = pd.concat(pieces).sort_values(["gate_type", "RRA_Rank"]).reset_index(drop=True)
-    colors      = [_HIGHLIGHT_COLORS[i % len(_HIGHLIGHT_COLORS)] for i in range(len(highlighted))]
+    colors      = [_GATE_COLORS[g] for g in highlighted["gate_type"]]
 
     _dual_panel_rra_figure(
         plot_df, highlighted, colors,
@@ -1609,8 +1628,8 @@ def _plot_top10_rra_candidates(df_ranked: pd.DataFrame, output_dir: str, top_n: 
     """
     Top `top_n` (default 10) candidates overall by RRA_Rank, regardless of
     gate type. Same dual-panel look as _plot_top_gate_rra_candidates(),
-    with each candidate assigned its own colour from the extended
-    highlight palette and rank numbers baked into each label.
+    with points coloured by rank (best = darkest) and rank numbers baked
+    into each label.
     """
     plot_df     = _prep_rra_plot_df(df_ranked)
     highlighted = plot_df.sort_values("RRA_Rank").head(top_n).reset_index(drop=True)
@@ -1623,7 +1642,7 @@ def _plot_top10_rra_candidates(df_ranked: pd.DataFrame, output_dir: str, top_n: 
     highlighted["candidate"] = [
         f"#{i + 1}  {c}" for i, c in enumerate(highlighted["candidate"])
     ]
-    colors = [_RANK_HIGHLIGHT_COLORS[i % len(_RANK_HIGHLIGHT_COLORS)] for i in range(len(highlighted))]
+    colors = _RANK_PALETTE[:len(highlighted)]
 
     _dual_panel_rra_figure(
         plot_df, highlighted, colors,
