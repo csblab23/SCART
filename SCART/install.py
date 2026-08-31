@@ -627,8 +627,22 @@ def _show_manual_steps(os_choice: str):
    [auto] conda install R CRAN packages (incl. r-robustrankaggreg, needed
           for the atlas="both" Robust Rank Aggregation search)
    [auto] Verify RobustRankAggreg
-          (SCEVAN is not auto-installed on Windows — no automated
-          install_github step for it exists in this script for Windows)
+          (SCEVAN is not auto-installed on Windows — install it yourself
+          after this script finishes, in an R console inside scart_env:
+
+            library(devtools)
+            install_github("miccec/yaGST")
+            install_github("AntonioDeFalco/SCEVAN")
+            library(SCEVAN)   # succeeds silently (no output) — no error means it worked
+
+          IMPORTANT: if either install_github() call needs to actually BUILD
+          the package (not just skip a version you already have installed),
+          it requires Rtools matching your R version — you'll see a
+          warning like "Rtools is required to build R packages, but no
+          version of Rtools compatible with R x.y.z was found." Install
+          the matching Rtools version first if you hit this:
+            https://cran.r-project.org/bin/windows/Rtools/
+          )
 
  Nothing else required — everything above is automated.
 {SEP2}""")
