@@ -1681,7 +1681,7 @@ library(ggrepel)
 # GATE TYPE (OR / AND / NAND, taken from the `gate` column).
 #
 # Output:
-# <output_dir>/SCATTER_PLOTS_FIGURE3_DUAL/Dual_gene_efficacy_vs_safety_COMBINED_claude.png
+# <output_dir>/SCATTER_PLOTS_FIGURE3/Dual_gene_efficacy_vs_safety_COMBINED_claude.png
 #
 #   Single combined figure:
 #     LEFT   = all pairs, colored by gate for the highlighted
@@ -1717,7 +1717,7 @@ top_n_per_gate <- @@TOP_N_PER_GATE@@
 
 output_dir <- file.path(
   output_dir_arg,
-  "SCATTER_PLOTS_FIGURE3_DUAL"
+  "SCATTER_PLOTS_FIGURE3"
 )
 
 dir.create(
@@ -2259,6 +2259,57 @@ cat(
 
 
 # ============================================================
+# 13b. "NICE" Y-AXIS BREAK STEP (fixes overcrowded right-panel
+# axis when the highlighted pairs span a wide efficacy range)
+#
+# The right panel's y-axis previously used a hard-coded
+# `by = 2` break step across the FULL zoomed range. That is
+# fine when the highlighted pairs are tightly clustered (a
+# ~10-20 point spread), but when they span a much wider range,
+# a fixed 2-point step produces far too many bold tick labels
+# crammed onto one axis — they visibly overlap each other and
+# the axis title. This picks a step from the same "nice round
+# number" family (1/2/2.5/5/10 x 10^n) matplotlib-style tick
+# locators use, targeting ~6 ticks regardless of how wide the
+# range is, so the axis stays readable either way. Identical to
+# Module 4a's (one_gene_combination.py) nice_breaks() helper.
+# ============================================================
+
+nice_breaks <- function(lo, hi, target_n = 6) {
+
+  data_range <- hi - lo
+
+  if (data_range <= 0) {
+    return(pretty(c(lo, hi)))
+  }
+
+  raw_step  <- data_range / target_n
+  magnitude <- 10 ^ floor(log10(raw_step))
+  residual  <- raw_step / magnitude
+
+  nice <- if (residual <= 1) {
+    1
+  } else if (residual <= 2) {
+    2
+  } else if (residual <= 2.5) {
+    2.5
+  } else if (residual <= 5) {
+    5
+  } else {
+    10
+  }
+
+  step <- nice * magnitude
+
+  seq(
+    ceiling(lo / step) * step,
+    floor(hi / step) * step,
+    by = step
+  )
+}
+
+
+# ============================================================
 # 14. LEFT PLOT — ALL DUAL-GENE PAIRS
 # ============================================================
 
@@ -2428,14 +2479,16 @@ p_left <- ggplot() +
       family = "Times New Roman",
       size = 23,
       face = "bold",
-      color = "black"
+      color = "black",
+      margin = margin(t = 8)
     ),
 
     axis.title.y = element_text(
       family = "Times New Roman",
       size = 23,
       face = "bold",
-      color = "black"
+      color = "black",
+      margin = margin(r = 12)
     ),
 
     axis.text.x = element_text(
@@ -2569,9 +2622,9 @@ p_right <- ggplot(
 
     fontface = "bold",
 
-    size = 5.5,
+    size = 4.5,
 
-    label.size = 0.6,
+    label.size = 0.5,
 
     segment.color = "grey30",
 
@@ -2609,11 +2662,7 @@ p_right <- ggplot(
 
     limits = c(zoom_y_min, zoom_y_max),
 
-    breaks = seq(
-      ceiling(zoom_y_min / 2) * 2,
-      floor(zoom_y_max / 2) * 2,
-      by = 2
-    ),
+    breaks = nice_breaks(zoom_y_min, zoom_y_max),
 
     labels = function(y) paste0(y, "%"),
 
@@ -2656,14 +2705,16 @@ p_right <- ggplot(
       family = "Times New Roman",
       size = 23,
       face = "bold",
-      color = "black"
+      color = "black",
+      margin = margin(t = 8)
     ),
 
     axis.title.y = element_text(
       family = "Times New Roman",
       size = 23,
       face = "bold",
-      color = "black"
+      color = "black",
+      margin = margin(r = 12)
     ),
 
     axis.text.x = element_text(
@@ -3057,6 +3108,42 @@ cat("============================================================\n")
 """
 
 
+def _display_png_if_notebook(png_path: str) -> None:
+    """
+    Display a rendered PNG inline when running inside a Jupyter kernel —
+    mirrors the inline-display behaviour the earlier matplotlib-based
+    top-gate plot had (via _configure_matplotlib_backend() + plt.show()).
+    Since that plot is now rendered by an Rscript subprocess rather than
+    in-process, there is no matplotlib figure object to show — this
+    displays the saved PNG file directly via IPython's rich display
+    instead, which gives the same "just ran a cell and saw the plot"
+    experience in a notebook. No-op outside a notebook (headless script
+    runs), and if the file doesn't exist for some reason. Identical to
+    Module 4a's (one_gene_combination.py) helper of the same name.
+    """
+    try:
+        from IPython import get_ipython
+        ip = get_ipython()
+        in_notebook = ip is not None and (
+            "IPKernelApp" in ip.config or type(ip).__name__ == "ZMQInteractiveShell"
+        )
+    except Exception:
+        in_notebook = False
+
+    if not in_notebook:
+        return
+
+    if not os.path.exists(png_path):
+        logger.warning(f"Expected plot PNG not found for inline display: {png_path}")
+        return
+
+    try:
+        from IPython.display import display, Image
+        display(Image(filename=png_path))
+    except Exception as exc:
+        logger.warning(f"Could not display plot inline: {exc}")
+
+
 def _plot_top_gate_rra_candidates_r(rra_csv_path: str, output_dir: str, top_n_per_gate: int = 5) -> None:
     """
     Render the top-gate RRA "top N per gate" figure natively in R.
@@ -3087,7 +3174,7 @@ def _plot_top_gate_rra_candidates_r(rra_csv_path: str, output_dir: str, top_n_pe
         RRA_Rank.
     output_dir : str
         Directory the figure is written into. The R script creates a
-        SCATTER_PLOTS_FIGURE3_DUAL subfolder here.
+        SCATTER_PLOTS_FIGURE3 subfolder here.
     top_n_per_gate : int
         Number of top RRA_Rank candidates highlighted within each gate
         type (default 5).
@@ -3147,6 +3234,12 @@ def _plot_top_gate_rra_candidates_r(rra_csv_path: str, output_dir: str, top_n_pe
         logger.info(f"Rscript stderr (non-fatal):\n{proc.stderr.strip()}")
 
     print("  Top-gate RRA plot rendered via R.")
+
+    png_path = os.path.join(
+        output_dir, "SCATTER_PLOTS_FIGURE3",
+        "Dual_gene_efficacy_vs_safety_COMBINED_claude.png",
+    )
+    _display_png_if_notebook(png_path)
 
 
 def _plot_top10_rra_candidates(df_ranked: pd.DataFrame, output_dir: str, top_n: int = 10):
