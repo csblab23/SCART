@@ -1437,6 +1437,57 @@ highlighted <- highlighted %>%
 
 
 # ============================================================
+# 14b. "NICE" Y-AXIS BREAK STEP (fixes overcrowded right-panel
+# axis when the highlighted set spans a wide efficacy range)
+#
+# The right panel's y-axis previously used a hard-coded
+# `by = 2` break step across the FULL zoomed range. That is
+# fine when the highlighted genes are tightly clustered (a
+# ~10-20 point spread), but when they span a much wider range
+# (e.g. one gene at ~80% efficacy and another at ~26%), a fixed
+# 2-point step produces 25+ bold, size-18 tick labels crammed
+# onto one axis — they visibly overlap each other and the axis
+# title. This picks a step from the same "nice round number"
+# family (1/2/2.5/5/10 x 10^n) matplotlib-style tick locators
+# use, targeting ~6 ticks regardless of how wide the range is,
+# so the axis stays readable either way.
+# ============================================================
+
+nice_breaks <- function(lo, hi, target_n = 6) {
+
+  data_range <- hi - lo
+
+  if (data_range <= 0) {
+    return(pretty(c(lo, hi)))
+  }
+
+  raw_step  <- data_range / target_n
+  magnitude <- 10 ^ floor(log10(raw_step))
+  residual  <- raw_step / magnitude
+
+  nice <- if (residual <= 1) {
+    1
+  } else if (residual <= 2) {
+    2
+  } else if (residual <= 2.5) {
+    2.5
+  } else if (residual <= 5) {
+    5
+  } else {
+    10
+  }
+
+  step <- nice * magnitude
+
+  seq(
+    ceiling(lo / step) * step,
+    floor(hi / step) * step,
+    by = step
+  )
+}
+
+
+# ============================================================
 # 15. LEFT PLOT — ALL SINGLE GENES
 # ============================================================
 
@@ -1640,14 +1691,16 @@ p_left <- ggplot() +
       family = "Times New Roman",
       size = 23,
       face = "bold",
-      color = "black"
+      color = "black",
+      margin = margin(t = 8)
     ),
 
     axis.title.y = element_text(
       family = "Times New Roman",
       size = 23,
       face = "bold",
-      color = "black"
+      color = "black",
+      margin = margin(r = 12)
     ),
 
     axis.text.x = element_text(
@@ -1853,11 +1906,7 @@ p_right <- ggplot(
       zoom_y_max
     ),
 
-    breaks = seq(
-      ceiling(zoom_y_min / 2) * 2,
-      floor(zoom_y_max / 2) * 2,
-      by = 2
-    ),
+    breaks = nice_breaks(zoom_y_min, zoom_y_max),
 
     labels = function(y) {
       paste0(
@@ -1917,14 +1966,16 @@ p_right <- ggplot(
       family = "Times New Roman",
       size = 23,
       face = "bold",
-      color = "black"
+      color = "black",
+      margin = margin(t = 8)
     ),
 
     axis.title.y = element_text(
       family = "Times New Roman",
       size = 23,
       face = "bold",
-      color = "black"
+      color = "black",
+      margin = margin(r = 12)
     ),
 
     axis.text.x = element_text(
@@ -2267,7 +2318,9 @@ def _display_png_if_notebook(png_path: str) -> None:
     try:
         from IPython import get_ipython
         ip = get_ipython()
-        in_notebook = ip is not None and "IPKernelApp" in ip.config
+        in_notebook = ip is not None and (
+            "IPKernelApp" in ip.config or type(ip).__name__ == "ZMQInteractiveShell"
+        )
     except Exception:
         in_notebook = False
 
