@@ -1786,9 +1786,9 @@ p_right <- ggplot(
 
     fontface = "bold",
 
-    size = 6,
+    size = 4.5,
 
-    label.size = 0.6,
+    label.size = 0.5,
 
     segment.color = "grey30",
 
@@ -2251,6 +2251,40 @@ cat("============================================================\n")
 """
 
 
+def _display_png_if_notebook(png_path: str) -> None:
+    """
+    Display a rendered PNG inline when running inside a Jupyter kernel —
+    mirrors the inline-display behaviour the earlier matplotlib-based
+    plotting had (via _configure_matplotlib_backend() + plt.show(), see
+    module docstring "Fix applied (RRA plot v2 ...)"). Since the plot is
+    now rendered by an Rscript subprocess rather than in-process, there is
+    no matplotlib figure object to show — this displays the saved PNG
+    file directly via IPython's rich display instead, which gives the
+    same "just ran a cell and saw the plot" experience in a notebook.
+    No-op outside a notebook (headless script runs), and if the file
+    doesn't exist for some reason.
+    """
+    try:
+        from IPython import get_ipython
+        ip = get_ipython()
+        in_notebook = ip is not None and "IPKernelApp" in ip.config
+    except Exception:
+        in_notebook = False
+
+    if not in_notebook:
+        return
+
+    if not os.path.exists(png_path):
+        logger.warning(f"Expected plot PNG not found for inline display: {png_path}")
+        return
+
+    try:
+        from IPython.display import display, Image
+        display(Image(filename=png_path))
+    except Exception as exc:
+        logger.warning(f"Could not display plot inline: {exc}")
+
+
 def _plot_single_gene_rra_r(rra_csv_path: str, output_dir: str, top_n: int = 20) -> None:
     """
     Render the single-gene RRA "highlighted region" figure natively in R.
@@ -2337,6 +2371,12 @@ def _plot_single_gene_rra_r(rra_csv_path: str, output_dir: str, top_n: int = 20)
         logger.info(f"Rscript stderr (non-fatal):\n{proc.stderr.strip()}")
 
     print("  Single-gene RRA plot rendered via R.")
+
+    png_path = os.path.join(
+        output_dir, "SCATTER_PLOTS_FIGURE3",
+        "Single_gene_efficacy_vs_safety_COMBINED_claude.png",
+    )
+    _display_png_if_notebook(png_path)
 
 def _robust_rank_aggregation_single_gene(
     df_results_hpa: pd.DataFrame,
