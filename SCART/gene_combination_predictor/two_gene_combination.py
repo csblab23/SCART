@@ -144,6 +144,41 @@ region on the left panel):
 
 Both are shown inline (in addition to being saved to disk) when run inside
 a Jupyter kernel; see _configure_matplotlib_backend().
+
+Fix applied (top-gate RRA plot — plotted natively in R)
+------------------------------------------------------------
+_plot_top_gate_rra_candidates() was a matplotlib approximation of a
+reference R/ggplot2 + ggrepel + cowplot dual-gene script. It is now that
+reference script itself, embedded directly in this module: the design
+(gate-label mapping, pair-label building with the original gate symbol
+between the two gene names, top-N-per-gate highlighting, per-gate colour
+gradients + shapes, thresholds, rectangle, labelled zoom panel, "Gene-
+Ranks" legend panel grouped by gate, cowplot::plot_grid combine) lives in
+_TOP_GATE_RRA_PLOT_R_TEMPLATE as an R source template — no separate .R
+file to ship or locate, matching the same approach already used in Module
+4a (one_gene_combination.py) for its single-gene plot.
+_plot_top_gate_rra_candidates_r() fills in the three values that vary per
+run (input CSV path, output dir, top_n_per_gate) via simple string
+substitution, writes the result to a driver script under output_dir, and
+launches it as an Rscript subprocess — reusing
+_find_rscript()/_find_r_home()/_build_r_subprocess_env() as-is, unchanged.
+The only changes from the reference script are: the rank column is
+"RRA_Rank" (what _robust_rank_aggregation() actually writes) instead of
+"RRA_rank", and the output file carries a "_claude" suffix.
+
+_plot_top10_rra_candidates() ("top 10 overall regardless of gate") is
+unchanged and still rendered in matplotlib via _dual_panel_rra_figure() —
+no reference R script was given for that plot, so it was left as-is.
+
+The now-unused matplotlib helpers specific to the old top-gate plot
+(_dual_panel_with_legend_rra_figure, _GATE_HUE_ENDS, _GATE_MARKERS,
+_color_ramp) have been removed. _GATE_TYPE_MAP and _RANK_PALETTE remain —
+both are still used by the retained top-10-overall plot / its shared
+_prep_rra_plot_df() prep step.
+
+New R dependency: none beyond what Module 4a's single-gene plot already
+added — ggplot2, dplyr, ggrepel and cowplot are all already required (see
+install.py's CONDA_R_BASE, which already includes r-cowplot).
 """
 
 import os
@@ -1279,48 +1314,6 @@ cat("RRA aggregation completed. Rows:", nrow(result), "\\n")
 
 _GATE_TYPE_MAP = {"A & B": "AND", "A | B": "OR", "A & !B": "NAND"}
 
-# Per-gate colour families for the top-5-per-gate plot: each gate gets its
-# own hue (blues for OR, oranges for AND, greens for NAND) so the three
-# gate types stay distinguishable at a glance; within a gate, rank 1
-# (best RRA_Rank) gets the darkest/most saturated shade and rank 5 gets
-# the lightest, via _color_ramp() below — ported from the reference
-# script's gate_hue_ends + colorRampPalette().
-_GATE_HUE_ENDS = {
-    "OR":   ("#1E3A8A", "#60A5FA"),   # deep vivid blue    -> bright sky blue
-    "AND":  ("#9A3412", "#FB923C"),   # deep vivid orange  -> bright orange
-    "NAND": ("#065F46", "#34D399"),   # deep vivid emerald -> bright emerald
-}
-
-# Point shape per gate type — an additional, colour-independent way to
-# tell gates apart, matching the reference script's shapes 23/22/24.
-_GATE_MARKERS = {
-    "OR":   "D",   # diamond
-    "AND":  "s",   # square
-    "NAND": "^",   # triangle
-}
-
-
-def _color_ramp(hex_start: str, hex_end: str, n: int) -> list:
-    """Linearly interpolate `n` hex colours from hex_start to hex_end
-    (inclusive) — the same light/dark gradient effect as R's
-    colorRampPalette(c(hex_start, hex_end))(n)."""
-    def _to_rgb(h):
-        h = h.lstrip("#")
-        return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
-
-    def _to_hex(rgb):
-        return "#{:02X}{:02X}{:02X}".format(*(int(round(c)) for c in rgb))
-
-    if n <= 1:
-        return [hex_start]
-
-    start, end = _to_rgb(hex_start), _to_rgb(hex_end)
-    return [
-        _to_hex(tuple(start[k] + (end[k] - start[k]) * (i / (n - 1)) for k in range(3)))
-        for i in range(n)
-    ]
-
-
 # Distinct rank-ordered palette for the top-10-overall plot (rank 1 first).
 _RANK_PALETTE = [
     "#264653", "#2A9D8F", "#8AB17D", "#E9C46A", "#F4A261",
@@ -1631,195 +1624,1529 @@ def _dual_panel_rra_figure(
     plt.close(fig)
 
 
-def _dual_panel_with_legend_rra_figure(
-    plot_df: pd.DataFrame,
-    highlighted: pd.DataFrame,
-    output_dir: str,
-    out_stub: str,
-    left_title: str,
-    right_title: str,
-):
-    """
-    Three-panel RRA figure ported from the reference dual-gene
-    R/ggplot2+ggrepel+cowplot script: LEFT panel shows every candidate as
-    grey background points plus the highlighted top-N-per-gate candidates
-    (gate-coloured, gate-shaped) inside a dashed zoom rectangle; RIGHT
-    panel is the same highlighted candidates zoomed in and labelled, with
-    a thin leader line back to each point; a narrow "Gene-Ranks" panel
-    lists every highlighted pair grouped by gate (OR, then AND, then
-    NAND), each tagged with its original (global) RRA_Rank so it can be
-    cross-referenced against the source CSV. Colour is a light-to-dark
-    gradient within each gate (rank 1 = darkest, via _color_ramp()); shape
-    is fixed per gate (diamond = OR, square = AND, triangle = NAND).
-    """
-    in_notebook = _configure_matplotlib_backend()
-    import matplotlib.pyplot as plt
-    from matplotlib.lines import Line2D
+# ─────────────────────────────────────────────────────────────────────────────
+# Top-gate RRA plot — rendered natively in R (self-contained in this module)
+#
+# Adapted from a reference R/ggplot2 + ggrepel + cowplot dual-gene script,
+# embedded directly here and launched as an Rscript subprocess — mirrors
+# exactly the pattern _run_rra_via_r() above already uses for
+# RobustRankAggreg, and the equivalent fix already applied to Module 4a's
+# single-gene plot (one_gene_combination.py's _plot_single_gene_rra_r()).
+# The other plot below (_plot_top10_rra_candidates, "top 10 overall
+# regardless of gate") is unchanged and still rendered in matplotlib via
+# _dual_panel_rra_figure() above.
+#
+# Requires the R packages ggplot2, dplyr, ggrepel and cowplot — already
+# required/installed for Module 4a's single-gene plot (see install.py's
+# CONDA_R_BASE); no further R dependency changes needed here.
+# ─────────────────────────────────────────────────────────────────────────────
 
-    plt.rcParams.update({
-        "font.family":      "DejaVu Sans",
-        "figure.facecolor": "white",
-        "axes.facecolor":   "white",
-    })
+_TOP_GATE_RRA_PLOT_R_TEMPLATE = r"""
+#!/usr/bin/env Rscript
 
-    gate_order    = ["OR", "AND", "NAND"]
-    gates_present = [g for g in gate_order if g in set(highlighted["gate_type"])]
+library(ggplot2)
+library(dplyr)
+library(cowplot)
+library(ggrepel)
 
-    fig = plt.figure(figsize=(19, 8.5))
-    gs  = fig.add_gridspec(1, 3, width_ratios=[1, 1, 0.42], wspace=0.35)
-    ax_l      = fig.add_subplot(gs[0, 0])
-    ax_r      = fig.add_subplot(gs[0, 1])
-    ax_legend = fig.add_subplot(gs[0, 2])
+# ============================================================
+# DUAL-GENE:
+# EFFICACY vs SAFETY
+#
+# Auto-generated by two_gene_combination.py's
+# _plot_top_gate_rra_candidates_r() every time it runs (mirrors
+# exactly how _run_rra_via_r() already generates its own R
+# driver script for RobustRankAggreg, and how Module 4a's
+# one_gene_combination.py embeds its own single-gene plot R
+# source) — NOT meant to be hand-edited or launched with
+# different arguments. The plotting logic below (gate-label
+# mapping, pair-label building, top-N-per-gate highlighting,
+# per-gate colour gradients + shapes, thresholds, rectangle,
+# labelled zoom panel, "Gene-Ranks" legend panel grouped by
+# gate, cowplot::plot_grid combine) matches a reference
+# R/ggplot2/ggrepel/cowplot dual-gene script exactly. Only two
+# things differ from that reference:
+#   1. input_file / output_dir_arg / top_n_per_gate below are
+#      literal values baked in by _plot_top_gate_rra_candidates_r()
+#      at write time, instead of a hard-coded path and a
+#      hard-coded "top 5".
+#   2. The rank column is "RRA_Rank" (what
+#      _robust_rank_aggregation() actually writes), not
+#      "RRA_rank"; and the output file gets a "_claude" suffix.
+#
+# Highlighting logic (DIFFERENT from the single-gene script):
+# Instead of "top 20 overall -> rectangle -> everyone inside
+# the rectangle", this version highlights EXACTLY the top
+# `top_n_per_gate` pairs (by RRA_Rank, 1 = best) WITHIN EACH
+# GATE TYPE (OR / AND / NAND, taken from the `gate` column).
+#
+# Output:
+# <output_dir>/SCATTER_PLOTS_FIGURE3_DUAL/Dual_gene_efficacy_vs_safety_COMBINED_claude.png
+#
+#   Single combined figure:
+#     LEFT   = all pairs, colored by gate for the highlighted
+#              top-N-per-gate pairs, with highlighted rectangle
+#     RIGHT  = zoom into rectangle, every highlighted pair is
+#              labeled with the ORIGINAL gate symbol between
+#              the two gene names (e.g. "FOLR1 | MSLN")
+#     FAR    = rank / gate legend panel
+#     RIGHT
+#
+# Resolution:
+# 800 DPI
+# Format:
+# PNG
+# ============================================================
 
-    xs_all = (plot_df["avg_safety"] * 100).to_numpy()
-    ys_all = (plot_df["efficacy"]   * 100).to_numpy()
-    xs_hi  = (highlighted["avg_safety"] * 100).to_numpy()
-    ys_hi  = (highlighted["efficacy"]   * 100).to_numpy()
-    colors_hi  = highlighted["color"].tolist()
-    markers_hi = highlighted["marker"].tolist()
 
-    # Partition thresholds and zoom rectangle — lowest safety / efficacy
-    # among the highlighted candidates, with a 1-point floor/ceil margin,
-    # exactly as in the reference script's min_highlighted_safety/efficacy
-    # and zoom_x_min/max, zoom_y_min/max.
-    threshold_x = float(xs_hi.min())
-    threshold_y = float(ys_hi.min())
-    x_lo = max(0.0, np.floor(xs_hi.min()) - 1)
-    x_hi = min(100.0, np.ceil(xs_hi.max()) + 1)
-    y_lo = max(0.0, np.floor(ys_hi.min()) - 1)
-    y_hi = min(100.0, np.ceil(ys_hi.max()) + 1)
+# ============================================================
+# 1. INPUT FILE / OUTPUT DIRECTORY / TOP N PER GATE
+#
+# Written in directly by _plot_top_gate_rra_candidates_r() when
+# it generates this file.
+# ============================================================
 
-    # ---- left panel: full candidate universe, with partition -------------
-    ax_l.scatter(xs_all, ys_all, s=24, color="#a6a6a6", alpha=0.6, linewidths=0, zorder=2)
-    ax_l.add_patch(plt.Rectangle(
-        (x_lo, y_lo), max(x_hi - x_lo, 0.5), max(y_hi - y_lo, 0.5),
-        fill=True, facecolor="#EDEEF3", alpha=0.9,
-        edgecolor="black", linestyle="--", linewidth=1.2, zorder=1,
-    ))
-    ax_l.axvline(threshold_x, linestyle="--", linewidth=1.0, color="#4d4d4d", zorder=3)
-    ax_l.axhline(threshold_y, linestyle="--", linewidth=1.0, color="#4d4d4d", zorder=3)
-    for x, y, c, m in zip(xs_hi, ys_hi, colors_hi, markers_hi):
-        ax_l.scatter(x, y, s=140, marker=m, color=c, edgecolor="black", linewidth=0.8, zorder=5)
+input_file <- "@@INPUT_CSV@@"
+output_dir_arg <- "@@OUTPUT_DIR@@"
+top_n_per_gate <- @@TOP_N_PER_GATE@@
 
-    ax_l.set_xlim(left=90)
-    ax_l.set_ylim(bottom=70)
-    ax_l.set_box_aspect(1)
-    _style_scatter_axes(ax_l, left_title, "Safety", "Efficacy")
 
-    # ---- right panel: zoomed, labelled highlighted candidates -------------
-    ax_r.set_facecolor("#F5F5F5")
-    ax_r.axvline(threshold_x, linestyle="--", linewidth=1.0, color="#4d4d4d", zorder=3)
-    ax_r.axhline(threshold_y, linestyle="--", linewidth=1.0, color="#4d4d4d", zorder=3)
-    for x, y, c, m in zip(xs_hi, ys_hi, colors_hi, markers_hi):
-        ax_r.scatter(x, y, s=170, marker=m, color=c, edgecolor="black", linewidth=0.8, zorder=5)
+# ============================================================
+# 2. INPUT / OUTPUT DIRECTORIES
+# ============================================================
 
-    pad_x = 0.10 * max(x_hi - x_lo, 1.0)
-    pad_y = 0.12 * max(y_hi - y_lo, 1.0)
-    ax_r.set_xlim(x_lo - pad_x, x_hi + pad_x)
-    ax_r.set_ylim(y_lo - pad_y, y_hi + pad_y)
-    ax_r.set_box_aspect(1)
+output_dir <- file.path(
+  output_dir_arg,
+  "SCATTER_PLOTS_FIGURE3_DUAL"
+)
 
-    # Labels use plain black text/borders (not per-gate colour) to match
-    # the reference script's geom_label_repel(color="black", fill="white"),
-    # with a thin leader line back to each point (segment.color="grey30").
-    texts = _place_labels_near_points(
-        ax_r, fig, xs_hi, ys_hi, highlighted["candidate"].tolist(),
-        ["black"] * len(xs_hi),
+dir.create(
+  output_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+
+# ============================================================
+# 3. CHECK INPUT FILE
+# ============================================================
+
+cat("\n")
+cat("============================================================\n")
+cat("DUAL-GENE EFFICACY vs SAFETY ANALYSIS\n")
+cat("============================================================\n")
+
+cat(
+  "Input file:\n",
+  input_file,
+  "\n"
+)
+
+if (!file.exists(input_file)) {
+
+  stop(
+    paste0(
+      "\nERROR: Input file does not exist:\n",
+      input_file,
+      "\n"
     )
-    for t, x, y in zip(texts, xs_hi, ys_hi):
-        tx, ty = t.get_position()
-        ax_r.plot([x, tx], [y, ty], color="grey", linewidth=0.8, alpha=0.85, zorder=4)
-
-    _style_scatter_axes(ax_r, right_title, "Safety", "Efficacy")
-
-    # ---- shared "Gate" shape legend, centred beneath the left+right panels
-    gate_legend_handles = [
-        Line2D([0], [0], marker=_GATE_MARKERS[g], color="black",
-               markerfacecolor="white", markersize=10, linestyle="none", label=g)
-        for g in gates_present
-    ]
-    fig.legend(handles=gate_legend_handles, title="Gate", loc="lower center",
-               bbox_to_anchor=(0.41, -0.03), ncol=len(gates_present), frameon=False,
-               fontsize=11, title_fontsize=11)
-
-    # ---- "Gene-Ranks" legend panel: every highlighted pair, grouped OR ->
-    # AND -> NAND, each tagged with its original (global) RRA_Rank --------
-    ax_legend.axis("off")
-    ax_legend.set_title("Gene-Ranks", fontsize=14, fontweight="bold", loc="left", color="black")
-
-    n_groups    = len(gates_present)
-    total_items = len(highlighted)
-    total_units = n_groups * 1.6 + total_items + max(n_groups - 1, 0) * 0.6
-    row_h       = 0.86 / max(total_units, 1)
-    header_gap  = row_h * 0.7
-    group_gap   = row_h * 0.6
-
-    y_cursor = 0.95
-    for i, gate_type in enumerate(gates_present):
-        if i > 0:
-            y_cursor -= group_gap
-        ax_legend.text(0.0, y_cursor, gate_type, fontsize=12, fontweight="bold",
-                        color="black", va="top", ha="left", transform=ax_legend.transAxes)
-        y_cursor -= (row_h + header_gap)
-        sub = highlighted[highlighted["gate_type"] == gate_type].sort_values("rank_in_gate")
-        for _, row in sub.iterrows():
-            ax_legend.scatter([0.03], [y_cursor + row_h * 0.15], marker=row["marker"],
-                               color=row["color"], edgecolor="black", linewidth=0.6, s=70,
-                               transform=ax_legend.transAxes, clip_on=False, zorder=5)
-            ax_legend.text(0.10, y_cursor + row_h * 0.30,
-                            f"Rank {int(row['RRA_Rank'])}:  {row['candidate']}",
-                            fontsize=10, color="black", va="top", ha="left",
-                            transform=ax_legend.transAxes)
-            y_cursor -= row_h
-
-    fig.tight_layout(rect=[0, 0.03, 1, 1])
-
-    pdf_path = os.path.join(output_dir, f"{out_stub}_claude.pdf")
-    png_path = os.path.join(output_dir, f"{out_stub}_claude.png")
-    fig.savefig(pdf_path, dpi=300, bbox_inches="tight")
-    fig.savefig(png_path, dpi=300, bbox_inches="tight")
-    print(f"RRA plot saved to:\n  {pdf_path}\n  {png_path}")
-
-    if in_notebook:
-        plt.show()
-    plt.close(fig)
+  )
+}
 
 
-def _plot_top_gate_rra_candidates(df_ranked: pd.DataFrame, output_dir: str, top_n_per_gate: int = 5):
-    """
-    Top `top_n_per_gate` (default 5) candidates by RRA_Rank within EACH
-    gate type — OR, AND, and NAND (A & !B) — highlighted on one
-    three-panel figure (all candidates + zoom rectangle, a zoomed-in
-    labelled panel, and a "Gene-Ranks" legend panel), ported from a newer
-    reference R/ggplot2+ggrepel+cowplot dual-gene script. Colour is a
-    light-to-dark gradient within each gate (rank 1 = darkest); shape is
-    fixed per gate (diamond = OR, square = AND, triangle = NAND).
-    """
-    plot_df = _prep_rra_plot_df(df_ranked)
+# ============================================================
+# 4. OUTPUT FILE (single combined figure)
+# ============================================================
 
-    pieces = []
-    for gate_type in ("OR", "AND", "NAND"):
-        sub = plot_df[plot_df["gate_type"] == gate_type].sort_values("RRA_Rank").head(top_n_per_gate).copy()
-        if sub.empty:
-            print(f"No {gate_type}-gate candidates available for highlighting — skipping.")
-            continue
-        sub["rank_in_gate"] = range(1, len(sub) + 1)
-        sub["color"]        = _color_ramp(*_GATE_HUE_ENDS[gate_type], len(sub))
-        sub["marker"]       = _GATE_MARKERS[gate_type]
-        pieces.append(sub)
+combined_file <- file.path(
+  output_dir,
+  "Dual_gene_efficacy_vs_safety_COMBINED_claude.png"
+)
 
-    if not pieces:
-        print("No OR/AND/NAND candidates available — skipping top-gate RRA plot.")
-        return
+cat(
+  "\nOutput directory:\n",
+  output_dir,
+  "\n"
+)
 
-    highlighted = pd.concat(pieces).reset_index(drop=True)
+cat(
+  "\nCombined plot:\n",
+  combined_file,
+  "\n"
+)
 
-    _dual_panel_with_legend_rra_figure(
-        plot_df, highlighted, output_dir,
-        out_stub=f"Top{top_n_per_gate}_per_gate_RRA_Candidates",
-        left_title="All dual-gene candidates",
-        right_title=f"Top {top_n_per_gate} per gate (OR / AND / NAND)",
+
+# ============================================================
+# 5. READ DATA
+# ============================================================
+
+dual_gene <- read.csv(
+  input_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+
+# ============================================================
+# 6. CHECK REQUIRED COLUMNS
+# ============================================================
+
+required_columns <- c(
+  "geneA",
+  "geneB",
+  "gate",
+  "hpa_efficacy",
+  "hpa_safety",
+  "tabula_safety",
+  "RRA_Rank"
+)
+
+missing_columns <- setdiff(
+  required_columns,
+  colnames(dual_gene)
+)
+
+if (length(missing_columns) > 0) {
+
+  stop(
+    paste0(
+      "\nERROR: Missing required column(s):\n",
+      paste(
+        missing_columns,
+        collapse = ", "
+      ),
+      "\n\nAvailable columns are:\n",
+      paste(
+        colnames(dual_gene),
+        collapse = ", "
+      ),
+      "\n"
     )
+  )
+}
+
+
+# ============================================================
+# 7. GATE LABEL MAPPING
+#
+# The `gate` column stores the raw logic-gate string (e.g.
+# "A | B"). This maps it to a human-readable category:
+# OR / AND / NAND. Falls back to the raw string if it does
+# not match any known pattern, so nothing is silently dropped.
+# ============================================================
+
+map_gate_label <- function(g) {
+
+  if (grepl("NAND", g, ignore.case = TRUE) || grepl("!", g, fixed = TRUE)) {
+    return("NAND")
+  }
+
+  if (grepl("|", g, fixed = TRUE)) {
+    return("OR")
+  }
+
+  if (grepl("&", g, fixed = TRUE)) {
+    return("AND")
+  }
+
+  return(g)
+}
+
+
+# ============================================================
+# 7b. PAIR LABEL BUILDER
+#
+# Builds the on-plot label using the ORIGINAL gate string
+# (e.g. "A | B") with the placeholder letters "A" and "B"
+# swapped for the real gene names, so the plot shows e.g.
+# "FOLR1 | MSLN" instead of "FOLR1 + MSLN". Word-boundary
+# matching means this is safe even for gate strings like
+# "A NAND B", since the standalone "A"/"B" tokens are the
+# only thing replaced (the "A" inside "NAND" is not a
+# standalone word and is left untouched).
+# ============================================================
+
+build_candidate_label <- function(gA, gB, g) {
+
+  lbl <- g
+
+  lbl <- gsub("\\bA\\b", gA, lbl)
+  lbl <- gsub("\\bB\\b", gB, lbl)
+
+  return(lbl)
+}
+
+
+# ============================================================
+# 8. PREPARE DATA
+# ============================================================
+
+plot_df <- dual_gene %>%
+
+  mutate(
+
+    # --------------------------------------------------------
+    # Efficacy: HPA efficacy directly
+    # --------------------------------------------------------
+
+    Efficacy = as.numeric(hpa_efficacy),
+
+    # --------------------------------------------------------
+    # Safety: average of HPA safety and Tabula safety
+    # --------------------------------------------------------
+
+    Safety = rowMeans(
+      cbind(
+        as.numeric(hpa_safety),
+        as.numeric(tabula_safety)
+      ),
+      na.rm = TRUE
+    ),
+
+    # --------------------------------------------------------
+    # ObjectiveScore: RRA_Rank column.
+    # NOTE: this is a RANK, not a score — 1 = best pair.
+    # So LOWER ObjectiveScore is better, and everywhere it is
+    # used for ranking we sort ASCENDING (not desc()).
+    # --------------------------------------------------------
+
+    ObjectiveScore = as.numeric(RRA_Rank),
+
+    # --------------------------------------------------------
+    # Convert to percentages
+    # --------------------------------------------------------
+
+    efficacy_pct = Efficacy * 100,
+
+    safety_pct = Safety * 100,
+
+    # --------------------------------------------------------
+    # Human-readable gate category
+    # --------------------------------------------------------
+
+    gate_group = vapply(
+      gate,
+      map_gate_label,
+      character(1)
+    ),
+
+    # --------------------------------------------------------
+    # Pair label — original gate symbol between the two genes
+    # (e.g. "FOLR1 | MSLN"), not a generic "+"
+    # --------------------------------------------------------
+
+    candidate = mapply(
+      build_candidate_label,
+      as.character(geneA),
+      as.character(geneB),
+      as.character(gate)
+    )
+
+  ) %>%
+
+  filter(
+    !is.na(safety_pct),
+    !is.na(efficacy_pct),
+    !is.na(ObjectiveScore),
+    !is.na(candidate),
+    candidate != ""
+  )
+
+
+# ============================================================
+# 8b. ORDER GATE CATEGORIES: OR, then AND, then NAND
+#
+# gate_group is converted to a factor with this fixed level
+# order, so every downstream group_by()/arrange() (highlighted
+# selection, plotting legends, the rank/gate legend panel)
+# naturally follows OR -> AND -> NAND. Any gate category not
+# in this preferred list (e.g. an unrecognized gate string)
+# is appended afterward, alphabetically.
+# ============================================================
+
+preferred_gate_order <- c("OR", "AND", "NAND")
+
+gates_present <- unique(plot_df$gate_group)
+
+gate_level_order <- c(
+  intersect(preferred_gate_order, gates_present),
+  sort(setdiff(gates_present, preferred_gate_order))
+)
+
+plot_df <- plot_df %>%
+
+  mutate(
+    gate_group = factor(
+      gate_group,
+      levels = gate_level_order
+    )
+  )
+
+
+# ============================================================
+# 9. PRINT DATA CHECK
+# ============================================================
+
+cat("\n")
+cat("Dual-gene data prepared:\n")
+cat("--------------------------------------------\n")
+
+print(
+  plot_df %>%
+    select(
+      candidate,
+      gate_group,
+      Efficacy,
+      Safety,
+      ObjectiveScore,
+      efficacy_pct,
+      safety_pct
+    ) %>%
+    head(20)
+)
+
+cat(
+  "--------------------------------------------\n"
+)
+
+cat(
+  "\nGate categories found:",
+  paste(
+    sort(unique(plot_df$gate_group)),
+    collapse = ", "
+  ),
+  "\n"
+)
+
+
+# ============================================================
+# 10. TOP 5 PER GATE TYPE
+#
+# For each gate category (OR / AND / NAND, or whatever is
+# present in the data), take the top 5 pairs by ObjectiveScore
+# (RRA_Rank, 1 = best). Sorted ASCENDING since lower RRA_Rank
+# = better pair.
+# ============================================================
+
+highlighted <- plot_df %>%
+
+  group_by(
+    gate_group
+  ) %>%
+
+  arrange(
+    ObjectiveScore,
+    .by_group = TRUE
+  ) %>%
+
+  slice_head(
+    n = top_n_per_gate
+  ) %>%
+
+  ungroup() %>%
+
+  arrange(
+    gate_group,
+    ObjectiveScore
+  ) %>%
+
+  group_by(
+    gate_group
+  ) %>%
+
+  mutate(
+    rank_in_gate = row_number()
+  ) %>%
+
+  ungroup() %>%
+
+  mutate(
+    label = candidate
+  )
+
+n_highlighted <- nrow(highlighted)
+
+cat("\n")
+cat(paste0("TOP ", top_n_per_gate, " PER GATE (highlighted candidates): "), n_highlighted, "\n")
+cat("--------------------------------------------\n")
+
+print(
+  highlighted %>%
+    select(
+      gate_group,
+      rank_in_gate,
+      candidate,
+      Efficacy,
+      Safety,
+      ObjectiveScore,
+      efficacy_pct,
+      safety_pct
+    )
+)
+
+cat(
+  "--------------------------------------------\n"
+)
+
+
+# ============================================================
+# 11. GRADIENT COLORS + SHAPES PER GATE TYPE
+#
+# Each gate gets its OWN hue family (blues for OR, oranges for
+# AND, greens for NAND) so the three gate types stay clearly
+# distinguishable at a glance. WITHIN a gate's 5 candidates, a
+# light-to-dark gradient is used: rank 1 (best RRA_Rank) gets
+# the darkest/most saturated shade, rank 5 gets the lightest —
+# so within-gate ranking is visible from shade alone. Point
+# SHAPE is still fixed per gate (diamond/square/triangle) as
+# an additional, color-independent way to tell gates apart.
+# ============================================================
+
+gate_hue_ends <- list(
+  OR   = c("#1E3A8A", "#60A5FA"),  # deep vivid blue    -> bright sky blue
+  AND  = c("#9A3412", "#FB923C"),  # deep vivid orange  -> bright orange
+  NAND = c("#065F46", "#34D399")   # deep vivid emerald -> bright emerald
+)
+
+get_gate_hues <- function(g) {
+
+  if (g %in% names(gate_hue_ends)) {
+    return(gate_hue_ends[[g]])
+  }
+
+  # Fallback ramp for any gate category outside OR/AND/NAND
+  return(c("#581C87", "#C084FC"))  # deep vivid purple -> bright purple
+}
+
+highlighted <- highlighted %>%
+
+  group_by(
+    gate_group
+  ) %>%
+
+  mutate(
+    color = colorRampPalette(
+      get_gate_hues(as.character(gate_group)[1])
+    )(n())[rank_in_gate]
+  ) %>%
+
+  ungroup()
+
+gate_levels <- levels(droplevels(highlighted$gate_group))
+
+# --------------------------------------------------------
+# Shapes per gate type, for extra distinction beyond color
+# --------------------------------------------------------
+
+base_gate_shapes <- c(
+  "OR"   = 23,
+  "AND"  = 22,
+  "NAND" = 24
+)
+
+missing_shapes <- setdiff(
+  gate_levels,
+  names(base_gate_shapes)
+)
+
+if (length(missing_shapes) > 0) {
+
+  extra_shapes <- rep_len(
+    c(21, 23, 22, 24, 25),
+    length(missing_shapes)
+  )
+
+  names(extra_shapes) <- missing_shapes
+
+  base_gate_shapes <- c(
+    base_gate_shapes,
+    extra_shapes
+  )
+}
+
+gate_shapes <- base_gate_shapes[gate_levels]
+
+
+# ============================================================
+# 12. THRESHOLDS (based on the combined highlighted set)
+# ============================================================
+
+min_highlighted_safety <- min(
+  highlighted$safety_pct,
+  na.rm = TRUE
+)
+
+min_highlighted_efficacy <- min(
+  highlighted$efficacy_pct,
+  na.rm = TRUE
+)
+
+cat(
+  "\nMinimum highlighted safety:",
+  round(min_highlighted_safety, 2),
+  "%\n"
+)
+
+cat(
+  "Minimum highlighted efficacy:",
+  round(min_highlighted_efficacy, 2),
+  "%\n"
+)
+
+
+# ============================================================
+# 13. ZOOM / HIGHLIGHT RECTANGLE
+# ============================================================
+
+zoom_x_min <- max(
+  0,
+  floor(
+    min(
+      highlighted$safety_pct,
+      na.rm = TRUE
+    )
+  ) - 1
+)
+
+zoom_x_max <- min(
+  100,
+  ceiling(
+    max(
+      highlighted$safety_pct,
+      na.rm = TRUE
+    )
+  ) + 1
+)
+
+zoom_y_min <- max(
+  0,
+  floor(
+    min(
+      highlighted$efficacy_pct,
+      na.rm = TRUE
+    )
+  ) - 1
+)
+
+zoom_y_max <- min(
+  100,
+  ceiling(
+    max(
+      highlighted$efficacy_pct,
+      na.rm = TRUE
+    )
+  ) + 1
+)
+
+cat("\n")
+cat("Zoom / highlight rectangle:\n")
+
+cat(
+  "X:",
+  zoom_x_min,
+  "-",
+  zoom_x_max,
+  "%\n"
+)
+
+cat(
+  "Y:",
+  zoom_y_min,
+  "-",
+  zoom_y_max,
+  "%\n"
+)
+
+
+# ============================================================
+# 14. LEFT PLOT — ALL DUAL-GENE PAIRS
+# ============================================================
+
+p_left <- ggplot() +
+
+  # ----------------------------------------------------------
+  # Zoom / highlight rectangle (drawn first so points sit
+  # on top of it, not behind it)
+  # ----------------------------------------------------------
+
+  annotate(
+
+    "rect",
+
+    xmin = zoom_x_min,
+
+    xmax = zoom_x_max,
+
+    ymin = zoom_y_min,
+
+    ymax = zoom_y_max,
+
+    fill = "#EDEEF3",
+
+    alpha = 0.9,
+
+    color = "black",
+
+    linetype = "dashed",
+
+    linewidth = 1.0
+  ) +
+
+  # ----------------------------------------------------------
+  # Threshold lines
+  # ----------------------------------------------------------
+
+  geom_vline(
+
+    xintercept = min_highlighted_safety,
+
+    linetype = "dashed",
+
+    linewidth = 0.8,
+
+    color = "grey30"
+  ) +
+
+  geom_hline(
+
+    yintercept = min_highlighted_efficacy,
+
+    linetype = "dashed",
+
+    linewidth = 0.8,
+
+    color = "grey30"
+  ) +
+
+  # ----------------------------------------------------------
+  # Background pairs (not in the top 5 of any gate)
+  # ----------------------------------------------------------
+
+  geom_point(
+
+    data = plot_df %>%
+      filter(
+        !candidate %in% highlighted$candidate
+      ),
+
+    aes(
+      x = safety_pct,
+      y = efficacy_pct
+    ),
+
+    color = "grey65",
+
+    alpha = 0.6,
+
+    size = 2.4
+  ) +
+
+  # ----------------------------------------------------------
+  # Highlighted top-5-per-gate pairs
+  # ----------------------------------------------------------
+
+  geom_point(
+
+    data = highlighted,
+
+    aes(
+      x = safety_pct,
+      y = efficacy_pct,
+      fill = color,
+      shape = gate_group
+    ),
+
+    color = "black",
+
+    size = 4,
+
+    stroke = 0.5
+  ) +
+
+  # ----------------------------------------------------------
+  # Fill uses the exact gradient hex color computed per pair
+  # (identity scale, no separate legend needed for it — the
+  # rank/gate legend panel on the right spells it out). Shape
+  # still gets a real legend so the gate categories are
+  # readable directly off this panel.
+  # ----------------------------------------------------------
+
+  scale_fill_identity() +
+
+  scale_shape_manual(
+    name = "Gate",
+    values = gate_shapes
+  ) +
+
+  scale_x_continuous(
+
+    labels = function(x) paste0(x, "%"),
+
+    expand = expansion(mult = 0.03)
+  ) +
+
+  scale_y_continuous(
+
+    labels = function(y) paste0(y, "%"),
+
+    expand = expansion(mult = 0.03)
+  ) +
+
+  labs(
+
+    title = "All dual-gene candidates",
+
+    x = "Safety",
+
+    y = "Efficacy"
+  ) +
+
+  theme_classic(
+
+    base_size = 18,
+
+    base_family = "Times New Roman"
+
+  ) +
+
+  theme(
+
+    text = element_text(
+      family = "Times New Roman",
+      color = "black"
+    ),
+
+    plot.title = element_text(
+      family = "Times New Roman",
+      size = 23,
+      face = "bold",
+      color = "black",
+      hjust = 0.5
+    ),
+
+    axis.title.x = element_text(
+      family = "Times New Roman",
+      size = 23,
+      face = "bold",
+      color = "black"
+    ),
+
+    axis.title.y = element_text(
+      family = "Times New Roman",
+      size = 23,
+      face = "bold",
+      color = "black"
+    ),
+
+    axis.text.x = element_text(
+      family = "Times New Roman",
+      size = 18,
+      face = "bold",
+      color = "black"
+    ),
+
+    axis.text.y = element_text(
+      family = "Times New Roman",
+      size = 18,
+      face = "bold",
+      color = "black"
+    ),
+
+    axis.line = element_line(
+      linewidth = 1,
+      color = "black"
+    ),
+
+    panel.border = element_rect(
+      color = "black",
+      fill = NA,
+      linewidth = 1
+    ),
+
+    panel.background = element_rect(
+      fill = "#FFFFFF",
+      color = NA
+    ),
+
+    panel.grid = element_blank(),
+
+    plot.background = element_rect(
+      fill = "#FFFFFF",
+      color = NA
+    ),
+
+    legend.position = "bottom",
+
+    legend.title = element_text(
+      family = "Times New Roman",
+      size = 16,
+      face = "bold"
+    ),
+
+    legend.text = element_text(
+      family = "Times New Roman",
+      size = 14
+    ),
+
+    plot.margin = margin(
+      10,
+      6,
+      10,
+      10
+    ),
+
+    aspect.ratio = 1
+  )
+
+
+# ============================================================
+# 15. RIGHT PLOT — ZOOM INTO RECTANGLE
+#
+# Every top-5-per-gate pair is plotted AND labeled here.
+# ============================================================
+
+p_right <- ggplot(
+
+  highlighted,
+
+  aes(
+    x = safety_pct,
+    y = efficacy_pct
+  )
+) +
+
+  geom_vline(
+
+    xintercept = min_highlighted_safety,
+
+    linetype = "dashed",
+
+    linewidth = 0.8,
+
+    color = "grey30"
+  ) +
+
+  geom_hline(
+
+    yintercept = min_highlighted_efficacy,
+
+    linetype = "dashed",
+
+    linewidth = 0.8,
+
+    color = "grey30"
+  ) +
+
+  geom_point(
+
+    aes(
+      fill = color,
+      shape = gate_group
+    ),
+
+    color = "black",
+
+    size = 4.5,
+
+    stroke = 0.6
+  ) +
+
+  # ----------------------------------------------------------
+  # GENE-PAIR LABELS — ALL highlighted pairs
+  # ----------------------------------------------------------
+
+  geom_label_repel(
+
+    aes(
+      label = label
+    ),
+
+    color = "black",
+
+    fill = "white",
+
+    family = "Times New Roman",
+
+    fontface = "bold",
+
+    size = 5.5,
+
+    label.size = 0.6,
+
+    segment.color = "grey30",
+
+    segment.size = 0.5,
+
+    min.segment.length = 0,
+
+    box.padding = 0.5,
+
+    point.padding = 0.3,
+
+    max.overlaps = Inf,
+
+    seed = 42
+  ) +
+
+  scale_fill_identity() +
+
+  scale_shape_manual(
+    name = "Gate",
+    values = gate_shapes,
+    guide = "none"
+  ) +
+
+  scale_x_continuous(
+
+    limits = c(zoom_x_min, zoom_x_max),
+
+    labels = function(x) paste0(x, "%"),
+
+    expand = expansion(mult = 0.08)
+  ) +
+
+  scale_y_continuous(
+
+    limits = c(zoom_y_min, zoom_y_max),
+
+    breaks = seq(
+      ceiling(zoom_y_min / 2) * 2,
+      floor(zoom_y_max / 2) * 2,
+      by = 2
+    ),
+
+    labels = function(y) paste0(y, "%"),
+
+    expand = expansion(mult = 0.08)
+  ) +
+
+  labs(
+
+    title = paste0("Top ", top_n_per_gate, " per gate (OR / AND / NAND)"),
+
+    x = "Safety",
+
+    y = "Efficacy"
+  ) +
+
+  theme_classic(
+
+    base_size = 20,
+
+    base_family = "Times New Roman"
+
+  ) +
+
+  theme(
+
+    text = element_text(
+      family = "Times New Roman",
+      color = "black"
+    ),
+
+    plot.title = element_text(
+      family = "Times New Roman",
+      size = 21,
+      face = "bold",
+      color = "black",
+      hjust = 0.5
+    ),
+
+    axis.title.x = element_text(
+      family = "Times New Roman",
+      size = 23,
+      face = "bold",
+      color = "black"
+    ),
+
+    axis.title.y = element_text(
+      family = "Times New Roman",
+      size = 23,
+      face = "bold",
+      color = "black"
+    ),
+
+    axis.text.x = element_text(
+      family = "Times New Roman",
+      size = 18,
+      face = "bold",
+      color = "black"
+    ),
+
+    axis.text.y = element_text(
+      family = "Times New Roman",
+      size = 18,
+      face = "bold",
+      color = "black"
+    ),
+
+    axis.line = element_line(
+      linewidth = 1,
+      color = "black"
+    ),
+
+    panel.border = element_rect(
+      color = "black",
+      fill = NA,
+      linewidth = 1
+    ),
+
+    panel.background = element_rect(
+      fill = "#EDEEF3",
+      color = NA
+    ),
+
+    panel.grid = element_blank(),
+
+    plot.background = element_rect(
+      fill = "#FFFFFF",
+      color = NA
+    ),
+
+    plot.margin = margin(
+      10,
+      4,
+      10,
+      6
+    ),
+
+    aspect.ratio = 1
+  )
+
+
+# ============================================================
+# 16. RANK / GATE LEGEND PANEL
+#
+# A standalone panel listing every highlighted pair, grouped
+# OR first, then AND, then NAND (via the gate_group factor
+# order set in step 8b), and within each gate ordered best to
+# worst. The number shown next to each pair is its ORIGINAL
+# RRA_Rank value (not its 1-5 position within the gate), so
+# it can be cross-referenced directly against the source CSV.
+# ============================================================
+
+# --------------------------------------------------------
+# Vertical layout is built with an explicit cursor rather
+# than a single continuous row_number(), so we can use a
+# LARGER gap when moving to a new gate's header (visually
+# separating it from the previous group's last row) and a
+# SMALLER, fixed gap between a header and its own group's
+# first row (visually attaching the header to its block).
+# --------------------------------------------------------
+
+row_spacing          <- 1.0   # spacing between rows within a group
+header_to_row_gap    <- 0.55  # spacing between a header and its first row
+inter_group_gap      <- 1.1   # extra spacing before a new group's header
+
+groups_ordered <- levels(
+  droplevels(
+    highlighted$gate_group
+  )
+)
+
+y_cursor <- 0
+
+legend_rows_list  <- vector("list", length(groups_ordered))
+gate_headers_list <- vector("list", length(groups_ordered))
+
+for (i in seq_along(groups_ordered)) {
+
+  g <- groups_ordered[i]
+
+  grp_rows <- highlighted %>%
+    filter(gate_group == g) %>%
+    arrange(rank_in_gate)
+
+  n_rows <- nrow(grp_rows)
+
+  if (i > 1) {
+    y_cursor <- y_cursor - inter_group_gap
+  }
+
+  gate_headers_list[[i]] <- data.frame(
+    gate_group = g,
+    y_pos = y_cursor
+  )
+
+  y_cursor <- y_cursor - header_to_row_gap
+
+  grp_rows$y_pos <- y_cursor - (seq_len(n_rows) - 1) * row_spacing
+
+  legend_rows_list[[i]] <- grp_rows
+
+  y_cursor <- min(grp_rows$y_pos)
+}
+
+legend_df <- bind_rows(legend_rows_list)
+
+gate_headers <- bind_rows(gate_headers_list)
+
+p_legend <- ggplot() +
+
+  geom_text(
+
+    data = gate_headers,
+
+    aes(
+      x = 0,
+      y = y_pos,
+      label = gate_group
+    ),
+
+    hjust = 0,
+
+    family = "Times New Roman",
+
+    fontface = "bold",
+
+    size = 5,
+
+    color = "black"
+  ) +
+
+  geom_point(
+
+    data = legend_df,
+
+    aes(
+      x = 0,
+      y = y_pos,
+      fill = color,
+      shape = gate_group
+    ),
+
+    color = "black",
+
+    size = 5,
+
+    stroke = 0.5
+  ) +
+
+  geom_text(
+
+    data = legend_df,
+
+    aes(
+      x = 0,
+      y = y_pos,
+      label = paste0(
+        "Rank ",
+        as.integer(round(ObjectiveScore)),
+        ":  ",
+        label
+      )
+    ),
+
+    hjust = 0,
+
+    nudge_x = 0.18,
+
+    family = "Times New Roman",
+
+    fontface = "bold",
+
+    size = 4,
+
+    color = "black"
+  ) +
+
+  scale_fill_identity() +
+
+  scale_shape_manual(
+    values = gate_shapes,
+    guide = "none"
+  ) +
+
+  xlim(
+    -0.1,
+    3.4
+  ) +
+
+  labs(
+    title = "Gene-Ranks"
+  ) +
+
+  theme_void(
+
+    base_family = "Times New Roman"
+
+  ) +
+
+  theme(
+
+    plot.title = element_text(
+      family = "Times New Roman",
+      size = 16,
+      face = "bold",
+      color = "black",
+      hjust = 0
+    ),
+
+    plot.title.position = "plot",
+
+    plot.margin = margin(
+      10,
+      4,
+      10,
+      0
+    )
+  )
+
+
+# ============================================================
+# 17. COMBINE INTO A SINGLE FIGURE
+# ============================================================
+
+p_combined <- cowplot::plot_grid(
+
+  p_left,
+
+  p_right,
+
+  p_legend,
+
+  ncol = 3,
+
+  align = "h",
+
+  axis = "tb",
+
+  rel_widths = c(1, 1, 0.38)
+)
+
+
+# ============================================================
+# 18. SAVE COMBINED PLOT
+# ============================================================
+
+cat("\n")
+cat("Saving COMBINED plot...\n")
+
+ggsave(
+
+  filename = combined_file,
+
+  plot = p_combined,
+
+  width = 18.5,
+
+  height = 8,
+
+  units = "in",
+
+  dpi = 800,
+
+  bg = "#FFFFFF"
+)
+
+cat(
+  "COMBINED plot saved successfully:\n",
+  combined_file,
+  "\n"
+)
+
+
+# ============================================================
+# 19. VERIFY OUTPUT FILE
+# ============================================================
+
+cat("\n")
+cat("============================================================\n")
+cat("OUTPUT VERIFICATION\n")
+cat("============================================================\n")
+
+if (file.exists(combined_file)) {
+
+  combined_size <- file.info(combined_file)$size / (1024^2)
+
+  cat(
+    "COMBINED plot: SUCCESS\n",
+    "File: ",
+    combined_file,
+    "\n",
+    "Size: ",
+    round(combined_size, 2),
+    " MB\n\n",
+    sep = ""
+  )
+
+} else {
+
+  cat(
+    "COMBINED plot: FAILED\n\n"
+  )
+
+  quit(status = 1)
+}
+
+
+# ============================================================
+# 20. FINAL REPORT
+# ============================================================
+
+cat("============================================================\n")
+cat("DUAL-GENE ANALYSIS COMPLETED\n")
+cat("============================================================\n")
+
+cat(
+  "Input:\n",
+  input_file,
+  "\n\n"
+)
+
+cat(
+  "Number of candidates:",
+  nrow(plot_df),
+  "\n\n"
+)
+
+cat(
+  paste0("Highlighted pairs (top ", top_n_per_gate, " per gate):"),
+  n_highlighted,
+  "\n"
+)
+
+print(
+  highlighted %>%
+    select(
+      gate_group,
+      rank_in_gate,
+      candidate,
+      Efficacy,
+      Safety,
+      ObjectiveScore
+    )
+)
+
+cat("\n")
+
+cat(
+  "Minimum highlighted safety (threshold):",
+  round(min_highlighted_safety, 2),
+  "%\n"
+)
+
+cat(
+  "Minimum highlighted efficacy (threshold):",
+  round(min_highlighted_efficacy, 2),
+  "%\n\n"
+)
+
+cat(
+  "High-resolution output file:\n\n"
+)
+
+cat(
+  combined_file,
+  "\n\n"
+)
+
+cat(
+  "Resolution: 800 DPI\n"
+)
+
+cat(
+  "Dimensions: 18.5 x 8 inches (all pairs | zoom | gate/rank)\n"
+)
+
+cat(
+  "Format: PNG\n"
+)
+
+cat("============================================================\n")
+"""
+
+
+def _plot_top_gate_rra_candidates_r(rra_csv_path: str, output_dir: str, top_n_per_gate: int = 5) -> None:
+    """
+    Render the top-gate RRA "top N per gate" figure natively in R.
+
+    Fills _TOP_GATE_RRA_PLOT_R_TEMPLATE's three placeholders
+    (@@INPUT_CSV@@, @@OUTPUT_DIR@@, @@TOP_N_PER_GATE@@) with the actual
+    values for this run, writes the result to a driver script under
+    output_dir, and launches it as an Rscript subprocess — the same
+    subprocess pattern _run_rra_via_r() already uses for RobustRankAggreg,
+    reused here via _find_rscript()/_find_r_home()/_build_r_subprocess_env().
+
+    The R script itself defines the highlighting logic: EXACTLY the top
+    `top_n_per_gate` candidates by RRA_Rank (default 5) WITHIN EACH gate
+    type (OR / AND / NAND) are highlighted — colour is a light-to-dark
+    gradient within each gate (rank 1 = darkest), shape is fixed per gate
+    (diamond = OR, square = AND, triangle = NAND) — and every highlighted
+    pair is labelled (via ggrepel, using the original gate symbol between
+    the two gene names, e.g. "FOLR1 | MSLN") and listed in a "Gene-Ranks"
+    legend panel grouped by gate, combined with cowplot.
+
+    Parameters
+    ----------
+    rra_csv_path : str
+        Path to the RRA-ranked CSV — exactly what
+        _robust_rank_aggregation() already writes to
+        final_candidates_RRA_HPA_Tabula.csv. Must contain the columns
+        geneA, geneB, gate, hpa_efficacy, hpa_safety, tabula_safety,
+        RRA_Rank.
+    output_dir : str
+        Directory the figure is written into. The R script creates a
+        SCATTER_PLOTS_FIGURE3_DUAL subfolder here.
+    top_n_per_gate : int
+        Number of top RRA_Rank candidates highlighted within each gate
+        type (default 5).
+    """
+    import subprocess
+
+    rscript_path = _find_rscript()
+    r_home       = _find_r_home()
+    env          = _build_r_subprocess_env(r_home)
+
+    plot_dir = os.path.join(output_dir, "rra_plot_rscript")
+    os.makedirs(plot_dir, exist_ok=True)
+    r_script_path = os.path.join(plot_dir, "plot_top_gate_rra.R")
+
+    r_code = (
+        _TOP_GATE_RRA_PLOT_R_TEMPLATE
+        .replace("@@INPUT_CSV@@", os.path.abspath(rra_csv_path).replace("\\", "/"))
+        .replace("@@OUTPUT_DIR@@", os.path.abspath(output_dir).replace("\\", "/"))
+        .replace("@@TOP_N_PER_GATE@@", str(int(top_n_per_gate)))
+    )
+    with open(r_script_path, "w") as f:
+        f.write(r_code)
+
+    print(f"  Rscript:                  {rscript_path}")
+    print(f"  R home:                   {r_home}")
+    print(f"  Plot driver script:       {r_script_path}")
+    print("  Launching Rscript subprocess for the top-gate RRA plot ...")
+
+    try:
+        proc = subprocess.run(
+            [rscript_path, r_script_path],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"Failed to launch Rscript subprocess at {rscript_path}: {exc}"
+        ) from exc
+
+    if proc.stdout:
+        print(proc.stdout.strip())
+
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "Rscript subprocess for the top-gate RRA plot failed "
+            f"(exit code {proc.returncode}).\n"
+            f"--- Rscript stderr ---\n{proc.stderr}\n"
+            "Make sure ggplot2, dplyr, cowplot and ggrepel are installed "
+            f"in the R at {r_home}, e.g.:\n"
+            "  conda install -c conda-forge r-ggplot2 r-dplyr r-cowplot r-ggrepel -y"
+        )
+
+    if proc.stderr:
+        # R (and library()) often write benign package-load / startup
+        # messages to stderr even on success — log, don't fail on these.
+        logger.info(f"Rscript stderr (non-fatal):\n{proc.stderr.strip()}")
+
+    print("  Top-gate RRA plot rendered via R.")
 
 
 def _plot_top10_rra_candidates(df_ranked: pd.DataFrame, output_dir: str, top_n: int = 10):
@@ -1936,7 +3263,7 @@ def _robust_rank_aggregation(
     print("\nTop 10 RRA-ranked candidates:")
     print(strict.head(10).to_string(index=False))
 
-    _plot_top_gate_rra_candidates(strict, output_dir)
+    _plot_top_gate_rra_candidates_r(out_csv, output_dir)
     _plot_top10_rra_candidates(strict, output_dir)
 
     return strict
