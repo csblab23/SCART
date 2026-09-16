@@ -132,9 +132,13 @@ script (avg. safety vs HPA efficacy, all candidates as background, selected
 candidates as labelled diamonds with a dashed rectangle marking the zoomed
 region on the left panel):
 
-  _plot_top_gate_rra_candidates() — top 3 AND, top 3 OR, and top 3 NAND
-      (A & !B) candidates by RRA_Rank, one colour per gate type. Unlike the
-      reference script (which excludes NAND), NAND is included here.
+  _plot_top_gate_rra_candidates() — top 5 candidates by RRA_Rank within
+      EACH gate type (OR, AND, NAND — A & !B), shown on a three-panel
+      figure: all candidates with a zoom rectangle, a zoomed-in labelled
+      panel, and a "Gene-Ranks" legend panel — ported from a newer
+      reference R/ggplot2+ggrepel+cowplot dual-gene script. Colour is a
+      light-to-dark gradient within each gate (rank 1 = darkest); shape is
+      fixed per gate (diamond = OR, square = AND, triangle = NAND).
   _plot_top10_rra_candidates()    — top 10 candidates overall by RRA_Rank,
       regardless of gate type.
 
@@ -1258,9 +1262,13 @@ cat("RRA aggregation completed. Rows:", nrow(result), "\\n")
 # shown on the right panel). Same core idea as the reference script, just
 # ported to matplotlib and restyled:
 #
-#   _plot_top_gate_rra_candidates() — top 3 AND, top 3 OR, and top 3 NAND
-#       (A & !B) candidates by RRA_Rank, one colour per gate type. Unlike
-#       the reference script (which excludes NAND), NAND is included here.
+#   _plot_top_gate_rra_candidates() — top 5 candidates by RRA_Rank within
+#       EACH gate type (OR, AND, NAND — A & !B), shown on a three-panel
+#       figure (all candidates + zoom rectangle, zoomed-in labelled panel,
+#       and a "Gene-Ranks" legend panel), ported from a newer reference
+#       R/ggplot2+ggrepel+cowplot dual-gene script. Colour is a
+#       light-to-dark gradient within each gate (rank 1 = darkest); shape
+#       is fixed per gate (diamond = OR, square = AND, triangle = NAND).
 #   _plot_top10_rra_candidates()    — top 10 candidates overall by
 #       RRA_Rank, regardless of gate type.
 #
@@ -1271,11 +1279,47 @@ cat("RRA aggregation completed. Rows:", nrow(result), "\\n")
 
 _GATE_TYPE_MAP = {"A & B": "AND", "A | B": "OR", "A & !B": "NAND"}
 
-_GATE_COLORS = {
-    "AND":  "#0072B2",   # blue
-    "OR":   "#009E73",   # teal-green
-    "NAND": "#D55E00",   # coral
+# Per-gate colour families for the top-5-per-gate plot: each gate gets its
+# own hue (blues for OR, oranges for AND, greens for NAND) so the three
+# gate types stay distinguishable at a glance; within a gate, rank 1
+# (best RRA_Rank) gets the darkest/most saturated shade and rank 5 gets
+# the lightest, via _color_ramp() below — ported from the reference
+# script's gate_hue_ends + colorRampPalette().
+_GATE_HUE_ENDS = {
+    "OR":   ("#1E3A8A", "#60A5FA"),   # deep vivid blue    -> bright sky blue
+    "AND":  ("#9A3412", "#FB923C"),   # deep vivid orange  -> bright orange
+    "NAND": ("#065F46", "#34D399"),   # deep vivid emerald -> bright emerald
 }
+
+# Point shape per gate type — an additional, colour-independent way to
+# tell gates apart, matching the reference script's shapes 23/22/24.
+_GATE_MARKERS = {
+    "OR":   "D",   # diamond
+    "AND":  "s",   # square
+    "NAND": "^",   # triangle
+}
+
+
+def _color_ramp(hex_start: str, hex_end: str, n: int) -> list:
+    """Linearly interpolate `n` hex colours from hex_start to hex_end
+    (inclusive) — the same light/dark gradient effect as R's
+    colorRampPalette(c(hex_start, hex_end))(n)."""
+    def _to_rgb(h):
+        h = h.lstrip("#")
+        return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+    def _to_hex(rgb):
+        return "#{:02X}{:02X}{:02X}".format(*(int(round(c)) for c in rgb))
+
+    if n <= 1:
+        return [hex_start]
+
+    start, end = _to_rgb(hex_start), _to_rgb(hex_end)
+    return [
+        _to_hex(tuple(start[k] + (end[k] - start[k]) * (i / (n - 1)) for k in range(3)))
+        for i in range(n)
+    ]
+
 
 # Distinct rank-ordered palette for the top-10-overall plot (rank 1 first).
 _RANK_PALETTE = [
@@ -1587,40 +1631,194 @@ def _dual_panel_rra_figure(
     plt.close(fig)
 
 
-def _plot_top_gate_rra_candidates(df_ranked: pd.DataFrame, output_dir: str, top_n_per_gate: int = 3):
+def _dual_panel_with_legend_rra_figure(
+    plot_df: pd.DataFrame,
+    highlighted: pd.DataFrame,
+    output_dir: str,
+    out_stub: str,
+    left_title: str,
+    right_title: str,
+):
     """
-    Top `top_n_per_gate` (default 3) candidates by RRA_Rank within EACH
-    gate type — AND, OR, and NAND (A & !B) — highlighted together on one
-    dual-panel scatter plot, colour-coded by gate type. Matches the
-    reference R/ggplot2 scatter script's look; unlike that script, NAND
-    is included here rather than excluded, and there is no colour legend
-    since each label's own "&" / "|" / "& !" operator already conveys the
-    gate type (matching the reference script, which also has no legend).
+    Three-panel RRA figure ported from the reference dual-gene
+    R/ggplot2+ggrepel+cowplot script: LEFT panel shows every candidate as
+    grey background points plus the highlighted top-N-per-gate candidates
+    (gate-coloured, gate-shaped) inside a dashed zoom rectangle; RIGHT
+    panel is the same highlighted candidates zoomed in and labelled, with
+    a thin leader line back to each point; a narrow "Gene-Ranks" panel
+    lists every highlighted pair grouped by gate (OR, then AND, then
+    NAND), each tagged with its original (global) RRA_Rank so it can be
+    cross-referenced against the source CSV. Colour is a light-to-dark
+    gradient within each gate (rank 1 = darkest, via _color_ramp()); shape
+    is fixed per gate (diamond = OR, square = AND, triangle = NAND).
+    """
+    in_notebook = _configure_matplotlib_backend()
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    plt.rcParams.update({
+        "font.family":      "DejaVu Sans",
+        "figure.facecolor": "white",
+        "axes.facecolor":   "white",
+    })
+
+    gate_order    = ["OR", "AND", "NAND"]
+    gates_present = [g for g in gate_order if g in set(highlighted["gate_type"])]
+
+    fig = plt.figure(figsize=(19, 8.5))
+    gs  = fig.add_gridspec(1, 3, width_ratios=[1, 1, 0.42], wspace=0.35)
+    ax_l      = fig.add_subplot(gs[0, 0])
+    ax_r      = fig.add_subplot(gs[0, 1])
+    ax_legend = fig.add_subplot(gs[0, 2])
+
+    xs_all = (plot_df["avg_safety"] * 100).to_numpy()
+    ys_all = (plot_df["efficacy"]   * 100).to_numpy()
+    xs_hi  = (highlighted["avg_safety"] * 100).to_numpy()
+    ys_hi  = (highlighted["efficacy"]   * 100).to_numpy()
+    colors_hi  = highlighted["color"].tolist()
+    markers_hi = highlighted["marker"].tolist()
+
+    # Partition thresholds and zoom rectangle — lowest safety / efficacy
+    # among the highlighted candidates, with a 1-point floor/ceil margin,
+    # exactly as in the reference script's min_highlighted_safety/efficacy
+    # and zoom_x_min/max, zoom_y_min/max.
+    threshold_x = float(xs_hi.min())
+    threshold_y = float(ys_hi.min())
+    x_lo = max(0.0, np.floor(xs_hi.min()) - 1)
+    x_hi = min(100.0, np.ceil(xs_hi.max()) + 1)
+    y_lo = max(0.0, np.floor(ys_hi.min()) - 1)
+    y_hi = min(100.0, np.ceil(ys_hi.max()) + 1)
+
+    # ---- left panel: full candidate universe, with partition -------------
+    ax_l.scatter(xs_all, ys_all, s=24, color="#a6a6a6", alpha=0.6, linewidths=0, zorder=2)
+    ax_l.add_patch(plt.Rectangle(
+        (x_lo, y_lo), max(x_hi - x_lo, 0.5), max(y_hi - y_lo, 0.5),
+        fill=True, facecolor="#EDEEF3", alpha=0.9,
+        edgecolor="black", linestyle="--", linewidth=1.2, zorder=1,
+    ))
+    ax_l.axvline(threshold_x, linestyle="--", linewidth=1.0, color="#4d4d4d", zorder=3)
+    ax_l.axhline(threshold_y, linestyle="--", linewidth=1.0, color="#4d4d4d", zorder=3)
+    for x, y, c, m in zip(xs_hi, ys_hi, colors_hi, markers_hi):
+        ax_l.scatter(x, y, s=140, marker=m, color=c, edgecolor="black", linewidth=0.8, zorder=5)
+
+    ax_l.set_xlim(left=90)
+    ax_l.set_ylim(bottom=70)
+    ax_l.set_box_aspect(1)
+    _style_scatter_axes(ax_l, left_title, "Safety", "Efficacy")
+
+    # ---- right panel: zoomed, labelled highlighted candidates -------------
+    ax_r.set_facecolor("#F5F5F5")
+    ax_r.axvline(threshold_x, linestyle="--", linewidth=1.0, color="#4d4d4d", zorder=3)
+    ax_r.axhline(threshold_y, linestyle="--", linewidth=1.0, color="#4d4d4d", zorder=3)
+    for x, y, c, m in zip(xs_hi, ys_hi, colors_hi, markers_hi):
+        ax_r.scatter(x, y, s=170, marker=m, color=c, edgecolor="black", linewidth=0.8, zorder=5)
+
+    pad_x = 0.10 * max(x_hi - x_lo, 1.0)
+    pad_y = 0.12 * max(y_hi - y_lo, 1.0)
+    ax_r.set_xlim(x_lo - pad_x, x_hi + pad_x)
+    ax_r.set_ylim(y_lo - pad_y, y_hi + pad_y)
+    ax_r.set_box_aspect(1)
+
+    # Labels use plain black text/borders (not per-gate colour) to match
+    # the reference script's geom_label_repel(color="black", fill="white"),
+    # with a thin leader line back to each point (segment.color="grey30").
+    texts = _place_labels_near_points(
+        ax_r, fig, xs_hi, ys_hi, highlighted["candidate"].tolist(),
+        ["black"] * len(xs_hi),
+    )
+    for t, x, y in zip(texts, xs_hi, ys_hi):
+        tx, ty = t.get_position()
+        ax_r.plot([x, tx], [y, ty], color="grey", linewidth=0.8, alpha=0.85, zorder=4)
+
+    _style_scatter_axes(ax_r, right_title, "Safety", "Efficacy")
+
+    # ---- shared "Gate" shape legend, centred beneath the left+right panels
+    gate_legend_handles = [
+        Line2D([0], [0], marker=_GATE_MARKERS[g], color="black",
+               markerfacecolor="white", markersize=10, linestyle="none", label=g)
+        for g in gates_present
+    ]
+    fig.legend(handles=gate_legend_handles, title="Gate", loc="lower center",
+               bbox_to_anchor=(0.41, -0.03), ncol=len(gates_present), frameon=False,
+               fontsize=11, title_fontsize=11)
+
+    # ---- "Gene-Ranks" legend panel: every highlighted pair, grouped OR ->
+    # AND -> NAND, each tagged with its original (global) RRA_Rank --------
+    ax_legend.axis("off")
+    ax_legend.set_title("Gene-Ranks", fontsize=14, fontweight="bold", loc="left", color="black")
+
+    n_groups    = len(gates_present)
+    total_items = len(highlighted)
+    total_units = n_groups * 1.6 + total_items + max(n_groups - 1, 0) * 0.6
+    row_h       = 0.86 / max(total_units, 1)
+    header_gap  = row_h * 0.7
+    group_gap   = row_h * 0.6
+
+    y_cursor = 0.95
+    for i, gate_type in enumerate(gates_present):
+        if i > 0:
+            y_cursor -= group_gap
+        ax_legend.text(0.0, y_cursor, gate_type, fontsize=12, fontweight="bold",
+                        color="black", va="top", ha="left", transform=ax_legend.transAxes)
+        y_cursor -= (row_h + header_gap)
+        sub = highlighted[highlighted["gate_type"] == gate_type].sort_values("rank_in_gate")
+        for _, row in sub.iterrows():
+            ax_legend.scatter([0.03], [y_cursor + row_h * 0.15], marker=row["marker"],
+                               color=row["color"], edgecolor="black", linewidth=0.6, s=70,
+                               transform=ax_legend.transAxes, clip_on=False, zorder=5)
+            ax_legend.text(0.10, y_cursor + row_h * 0.30,
+                            f"Rank {int(row['RRA_Rank'])}:  {row['candidate']}",
+                            fontsize=10, color="black", va="top", ha="left",
+                            transform=ax_legend.transAxes)
+            y_cursor -= row_h
+
+    fig.tight_layout(rect=[0, 0.03, 1, 1])
+
+    pdf_path = os.path.join(output_dir, f"{out_stub}_claude.pdf")
+    png_path = os.path.join(output_dir, f"{out_stub}_claude.png")
+    fig.savefig(pdf_path, dpi=300, bbox_inches="tight")
+    fig.savefig(png_path, dpi=300, bbox_inches="tight")
+    print(f"RRA plot saved to:\n  {pdf_path}\n  {png_path}")
+
+    if in_notebook:
+        plt.show()
+    plt.close(fig)
+
+
+def _plot_top_gate_rra_candidates(df_ranked: pd.DataFrame, output_dir: str, top_n_per_gate: int = 5):
+    """
+    Top `top_n_per_gate` (default 5) candidates by RRA_Rank within EACH
+    gate type — OR, AND, and NAND (A & !B) — highlighted on one
+    three-panel figure (all candidates + zoom rectangle, a zoomed-in
+    labelled panel, and a "Gene-Ranks" legend panel), ported from a newer
+    reference R/ggplot2+ggrepel+cowplot dual-gene script. Colour is a
+    light-to-dark gradient within each gate (rank 1 = darkest); shape is
+    fixed per gate (diamond = OR, square = AND, triangle = NAND).
     """
     plot_df = _prep_rra_plot_df(df_ranked)
 
     pieces = []
-    for gate_type in ("AND", "OR", "NAND"):
-        sub = plot_df[plot_df["gate_type"] == gate_type].sort_values("RRA_Rank").head(top_n_per_gate)
+    for gate_type in ("OR", "AND", "NAND"):
+        sub = plot_df[plot_df["gate_type"] == gate_type].sort_values("RRA_Rank").head(top_n_per_gate).copy()
         if sub.empty:
             print(f"No {gate_type}-gate candidates available for highlighting — skipping.")
             continue
+        sub["rank_in_gate"] = range(1, len(sub) + 1)
+        sub["color"]        = _color_ramp(*_GATE_HUE_ENDS[gate_type], len(sub))
+        sub["marker"]       = _GATE_MARKERS[gate_type]
         pieces.append(sub)
 
     if not pieces:
-        print("No AND/OR/NAND candidates available — skipping top-gate RRA plot.")
+        print("No OR/AND/NAND candidates available — skipping top-gate RRA plot.")
         return
 
-    highlighted = pd.concat(pieces).sort_values(["gate_type", "RRA_Rank"]).reset_index(drop=True)
-    colors      = [_GATE_COLORS[g] for g in highlighted["gate_type"]]
+    highlighted = pd.concat(pieces).reset_index(drop=True)
 
-    _dual_panel_rra_figure(
-        plot_df, highlighted, colors,
-        out_stub="Top3_AND_OR_NAND_RRA_Candidates",
-        output_dir=output_dir,
-        suptitle="Top 3 AND / OR / NAND Candidates — Robust Rank Aggregation",
-        left_title="All candidate combinations",
-        right_title="Top 3 per gate (AND / OR / NAND)",
+    _dual_panel_with_legend_rra_figure(
+        plot_df, highlighted, output_dir,
+        out_stub=f"Top{top_n_per_gate}_per_gate_RRA_Candidates",
+        left_title="All dual-gene candidates",
+        right_title=f"Top {top_n_per_gate} per gate (OR / AND / NAND)",
     )
 
 
