@@ -16,6 +16,7 @@ It will:
 
 import importlib.util
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -36,15 +37,32 @@ CONDA_R_BASE = [
     "r-base", "r-devtools", "r-remotes",
     "r-ggplot2", "r-data.table", "r-igraph",
     "r-gdtools", "r-ragg", "r-dplyr",
-    # NEW: required by one_gene_combination.py's single-gene RRA plot
-    # (plot_single_gene_rra_claude.R), which combines its three panels
-    # with cowplot::plot_grid(). This list is shared by both the
-    # Linux/Mac path (_run_linux_mac, Step 3) and Windows (_run_windows,
-    # Step 8), so adding it here covers both.
+    # NEW: required by one_gene_combination.py's and
+    # two_gene_combination.py's RRA plots (each generated from an R
+    # source template embedded directly in the .py file, not a separate
+    # .R file), which combine their panels with cowplot::plot_grid().
+    # This list is shared by both the Linux/Mac path (_run_linux_mac,
+    # Step 3) and Windows (_run_windows, Step 8), so adding it here
+    # covers both.
     "r-cowplot",
     "cairo", "freetype", "fontconfig",
     "harfbuzz", "fribidi", "libpng",
     "libtiff", "libjpeg-turbo", "libwebp",
+]
+
+# Linux / Mac (also harmless, if unnecessary, on Windows): fonts for the
+# RRA plots. Both one_gene_combination.py's and two_gene_combination.py's
+# embedded R plotting code specify family = "Times New Roman" throughout
+# (unchanged from the reference scripts they were adapted from). Times New
+# Roman itself is a proprietary Microsoft font and can't be redistributed
+# via conda-forge; Liberation Serif is a free, metrically-compatible
+# substitute (same character widths/kerning, so layout and label wrapping
+# still match). Installed here; _configure_times_new_roman_alias() below
+# then points "Times New Roman" at it via a fontconfig alias, so the
+# plotting code's literal font name resolves correctly without changing a
+# single line of the embedded R source.
+CONDA_FONTS = [
+    "font-ttf-liberation",
 ]
 
 # Linux / Mac: Step 3b — Bioconductor + CRAN (available via conda on Linux/Mac only)
@@ -248,6 +266,116 @@ def _verify_rra():
 
 
 # ---------------------------------------------------------------------------
+# Font matching — Times New Roman for the RRA plots
+# ---------------------------------------------------------------------------
+
+def _configure_times_new_roman_alias() -> bool:
+    """
+    Make R's family = "Times New Roman" — used throughout both
+    one_gene_combination.py's and two_gene_combination.py's embedded RRA
+    plot R source, unchanged from the reference scripts they were adapted
+    from — actually resolve to a real, visually matching font when the
+    plot is rendered.
+
+    Windows: nothing to do. Times New Roman ships as a native OS font, so
+    R (via the Windows GDI graphics device) already finds it directly.
+
+    Linux/Mac: Times New Roman itself can't be redistributed via
+    conda-forge (proprietary Microsoft font). Liberation Serif — installed
+    via CONDA_FONTS above — is a free, metrically-compatible substitute.
+    This writes a small fontconfig alias mapping "Times New Roman" to
+    "Liberation Serif", so the plotting code's literal font name resolves
+    to it without changing a single line of the embedded R source. The
+    alias is written to two locations for robustness (conda's own
+    fontconfig conf.d, if this environment has one, and the standard
+    user-level fontconfig location), then the font cache is refreshed with
+    fc-cache so the change takes effect immediately rather than on next
+    login.
+    """
+    if platform.system() == "Windows":
+        print(
+            "[SCART:fonts] Windows detected — Times New Roman is a native "
+            "OS font, no alias needed."
+        )
+        return True
+
+    alias_xml = (
+        '<?xml version="1.0"?>\n'
+        '<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n'
+        '<fontconfig>\n'
+        '  <match target="pattern">\n'
+        '    <test name="family"><string>Times New Roman</string></test>\n'
+        '    <edit name="family" mode="assign" binding="strong">'
+        '<string>Liberation Serif</string></edit>\n'
+        '  </match>\n'
+        '</fontconfig>\n'
+    )
+
+    targets = []
+
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if conda_prefix:
+        conda_confd = os.path.join(conda_prefix, "etc", "fonts", "conf.d")
+        if os.path.isdir(conda_confd):
+            targets.append(
+                os.path.join(conda_confd, "99-times-new-roman-alias.conf")
+            )
+
+    targets.append(
+        os.path.join(os.path.expanduser("~"), ".config", "fontconfig", "fonts.conf")
+    )
+
+    wrote_any = False
+    for path in targets:
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write(alias_xml)
+            print(
+                "[SCART:fonts] Times New Roman -> Liberation Serif alias "
+                f"written to:\n  {path}"
+            )
+            wrote_any = True
+        except OSError as exc:
+            print(f"[SCART:fonts] WARNING: could not write {path}: {exc}", file=sys.stderr)
+
+    if not wrote_any:
+        print(
+            "[SCART:fonts] WARNING: could not write a fontconfig alias "
+            "anywhere. R plots may fall back to a default font instead of "
+            "Times New Roman / Liberation Serif.",
+            file=sys.stderr,
+        )
+        return False
+
+    fc_cache = shutil.which("fc-cache")
+    if fc_cache:
+        _run([fc_cache, "-f"], label="fonts")
+    else:
+        print(
+            "[SCART:fonts] WARNING: fc-cache not found on PATH — the alias "
+            "was written but the font cache was not refreshed. It should "
+            "still take effect the next time fontconfig rebuilds its cache "
+            "(e.g. on next login), or run `fc-cache -f` manually.",
+            file=sys.stderr,
+        )
+
+    fc_match = shutil.which("fc-match")
+    if fc_match:
+        try:
+            result = subprocess.run(
+                [fc_match, "Times New Roman"],
+                capture_output=True, text=True, check=False,
+            )
+            if result.stdout:
+                print(f'[SCART:fonts] fc-match "Times New Roman" -> {result.stdout.strip()}')
+        except Exception:
+            pass
+
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Linux / Mac: automated steps  (mirrors original Linux guide exactly)
 # ---------------------------------------------------------------------------
 
@@ -267,8 +395,8 @@ def _run_linux_mac(os_name: str):
         print("[SCART] Step 2 failed. Fix the conda issue above and re-run.", file=sys.stderr)
         return
 
-    # Step 3: full R base + graphics stack  (mirrors guide Step 4b)
-    print("\n[Step 3/5] Installing R base packages + graphics stack via conda ...")
+    # Step 3: full R base + graphics stack + fonts  (mirrors guide Step 4b)
+    print("\n[Step 3/5] Installing R base packages + graphics stack + fonts via conda ...")
     ok = _conda(
         "install",
         "--override-channels",
@@ -277,10 +405,13 @@ def _run_linux_mac(os_name: str):
         "-c", "defaults",
         "-y",
         *CONDA_R_BASE,
+        *CONDA_FONTS,
     )
     if not ok:
         print("[SCART] Step 3 failed. Fix the conda issue above and re-run.", file=sys.stderr)
         return
+
+    _configure_times_new_roman_alias()
 
     # Step 4: flexible channel priority + Bioconductor + CRAN  (mirrors guide Step 4c)
     # (now also installs r-robustrankaggreg — see CONDA_R_BIO above)
@@ -498,8 +629,8 @@ def _run_windows():
         print("[SCART] Step 7 failed. Fix conda issue above and re-run.", file=sys.stderr)
         return
 
-    # Step 8: R base + graphics stack
-    print("\n[Step 8/9] Installing R base packages + graphics stack via conda ...")
+    # Step 8: R base + graphics stack + fonts
+    print("\n[Step 8/9] Installing R base packages + graphics stack + fonts via conda ...")
     ok = _conda(
         "install",
         "--override-channels",
@@ -508,10 +639,13 @@ def _run_windows():
         "-c", "defaults",
         "-y",
         *CONDA_R_BASE,
+        *CONDA_FONTS,
     )
     if not ok:
         print("[SCART] Step 8 failed. Fix conda issue above and re-run.", file=sys.stderr)
         return
+
+    _configure_times_new_roman_alias()
 
     # Step 9: CRAN packages (no bioconductor — not available for win-64 via conda)
     # (now also installs r-robustrankaggreg — see WIN_R_CRAN above)
@@ -557,7 +691,8 @@ def _show_manual_steps(os_choice: str):
  AUTOMATED by this script:
    [auto] Download cl.obo ontology
    [auto] conda install r-base
-   [auto] conda install R base packages + graphics stack
+   [auto] conda install R base packages + graphics stack + fonts (Liberation
+          Serif, aliased to "Times New Roman" for the RRA plots)
    [auto] conda install Bioconductor + CRAN packages (incl. r-robustrankaggreg,
           needed for the atlas="both" Robust Rank Aggregation search)
    [auto] Rscript install_github SCEVAN
@@ -629,7 +764,9 @@ def _show_manual_steps(os_choice: str):
    [auto] Re-check annoy after force-reinstalls
    [auto] Verify Python packages
    [auto] conda install r-base
-   [auto] conda install R base packages + graphics stack
+   [auto] conda install R base packages + graphics stack + fonts (Liberation
+          Serif — not needed for the alias on Windows, which already has a
+          native Times New Roman font)
    [auto] conda install R CRAN packages (incl. r-robustrankaggreg, needed
           for the atlas="both" Robust Rank Aggregation search)
    [auto] Verify RobustRankAggreg
@@ -670,7 +807,8 @@ def _show_manual_steps(os_choice: str):
  AUTOMATED by this script:
    [auto] Download cl.obo ontology
    [auto] conda install r-base
-   [auto] conda install R base packages + graphics stack
+   [auto] conda install R base packages + graphics stack + fonts (Liberation
+          Serif, aliased to "Times New Roman" for the RRA plots)
    [auto] conda install Bioconductor + CRAN packages (incl. r-robustrankaggreg,
           needed for the atlas="both" Robust Rank Aggregation search)
    [auto] Rscript install_github SCEVAN
