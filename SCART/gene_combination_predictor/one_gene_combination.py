@@ -164,6 +164,33 @@ genes actually shown can be smaller or larger than `top_n`. Genes are
 coloured with an extended Okabe-Ito colourblind-safe palette (matching the
 reference script exactly), smoothly interpolated with extra hues if more
 genes fall inside the rectangle than the base palette has colours for.
+
+Fix applied (RRA plot v3 — plotted natively in R)
+-----------------------------------------------------
+v2 was a matplotlib approximation of the reference R/ggplot2 + ggrepel +
+cowplot script. It is now the reference script itself, embedded directly
+in this module: the highlighted-region design (thresholds, rectangle,
+Okabe-Ito palette, ggrepel labels, "Gene Ranks" legend panel,
+cowplot::plot_grid combine) lives in _SINGLE_GENE_RRA_PLOT_R_TEMPLATE
+below as an R source template — no separate .R file to ship or locate.
+_plot_single_gene_rra_r() fills in the three values that vary per run
+(input CSV path, output dir, top_n) via simple string substitution, writes
+the result to a small driver script under output_dir, and launches it as
+an Rscript subprocess — exactly the pattern _run_rra_via_r() above already
+uses for RobustRankAggreg (_find_rscript()/_find_r_home()/
+_build_r_subprocess_env() are reused as-is, unchanged). The only changes
+from the reference script are: the rank column is "RRA_Rank" (what
+_robust_rank_aggregation_single_gene() actually writes) instead of
+"Final_Rank", and the output file carries a "_claude" suffix.
+
+This removes the entire matplotlib plotting stack (_dual_panel_rra_figure,
+_place_labels_with_leaders, etc.) from this module — matplotlib is no
+longer imported or required here.
+
+New R dependency: the R package 'cowplot' (ggplot2, dplyr and ggrepel were
+already required for atlas="both"). See install.py's CONDA_R_BASE list,
+which now includes r-cowplot for both the Linux/Mac and Windows setup
+paths.
 """
 
 import os
@@ -863,445 +890,1453 @@ cat("RRA aggregation completed. Rows:", nrow(result), "\\n")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RRA result plot — three-panel "highlighted region" design
+# RRA result plot — rendered natively in R (self-contained in this module)
 #
-# Redesigned to match a reference R/ggplot2 + ggrepel + cowplot script
-# (single-gene efficacy-vs-safety figure) — see module docstring "Fix
-# applied (RRA plot v2 ...)" for the full design rationale.
+# v3 shipped the R plotting code as a separate companion .R file next to
+# this module. It is now fully self-contained here instead, following the
+# exact same pattern _run_rra_via_r() above already uses for
+# RobustRankAggreg: the R source lives in this file as a template string,
+# _plot_single_gene_rra_r() fills in the three values that vary per run
+# (input CSV path, output dir, top_n), writes the result to a small driver
+# script under output_dir, and launches it as an Rscript subprocess. No
+# separate file needs to be shipped or located at import time.
 #
-#   LEFT   = every candidate gene, grey background, with a dashed-border
-#            shaded rectangle marking the highlighted region and the
-#            highlighted genes drawn as coloured diamonds.
-#   RIGHT  = zoomed into that rectangle, light-grey panel background,
-#            every highlighted gene labelled with a white leader-lined box.
-#   LEGEND = a third narrow panel listing every highlighted gene as a
-#            numbered, colour-swatched row ("Gene Ranks"), best first.
+# Design (thresholds, highlighted-rectangle selection, Okabe-Ito palette,
+# ggrepel labels, "Gene Ranks" legend panel, cowplot::plot_grid combine)
+# matches a reference R/ggplot2 + ggrepel + cowplot script exactly — see
+# module docstring "Fix applied (RRA plot v3 ...)".
 #
-# The rectangle's bounds come from the top `top_n` genes by RRA_Rank
-# (default 20), but every gene whose point falls inside it — not just
-# those top `top_n` — gets plotted, labelled and ranked (mirrors the
-# reference script's "top 20 defines the box, then show everyone inside
-# it" behaviour exactly). As before, axes are left to auto-scale rather
-# than pinned to a fixed floor, since the "strict" filter upstream only
-# truly enforces a safety floor, not an efficacy one.
+# Requires the R packages ggplot2, dplyr, ggrepel and cowplot (cowplot is
+# newly added for this — see install.py's CONDA_R_BASE).
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Extended Okabe-Ito colourblind-safe palette, matching the reference
-# R/ggplot2 script exactly (7 Okabe-Ito hues + 14 additional vivid hues).
-_HIGHLIGHT_PALETTE = [
-    "#E69F00", "#0072B2", "#009E73", "#CC79A7", "#F0E442", "#56B4E9", "#D55E00",
-    "#7B2CBF", "#B37400", "#00A896", "#E63946", "#3A86FF", "#8C4A6B", "#FFB400",
-    "#1D3557", "#43AA8B", "#9D4EDD", "#F4A261", "#118AB2", "#6A994E", "#FF6B6B",
-]
+_SINGLE_GENE_RRA_PLOT_R_TEMPLATE = r"""
+#!/usr/bin/env Rscript
+
+library(ggplot2)
+library(dplyr)
+library(cowplot)
+library(ggrepel)
+
+# ============================================================
+# SINGLE-GENE:
+# EFFICACY vs SAFETY
+#
+# Auto-generated by one_gene_combination.py's
+# _plot_single_gene_rra_r() every time it runs (mirrors exactly
+# how _run_rra_via_r() already generates its own R driver script
+# for RobustRankAggreg) — NOT meant to be hand-edited or launched
+# with different arguments. The plotting logic below (thresholds,
+# highlighted-rectangle selection, palette, panels, legend,
+# combine, save) matches a reference R/ggplot2/ggrepel/cowplot
+# script exactly. Only two things differ from that reference:
+#   1. input_file / output_dir_arg / top_n below are literal
+#      values baked in by _plot_single_gene_rra_r() at write time,
+#      instead of a hard-coded path.
+#   2. The rank column is "RRA_Rank" (what
+#      _robust_rank_aggregation_single_gene() actually writes),
+#      not "Final_Rank"; and the output file gets a "_claude"
+#      suffix, per this project's naming convention.
+#
+# Output:
+# <output_dir>/SCATTER_PLOTS_FIGURE3/Single_gene_efficacy_vs_safety_COMBINED_claude.png
+#
+#   Single combined figure:
+#     LEFT  = all genes, highlighted rectangle
+#     RIGHT = zoom into rectangle, EVERY gene inside the
+#             rectangle is labeled (not just top N)
+#
+# Resolution:
+# 800 DPI
+# Format:
+# PNG
+# ============================================================
 
 
-def _rra_highlight_colors(n: int) -> list:
-    """One colour per highlighted gene, ordered by rank. Uses the extended
-    Okabe-Ito colourblind-safe palette as-is when it's large enough;
-    smoothly interpolates additional hues (matching the reference script's
-    colorRampPalette(base_palette)) when more genes fall inside the
-    highlighted region than the base palette has colours for."""
-    if n <= len(_HIGHLIGHT_PALETTE):
-        return _HIGHLIGHT_PALETTE[:n]
-    import matplotlib.colors as mcolors
-    base_rgb = [mcolors.to_rgb(c) for c in _HIGHLIGHT_PALETTE]
-    cmap = mcolors.LinearSegmentedColormap.from_list("rra_extended", base_rgb)
-    return [mcolors.to_hex(cmap(i / max(n - 1, 1))) for i in range(n)]
+# ============================================================
+# 1. INPUT FILE / OUTPUT DIRECTORY / TOP N
+#
+# Written in directly by _plot_single_gene_rra_r() when it
+# generates this file.
+# ============================================================
+
+input_file <- "@@INPUT_CSV@@"
+output_dir_arg <- "@@OUTPUT_DIR@@"
+top_n <- @@TOP_N@@
+
+# ============================================================
+# 2. INPUT / OUTPUT DIRECTORIES
+# ============================================================
+
+output_dir <- file.path(
+  output_dir_arg,
+  "SCATTER_PLOTS_FIGURE3"
+)
+
+dir.create(
+  output_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
 
 
-def _configure_matplotlib_backend() -> bool:
+# ============================================================
+# 3. CHECK INPUT FILE
+# ============================================================
+
+cat("\n")
+cat("============================================================\n")
+cat("SINGLE-GENE EFFICACY vs SAFETY ANALYSIS\n")
+cat("============================================================\n")
+
+cat(
+  "Input file:\n",
+  input_file,
+  "\n"
+)
+
+if (!file.exists(input_file)) {
+
+  stop(
+    paste0(
+      "\nERROR: Input file does not exist:\n",
+      input_file,
+      "\n"
+    )
+  )
+}
+
+
+# ============================================================
+# 4. OUTPUT FILE (single combined figure)
+# ============================================================
+
+combined_file <- file.path(
+  output_dir,
+  "Single_gene_efficacy_vs_safety_COMBINED_claude.png"
+)
+
+cat(
+  "\nOutput directory:\n",
+  output_dir,
+  "\n"
+)
+
+cat(
+  "\nCombined plot:\n",
+  combined_file,
+  "\n"
+)
+
+
+# ============================================================
+# 5. READ DATA
+# ============================================================
+
+single_gene <- read.csv(
+  input_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+
+# ============================================================
+# 6. CHECK REQUIRED COLUMNS
+#
+# RRA_Rank replaces the reference script's Final_Rank — this is
+# the rank column _robust_rank_aggregation_single_gene() actually
+# writes (1 = best, lower is better; same convention as Final_Rank).
+# ============================================================
+
+required_columns <- c(
+  "Gene",
+  "hpa_efficacy",
+  "hpa_safety",
+  "tabula_safety",
+  "RRA_Rank"
+)
+
+missing_columns <- setdiff(
+  required_columns,
+  colnames(single_gene)
+)
+
+if (length(missing_columns) > 0) {
+
+  stop(
+    paste0(
+      "\nERROR: Missing required column(s):\n",
+      paste(
+        missing_columns,
+        collapse = ", "
+      ),
+      "\n\nAvailable columns are:\n",
+      paste(
+        colnames(single_gene),
+        collapse = ", "
+      ),
+      "\n"
+    )
+  )
+}
+
+
+# ============================================================
+# 7. PREPARE DATA
+# ============================================================
+
+plot_df <- single_gene %>%
+
+  mutate(
+
+    # --------------------------------------------------------
+    # Efficacy: HPA efficacy directly
+    # --------------------------------------------------------
+
+    Efficacy = as.numeric(hpa_efficacy),
+
+    # --------------------------------------------------------
+    # Safety: average of HPA safety and Tabula safety
+    # --------------------------------------------------------
+
+    Safety = rowMeans(
+      cbind(
+        as.numeric(hpa_safety),
+        as.numeric(tabula_safety)
+      ),
+      na.rm = TRUE
+    ),
+
+    # --------------------------------------------------------
+    # ObjectiveScore: RRA_Rank column.
+    # NOTE: this is a RANK, not a score — 1 = best gene.
+    # So LOWER ObjectiveScore is better, and everywhere it is
+    # used for ranking we sort ASCENDING (not desc()).
+    # --------------------------------------------------------
+
+    ObjectiveScore = as.numeric(RRA_Rank),
+
+    # --------------------------------------------------------
+    # Convert to percentages
+    # --------------------------------------------------------
+
+    efficacy_pct = Efficacy * 100,
+
+    safety_pct = Safety * 100,
+
+    # --------------------------------------------------------
+    # Gene label
+    # --------------------------------------------------------
+
+    candidate = as.character(Gene)
+
+  ) %>%
+
+  filter(
+    !is.na(safety_pct),
+    !is.na(efficacy_pct),
+    !is.na(ObjectiveScore),
+    !is.na(candidate),
+    candidate != ""
+  )
+
+
+# ============================================================
+# 8. PRINT DATA CHECK
+# ============================================================
+
+cat("\n")
+cat("Single-gene data prepared:\n")
+cat("--------------------------------------------\n")
+
+print(
+  plot_df %>%
+    select(
+      Gene,
+      Efficacy,
+      Safety,
+      ObjectiveScore,
+      efficacy_pct,
+      safety_pct
+    ) %>%
+    head(20)
+)
+
+cat(
+  "--------------------------------------------\n"
+)
+
+
+# ============================================================
+# 9. TOP N
+#
+# Top `top_n` by ObjectiveScore (RRA_Rank, 1 = best) is used ONLY
+# to define the highlighted rectangle (thresholds). It is NOT
+# the final set that gets plotted/labeled on the right panel.
+# Sorted ASCENDING since lower Final_Rank/RRA_Rank = better gene.
+# ============================================================
+
+top20 <- plot_df %>%
+
+  arrange(
+    ObjectiveScore
+  ) %>%
+
+  slice_head(n = top_n)
+
+
+# ============================================================
+# 10. PRINT TOP N (for reference only)
+# ============================================================
+
+cat("\n")
+cat(paste0("TOP ", top_n, " SINGLE-GENE CANDIDATES (used to define rectangle)\n"))
+cat("--------------------------------------------\n")
+
+print(
+  top20 %>%
+    select(
+      Gene,
+      Efficacy,
+      Safety,
+      ObjectiveScore,
+      efficacy_pct,
+      safety_pct
+    )
+)
+
+cat(
+  "--------------------------------------------\n"
+)
+
+
+# ============================================================
+# 11. THRESHOLDS
+#
+# Vertical:
+# Minimum safety among Top N
+#
+# Horizontal:
+# Minimum efficacy among Top N
+# ============================================================
+
+rank20_safety <- min(
+  top20$safety_pct,
+  na.rm = TRUE
+)
+
+min_top20_efficacy <- min(
+  top20$efficacy_pct,
+  na.rm = TRUE
+)
+
+cat(
+  paste0("Minimum Top-", top_n, " safety:"),
+  round(
+    rank20_safety,
+    2
+  ),
+  "%\n"
+)
+
+cat(
+  paste0("Minimum Top-", top_n, " efficacy:"),
+  round(
+    min_top20_efficacy,
+    2
+  ),
+  "%\n"
+)
+
+
+# ============================================================
+# 12. ZOOM / HIGHLIGHT RECTANGLE
+# ============================================================
+
+zoom_x_min <- max(
+  0,
+  floor(
+    min(
+      c(
+        top20$safety_pct,
+        rank20_safety
+      ),
+      na.rm = TRUE
+    )
+  ) - 1
+)
+
+zoom_x_max <- min(
+  100,
+  ceiling(
+    max(
+      c(
+        top20$safety_pct,
+        rank20_safety
+      ),
+      na.rm = TRUE
+    )
+  ) + 1
+)
+
+zoom_y_min <- max(
+  0,
+  floor(
+    min(
+      c(
+        top20$efficacy_pct,
+        min_top20_efficacy
+      ),
+      na.rm = TRUE
+    )
+  ) - 1
+)
+
+zoom_y_max <- min(
+  100,
+  ceiling(
+    max(
+      top20$efficacy_pct,
+      na.rm = TRUE
+    )
+  ) + 1
+)
+
+cat("\n")
+cat("Zoom / highlight rectangle:\n")
+
+cat(
+  "X:",
+  zoom_x_min,
+  "-",
+  zoom_x_max,
+  "%\n"
+)
+
+cat(
+  "Y:",
+  zoom_y_min,
+  "-",
+  zoom_y_max,
+  "%\n"
+)
+
+
+# ============================================================
+# 13. GENES INSIDE THE HIGHLIGHTED RECTANGLE
+#
+# This is the KEY behaviour: instead of only using the top N,
+# we pull EVERY gene whose point falls inside the rectangle
+# drawn on the left panel. These are the genes that get
+# colored diamonds + labels on BOTH panels.
+# ============================================================
+
+highlighted <- plot_df %>%
+
+  filter(
+    safety_pct   >= zoom_x_min,
+    safety_pct   <= zoom_x_max,
+    efficacy_pct >= zoom_y_min,
+    efficacy_pct <= zoom_y_max
+  ) %>%
+
+  arrange(
+    ObjectiveScore
+  ) %>%
+
+  mutate(
+    label = candidate,
+
+    # --------------------------------------------------------
+    # Rank by ObjectiveScore (RRA_Rank, 1 = best). Data is
+    # already arranged ascending by ObjectiveScore above, so
+    # row_number() gives the correct rank directly.
+    # --------------------------------------------------------
+
+    rank = row_number()
+  )
+
+n_highlighted <- nrow(highlighted)
+
+cat("\n")
+cat("Genes inside highlighted rectangle:", n_highlighted, "\n")
+cat("--------------------------------------------\n")
+
+print(
+  highlighted %>%
+    select(
+      rank,
+      Gene,
+      Efficacy,
+      Safety,
+      ObjectiveScore,
+      efficacy_pct,
+      safety_pct
+    )
+)
+
+cat(
+  "--------------------------------------------\n"
+)
+
+
+# ============================================================
+# 14. COLOR PALETTE FOR HIGHLIGHTED GENES
+#
+# Colorblind-friendly but still bright/vibrant. Built from the
+# Okabe-Ito colorblind-safe hue set (orange, sky blue, bluish
+# green, yellow, blue, vermillion, reddish purple), then
+# extended with additional hues + lightness variants chosen so
+# that genes remain distinguishable by BOTH hue and brightness
+# — this keeps the palette usable for deuteranopia,
+# protanopia, and tritanopia, not just standard vision. If more
+# than 21 genes fall inside the rectangle, the palette is
+# smoothly extended with colorRampPalette so every gene still
+# gets a unique, consistent color across both panels.
+# ============================================================
+
+base_palette <- c(
+  "#E69F00",  # orange            (Okabe-Ito)
+  "#0072B2",  # blue              (Okabe-Ito)
+  "#009E73",  # bluish green      (Okabe-Ito)
+  "#CC79A7",  # reddish purple    (Okabe-Ito)
+  "#F0E442",  # yellow            (Okabe-Ito)
+  "#56B4E9",  # sky blue          (Okabe-Ito)
+  "#D55E00",  # vermillion        (Okabe-Ito)
+
+  "#7B2CBF",  # vivid violet
+  "#B37400",  # deep amber
+  "#00A896",  # vivid teal
+  "#E63946",  # vivid coral red
+  "#3A86FF",  # vivid azure
+  "#8C4A6B",  # deep magenta
+  "#FFB400",  # golden yellow
+  "#1D3557",  # deep navy
+  "#43AA8B",  # sea green
+  "#9D4EDD",  # bright purple
+  "#F4A261",  # warm sand orange
+  "#118AB2",  # cerulean blue
+  "#6A994E",  # olive green
+  "#FF6B6B"   # bright coral
+)
+
+if (n_highlighted <= length(base_palette)) {
+
+  highlight_colors <- base_palette[seq_len(n_highlighted)]
+
+} else {
+
+  highlight_colors <- colorRampPalette(base_palette)(n_highlighted)
+}
+
+highlighted <- highlighted %>%
+
+  mutate(
+    color = highlight_colors
+  )
+
+
+# ============================================================
+# 15. LEFT PLOT — ALL SINGLE GENES
+# ============================================================
+
+p_left <- ggplot() +
+
+  # ----------------------------------------------------------
+  # Zoom / highlight rectangle (drawn first so points sit
+  # on top of it, not behind it)
+  # ----------------------------------------------------------
+
+  annotate(
+
+    "rect",
+
+    xmin = zoom_x_min,
+
+    xmax = zoom_x_max,
+
+    ymin = zoom_y_min,
+
+    ymax = zoom_y_max,
+
+    fill = "#EDEEF3",
+
+    alpha = 0.9,
+
+    color = "black",
+
+    linetype = "dashed",
+
+    linewidth = 1.0
+  ) +
+
+  # ----------------------------------------------------------
+  # Vertical threshold
+  # ----------------------------------------------------------
+
+  geom_vline(
+
+    xintercept = rank20_safety,
+
+    linetype = "dashed",
+
+    linewidth = 0.8,
+
+    color = "grey30"
+  ) +
+
+  # ----------------------------------------------------------
+  # Horizontal threshold
+  # ----------------------------------------------------------
+
+  geom_hline(
+
+    yintercept = min_top20_efficacy,
+
+    linetype = "dashed",
+
+    linewidth = 0.8,
+
+    color = "grey30"
+  ) +
+
+  # ----------------------------------------------------------
+  # Background genes (outside the highlighted rectangle)
+  # ----------------------------------------------------------
+
+  geom_point(
+
+    data = plot_df %>%
+      filter(
+        !Gene %in% highlighted$Gene
+      ),
+
+    aes(
+      x = safety_pct,
+      y = efficacy_pct
+    ),
+
+    color = "grey60",
+
+    alpha = 0.55,
+
+    size = 2.6
+  ) +
+
+  # ----------------------------------------------------------
+  # Genes inside the highlighted rectangle
+  # ----------------------------------------------------------
+
+  geom_point(
+
+    data = highlighted,
+
+    aes(
+      x = safety_pct,
+      y = efficacy_pct,
+      fill = label
+    ),
+
+    shape = 23,
+
+    color = "black",
+
+    size = 4.2,
+
+    stroke = 0.6
+  ) +
+
+  # ----------------------------------------------------------
+  # Colors
+  # ----------------------------------------------------------
+
+  scale_fill_manual(
+
+    values = setNames(
+      highlighted$color,
+      highlighted$label
+    ),
+
+    guide = "none"
+  ) +
+
+  # ----------------------------------------------------------
+  # X AXIS
+  # ----------------------------------------------------------
+
+  scale_x_continuous(
+
+    labels = function(x) {
+      paste0(
+        x,
+        "%"
+      )
+    },
+
+    expand = expansion(
+      mult = 0.03
+    )
+  ) +
+
+  # ----------------------------------------------------------
+  # Y AXIS
+  # ----------------------------------------------------------
+
+  scale_y_continuous(
+
+    labels = function(y) {
+      paste0(
+        y,
+        "%"
+      )
+    },
+
+    expand = expansion(
+      mult = 0.03
+    )
+  ) +
+
+  # ----------------------------------------------------------
+  # LABELS
+  # ----------------------------------------------------------
+
+  labs(
+
+    title = "All single-gene candidates",
+
+    x = "Safety",
+
+    y = "Efficacy"
+  ) +
+
+  # ----------------------------------------------------------
+  # THEME
+  # ----------------------------------------------------------
+
+  theme_classic(
+
+    base_size = 18,
+
+    base_family = "Times New Roman"
+
+  ) +
+
+  theme(
+
+    text = element_text(
+      family = "Times New Roman",
+      color = "black"
+    ),
+
+    plot.title = element_text(
+      family = "Times New Roman",
+      size = 23,
+      face = "bold",
+      color = "black",
+      hjust = 0.5
+    ),
+
+    axis.title.x = element_text(
+      family = "Times New Roman",
+      size = 23,
+      face = "bold",
+      color = "black"
+    ),
+
+    axis.title.y = element_text(
+      family = "Times New Roman",
+      size = 23,
+      face = "bold",
+      color = "black"
+    ),
+
+    axis.text.x = element_text(
+      family = "Times New Roman",
+      size = 18,
+      face = "bold",
+      color = "black"
+    ),
+
+    axis.text.y = element_text(
+      family = "Times New Roman",
+      size = 18,
+      face = "bold",
+      color = "black"
+    ),
+
+    axis.line = element_line(
+      linewidth = 1,
+      color = "black"
+    ),
+
+    panel.border = element_rect(
+      color = "black",
+      fill = NA,
+      linewidth = 1
+    ),
+
+    panel.background = element_rect(
+      fill = "#FFFFFF",
+      color = NA
+    ),
+
+    panel.grid = element_blank(),
+
+    plot.background = element_rect(
+      fill = "#FFFFFF",
+      color = NA
+    ),
+
+    plot.margin = margin(
+      10,
+      6,
+      10,
+      10
+    ),
+
+    aspect.ratio = 1
+  )
+
+
+# ============================================================
+# 16. RIGHT PLOT — ZOOM INTO RECTANGLE
+#
+# Every gene inside the rectangle is plotted AND labeled here,
+# not just the top N.
+# ============================================================
+
+p_right <- ggplot(
+
+  highlighted,
+
+  aes(
+    x = safety_pct,
+    y = efficacy_pct
+  )
+) +
+
+  # ----------------------------------------------------------
+  # Vertical threshold
+  # ----------------------------------------------------------
+
+  geom_vline(
+
+    xintercept = rank20_safety,
+
+    linetype = "dashed",
+
+    linewidth = 0.8,
+
+    color = "grey30"
+  ) +
+
+  # ----------------------------------------------------------
+  # Horizontal threshold
+  # ----------------------------------------------------------
+
+  geom_hline(
+
+    yintercept = min_top20_efficacy,
+
+    linetype = "dashed",
+
+    linewidth = 0.8,
+
+    color = "grey30"
+  ) +
+
+  # ----------------------------------------------------------
+  # Points
+  # ----------------------------------------------------------
+
+  geom_point(
+
+    aes(
+      fill = label
+    ),
+
+    shape = 23,
+
+    color = "black",
+
+    size = 4.8,
+
+    stroke = 0.7
+  ) +
+
+  # ----------------------------------------------------------
+  # GENE LABELS — ALL genes inside the rectangle
+  #
+  # Plain white labels with just the gene name. Rank and
+  # color are shown separately in the "Gene Ranks" legend
+  # panel, so the plot stays uncluttered.
+  # ----------------------------------------------------------
+
+  geom_label_repel(
+
+    aes(
+      label = label
+    ),
+
+    color = "black",
+
+    fill = "white",
+
+    family = "Times New Roman",
+
+    fontface = "bold",
+
+    size = 6,
+
+    label.size = 0.6,
+
+    segment.color = "grey30",
+
+    segment.size = 0.5,
+
+    min.segment.length = 0,
+
+    box.padding = 0.5,
+
+    point.padding = 0.3,
+
+    max.overlaps = Inf,
+
+    seed = 42
+  ) +
+
+  # ----------------------------------------------------------
+  # Fill colors
+  # ----------------------------------------------------------
+
+  scale_fill_manual(
+
+    values = setNames(
+      highlighted$color,
+      highlighted$label
+    ),
+
+    guide = "none"
+  ) +
+
+  # ----------------------------------------------------------
+  # X AXIS
+  # ----------------------------------------------------------
+
+  scale_x_continuous(
+
+    limits = c(
+      zoom_x_min,
+      zoom_x_max
+    ),
+
+    labels = function(x) {
+      paste0(
+        x,
+        "%"
+      )
+    },
+
+    expand = expansion(
+      mult = 0.08
+    )
+  ) +
+
+  # ----------------------------------------------------------
+  # Y AXIS
+  # ----------------------------------------------------------
+
+  scale_y_continuous(
+
+    limits = c(
+      zoom_y_min,
+      zoom_y_max
+    ),
+
+    breaks = seq(
+      ceiling(zoom_y_min / 2) * 2,
+      floor(zoom_y_max / 2) * 2,
+      by = 2
+    ),
+
+    labels = function(y) {
+      paste0(
+        y,
+        "%"
+      )
+    },
+
+    expand = expansion(
+      mult = 0.08
+    )
+  ) +
+
+  # ----------------------------------------------------------
+  # LABELS
+  # ----------------------------------------------------------
+
+  labs(
+
+    title = paste0(
+      "Candidates in highlighted region"
+    ),
+
+    x = "Safety",
+
+    y = "Efficacy"
+  ) +
+
+  # ----------------------------------------------------------
+  # THEME
+  # ----------------------------------------------------------
+
+  theme_classic(
+
+    base_size = 20,
+
+    base_family = "Times New Roman"
+
+  ) +
+
+  theme(
+
+    text = element_text(
+      family = "Times New Roman",
+      color = "black"
+    ),
+
+    plot.title = element_text(
+      family = "Times New Roman",
+      size = 23,
+      face = "bold",
+      color = "black",
+      hjust = 0.5
+    ),
+
+    axis.title.x = element_text(
+      family = "Times New Roman",
+      size = 23,
+      face = "bold",
+      color = "black"
+    ),
+
+    axis.title.y = element_text(
+      family = "Times New Roman",
+      size = 23,
+      face = "bold",
+      color = "black"
+    ),
+
+    axis.text.x = element_text(
+      family = "Times New Roman",
+      size = 18,
+      face = "bold",
+      color = "black"
+    ),
+
+    axis.text.y = element_text(
+      family = "Times New Roman",
+      size = 18,
+      face = "bold",
+      color = "black"
+    ),
+
+    axis.line = element_line(
+      linewidth = 1,
+      color = "black"
+    ),
+
+    panel.border = element_rect(
+      color = "black",
+      fill = NA,
+      linewidth = 1
+    ),
+
+    panel.background = element_rect(
+      fill = "#EDEEF3",
+      color = NA
+    ),
+
+    panel.grid = element_blank(),
+
+    plot.background = element_rect(
+      fill = "#FFFFFF",
+      color = NA
+    ),
+
+    plot.margin = margin(
+      10,
+      4,
+      10,
+      6
+    ),
+
+    aspect.ratio = 1
+  )
+
+
+# ============================================================
+# 17. RANK / COLOR LEGEND PANEL
+#
+# A standalone panel listing every highlighted gene as a
+# color swatch next to its name (ordered by rank), so the
+# color <-> gene mapping is explicit without cluttering the
+# scatter plot with rank numbers.
+# ============================================================
+
+legend_df <- highlighted %>%
+
+  arrange(
+    rank
+  ) %>%
+
+  mutate(
+    y_pos = -rank
+  )
+
+p_legend <- ggplot(
+
+  legend_df,
+
+  aes(
+    x = 0,
+    y = y_pos
+  )
+) +
+
+  geom_point(
+
+    aes(
+      fill = label
+    ),
+
+    shape = 22,
+
+    color = "black",
+
+    size = 5.5,
+
+    stroke = 0.5
+  ) +
+
+  geom_text(
+
+    aes(
+      label = paste0(
+        rank,
+        ".  ",
+        label
+      )
+    ),
+
+    hjust = 0,
+
+    nudge_x = 0.18,
+
+    family = "Times New Roman",
+
+    fontface = "bold",
+
+    size = 4.2,
+
+    color = "black"
+  ) +
+
+  scale_fill_manual(
+
+    values = setNames(
+      legend_df$color,
+      legend_df$label
+    ),
+
+    guide = "none"
+  ) +
+
+  xlim(
+    -0.1,
+    2.3
+  ) +
+
+  labs(
+    title = "Gene Ranks"
+  ) +
+
+  theme_void(
+
+    base_family = "Times New Roman"
+
+  ) +
+
+  theme(
+
+    plot.title = element_text(
+      family = "Times New Roman",
+      size = 16,
+      face = "bold",
+      color = "black",
+      hjust = 0
+    ),
+
+    plot.title.position = "plot",
+
+    plot.margin = margin(
+      10,
+      4,
+      10,
+      0
+    )
+  )
+
+
+# ============================================================
+# 18. COMBINE INTO A SINGLE FIGURE
+# ============================================================
+
+p_combined <- cowplot::plot_grid(
+
+  p_left,
+
+  p_right,
+
+  p_legend,
+
+  ncol = 3,
+
+  align = "h",
+
+  axis = "tb",
+
+  rel_widths = c(1, 1, 0.26)
+)
+
+
+# ============================================================
+# 19. SAVE COMBINED PLOT
+# ============================================================
+
+cat("\n")
+cat("Saving COMBINED plot...\n")
+
+ggsave(
+
+  filename = combined_file,
+
+  plot = p_combined,
+
+  width = 16.5,
+
+  height = 8,
+
+  units = "in",
+
+  dpi = 800,
+
+  bg = "#FFFFFF"
+)
+
+cat(
+  "COMBINED plot saved successfully:\n",
+  combined_file,
+  "\n"
+)
+
+
+# ============================================================
+# 20. VERIFY OUTPUT FILE
+# ============================================================
+
+cat("\n")
+cat("============================================================\n")
+cat("OUTPUT VERIFICATION\n")
+cat("============================================================\n")
+
+if (file.exists(combined_file)) {
+
+  combined_size <- file.info(combined_file)$size / (1024^2)
+
+  cat(
+    "COMBINED plot: SUCCESS\n",
+    "File: ",
+    combined_file,
+    "\n",
+    "Size: ",
+    round(combined_size, 2),
+    " MB\n\n",
+    sep = ""
+  )
+
+} else {
+
+  cat(
+    "COMBINED plot: FAILED\n\n"
+  )
+
+  quit(status = 1)
+}
+
+
+# ============================================================
+# 21. FINAL REPORT
+# ============================================================
+
+cat("============================================================\n")
+cat("SINGLE-GENE ANALYSIS COMPLETED\n")
+cat("============================================================\n")
+
+cat(
+  "Input:\n",
+  input_file,
+  "\n\n"
+)
+
+cat(
+  "Number of candidates:",
+  nrow(plot_df),
+  "\n\n"
+)
+
+cat(
+  "Genes inside highlighted rectangle (labeled on right panel):",
+  n_highlighted,
+  "\n"
+)
+
+print(
+  highlighted %>%
+    select(
+      rank,
+      Gene,
+      Efficacy,
+      Safety,
+      ObjectiveScore
+    )
+)
+
+cat("\n")
+
+cat(
+  paste0("Minimum Top-", top_n, " safety (threshold):"),
+  round(rank20_safety, 2),
+  "%\n"
+)
+
+cat(
+  paste0("Minimum Top-", top_n, " efficacy (threshold):"),
+  round(min_top20_efficacy, 2),
+  "%\n\n"
+)
+
+cat(
+  "High-resolution output file:\n\n"
+)
+
+cat(
+  combined_file,
+  "\n\n"
+)
+
+cat(
+  "Resolution: 800 DPI\n"
+)
+
+cat(
+  "Dimensions: 16.5 x 8 inches (all genes | zoom | gene ranks)\n"
+)
+
+cat(
+  "Format: PNG\n"
+)
+
+cat("============================================================\n")
+"""
+
+
+def _plot_single_gene_rra_r(rra_csv_path: str, output_dir: str, top_n: int = 20) -> None:
     """
-    Headless-safe by default — mirrors the previous hard-coded
-    `matplotlib.use("Agg")` so unattended/HPC script runs never try (and
-    fail) to open a GUI window. Inside a Jupyter kernel, the backend is
-    left alone instead, so the inline/widget backend already configured
-    there is free to actually display the figure.
+    Render the single-gene RRA "highlighted region" figure natively in R.
 
-    Returns True if running inside a Jupyter kernel (safe to call
-    plt.show()), False otherwise.
+    Fills _SINGLE_GENE_RRA_PLOT_R_TEMPLATE's three placeholders
+    (@@INPUT_CSV@@, @@OUTPUT_DIR@@, @@TOP_N@@) with the actual values for
+    this run, writes the result to a driver script under output_dir, and
+    launches it as an Rscript subprocess — the same subprocess pattern
+    _run_rra_via_r() already uses for RobustRankAggreg, reused here via
+    _find_rscript()/_find_r_home()/_build_r_subprocess_env().
+
+    The R script itself defines the highlighted-region logic: the top
+    `top_n` genes by RRA_Rank (default 20) set a safety/efficacy rectangle,
+    and every gene whose point falls inside that rectangle — not just
+    those top `top_n` — gets plotted, labelled (via ggrepel) and listed in
+    a "Gene Ranks" legend panel, combined with cowplot.
+
+    Parameters
+    ----------
+    rra_csv_path : str
+        Path to the RRA-ranked CSV — exactly what
+        _robust_rank_aggregation_single_gene() already writes to
+        final_single_gene_candidates_RRA_HPA_Tabula.csv. Must contain the
+        columns Gene, hpa_efficacy, hpa_safety, tabula_safety, RRA_Rank.
+    output_dir : str
+        Directory the figure is written into. The R script creates a
+        SCATTER_PLOTS_FIGURE3 subfolder here.
+    top_n : int
+        Number of top RRA_Rank genes used to define the highlighted
+        rectangle (default 20).
     """
-    import matplotlib
+    import subprocess
+
+    rscript_path = _find_rscript()
+    r_home       = _find_r_home()
+    env          = _build_r_subprocess_env(r_home)
+
+    plot_dir = os.path.join(output_dir, "rra_plot_rscript")
+    os.makedirs(plot_dir, exist_ok=True)
+    r_script_path = os.path.join(plot_dir, "plot_single_gene_rra.R")
+
+    r_code = (
+        _SINGLE_GENE_RRA_PLOT_R_TEMPLATE
+        .replace("@@INPUT_CSV@@", os.path.abspath(rra_csv_path).replace("\\", "/"))
+        .replace("@@OUTPUT_DIR@@", os.path.abspath(output_dir).replace("\\", "/"))
+        .replace("@@TOP_N@@", str(int(top_n)))
+    )
+    with open(r_script_path, "w") as f:
+        f.write(r_code)
+
+    print(f"  Rscript:                  {rscript_path}")
+    print(f"  R home:                   {r_home}")
+    print(f"  Plot driver script:       {r_script_path}")
+    print("  Launching Rscript subprocess for the single-gene RRA plot ...")
 
     try:
-        from IPython import get_ipython
-        ip = get_ipython()
-        in_notebook = ip is not None and "IPKernelApp" in ip.config
-    except Exception:
-        in_notebook = False
-
-    if not in_notebook:
-        matplotlib.use("Agg")
-
-    return in_notebook
-
-
-def _resolve_serif_font() -> str:
-    """Times New Roman, matching the reference R script, when it's actually
-    installed on this machine; falls back to a metrically-similar or
-    generic serif font otherwise (Times New Roman is a Windows/Office font
-    and is often absent on Linux render hosts, e.g. HPC nodes)."""
-    import matplotlib.font_manager as fm
-    preferred = ["Times New Roman", "Liberation Serif", "DejaVu Serif"]
-    available = {f.name for f in fm.fontManager.ttflist}
-    for name in preferred:
-        if name in available:
-            return name
-    return "serif"
-
-
-def _prep_rra_plot_df_single_gene(df_ranked: pd.DataFrame) -> pd.DataFrame:
-    """Shared prep for the RRA plot: average safety across atlases and a
-    display label (just the gene name) per candidate."""
-    df = df_ranked.dropna(subset=["hpa_safety", "tabula_safety", "hpa_efficacy"]).copy()
-    df["avg_safety"] = (df["hpa_safety"] + df["tabula_safety"]) / 2.0
-    df["efficacy"]   = df["hpa_efficacy"]  # atlas-invariant by construction
-    df["candidate"]  = df["Gene"]
-    return df
-
-
-def _nice_step(data_range: float, target_ticks: int = 6) -> float:
-    """Pick a 'nice' round tick increment (1/2/2.5/5/10 x 10^n) for an
-    axis span of this size, so tick marks land on clean, evenly-spaced
-    values instead of matplotlib's default (sometimes irregular)
-    auto-ticks."""
-    import math
-
-    if data_range <= 0:
-        return 1.0
-    raw_step  = data_range / target_ticks
-    magnitude = 10 ** math.floor(math.log10(raw_step))
-    residual  = raw_step / magnitude
-    if residual <= 1:
-        nice = 1
-    elif residual <= 2:
-        nice = 2
-    elif residual <= 2.5:
-        nice = 2.5
-    elif residual <= 5:
-        nice = 5
-    else:
-        nice = 10
-    return nice * magnitude
-
-
-def _style_scatter_axes(ax, title, xlabel, ylabel, x_step=None, y_step=None):
-    """
-    Shared panel styling: a full black box border on all four sides, no
-    panel grid, bold titles, and evenly spaced ('nice') tick marks on both
-    axes. Must be called AFTER the panel's final xlim/ylim are set, since
-    the default tick step is computed from the current axis range.
-    x_step/y_step let a caller pin an explicit tick increment (used on the
-    right panel's efficacy axis, matching the reference script's
-    hard-coded `by=2` breaks) instead of the auto "nice" one.
-    """
-    from matplotlib.ticker import FuncFormatter, MultipleLocator
-
-    ax.set_title(title, fontsize=16, fontweight="bold", pad=12, color="black")
-    ax.set_xlabel(xlabel, fontsize=13, fontweight="bold", color="black")
-    ax.set_ylabel(ylabel, fontsize=13, fontweight="bold", color="black")
-    ax.tick_params(labelsize=11, colors="black")
-    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.0f}%"))
-    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.0f}%"))
-
-    for spine in ax.spines.values():
-        spine.set_visible(True)
-        spine.set_color("black")
-        spine.set_linewidth(1.2)
-
-    x_lo, x_hi = ax.get_xlim()
-    y_lo, y_hi = ax.get_ylim()
-    ax.xaxis.set_major_locator(MultipleLocator(x_step or _nice_step(x_hi - x_lo)))
-    ax.yaxis.set_major_locator(MultipleLocator(y_step or _nice_step(y_hi - y_lo)))
-
-
-def _place_labels_with_leaders(ax, fig, xs, ys, labels, offset_frac: float = 0.035,
-                                max_iter: int = 400):
-    """
-    White-boxed, black-text, black-bordered labels next to each point,
-    connected back to the point with a thin grey leader line whenever the
-    label ends up more than a small distance away from it — matching
-    ggrepel's geom_label_repel style in the reference R script
-    (label fill="white", color="black", segment.color="grey30",
-    min.segment.length effectively 0). Prefers the optional `adjustText`
-    package (pip install adjustText) for genuine collision-aware
-    repulsion when it's installed; otherwise falls back to a
-    dependency-free local nudge pass that separates overlapping label
-    boxes (and label-over-point overlaps) using their real rendered
-    extents.
-    """
-    x_lo, x_hi = ax.get_xlim()
-    y_lo, y_hi = ax.get_ylim()
-    dx0 = offset_frac * (x_hi - x_lo)
-    dy0 = offset_frac * (y_hi - y_lo)
-    leader_thresh = 0.6 * min(dx0, dy0)
-
-    texts = []
-    for x, y, label in zip(xs, ys, labels):
-        t = ax.text(
-            x + dx0, y + dy0, label, fontsize=10.5, fontweight="bold",
-            color="black", ha="left", va="bottom", zorder=7,
-            bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
-                      edgecolor="black", linewidth=0.9),
+        proc = subprocess.run(
+            [rscript_path, r_script_path],
+            env=env,
+            capture_output=True,
+            text=True,
         )
-        texts.append(t)
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"Failed to launch Rscript subprocess at {rscript_path}: {exc}"
+        ) from exc
 
-    fig.canvas.draw()
+    if proc.stdout:
+        print(proc.stdout.strip())
 
-    try:
-        from adjustText import adjust_text
-        adjust_text(texts, x=list(xs), y=list(ys), ax=ax)
-    except ImportError:
-        renderer = fig.canvas.get_renderer()
-        marker_half_px = 9
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "Rscript subprocess for the single-gene RRA plot failed "
+            f"(exit code {proc.returncode}).\n"
+            f"--- Rscript stderr ---\n{proc.stderr}\n"
+            "Make sure ggplot2, dplyr, cowplot and ggrepel are installed "
+            f"in the R at {r_home}, e.g.:\n"
+            "  conda install -c conda-forge r-ggplot2 r-dplyr r-cowplot r-ggrepel -y"
+        )
 
-        def _point_box(px, py):
-            from matplotlib.transforms import Bbox
-            dx_, dy_ = ax.transData.transform((px, py))
-            return Bbox.from_extents(dx_ - marker_half_px, dy_ - marker_half_px,
-                                      dx_ + marker_half_px, dy_ + marker_half_px)
+    if proc.stderr:
+        # R (and library()) often write benign package-load / startup
+        # messages to stderr even on success — log, don't fail on these.
+        logger.info(f"Rscript stderr (non-fatal):\n{proc.stderr.strip()}")
 
-        point_boxes = [_point_box(px, py) for px, py in zip(xs, ys)]
-
-        for _ in range(max_iter):
-            moved = False
-            boxes = [t.get_window_extent(renderer) for t in texts]
-
-            for i in range(len(texts)):
-                for j in range(i + 1, len(texts)):
-                    if boxes[i].overlaps(boxes[j]):
-                        moved = True
-                        cxi = boxes[i].x0 + boxes[i].width / 2
-                        cyi = boxes[i].y0 + boxes[i].height / 2
-                        cxj = boxes[j].x0 + boxes[j].width / 2
-                        cyj = boxes[j].y0 + boxes[j].height / 2
-                        ddx, ddy = cxj - cxi, cyj - cyi
-                        dist = max((ddx ** 2 + ddy ** 2) ** 0.5, 1e-6)
-                        ux, uy = ddx / dist, ddy / dist
-                        for t_, sign in ((texts[i], -1), (texts[j], 1)):
-                            xt, yt = t_.get_position()
-                            disp = ax.transData.transform((xt, yt))
-                            disp = (disp[0] + sign * ux * 2.5, disp[1] + sign * uy * 2.5)
-                            t_.set_position(ax.transData.inverted().transform(disp))
-
-            boxes = [t.get_window_extent(renderer) for t in texts]
-            for i in range(len(texts)):
-                for pbox, (px, py) in zip(point_boxes, zip(xs, ys)):
-                    if boxes[i].overlaps(pbox):
-                        moved = True
-                        cxi = boxes[i].x0 + boxes[i].width / 2
-                        cyi = boxes[i].y0 + boxes[i].height / 2
-                        pdx, pdy = ax.transData.transform((px, py))
-                        ddx, ddy = cxi - pdx, cyi - pdy
-                        dist = max((ddx ** 2 + ddy ** 2) ** 0.5, 1e-6)
-                        ux, uy = ddx / dist, ddy / dist
-                        xt, yt = texts[i].get_position()
-                        disp = ax.transData.transform((xt, yt))
-                        disp = (disp[0] + ux * 2.5, disp[1] + uy * 2.5)
-                        texts[i].set_position(ax.transData.inverted().transform(disp))
-                        boxes[i] = texts[i].get_window_extent(renderer)
-
-            if not moved:
-                break
-            fig.canvas.draw()
-            renderer = fig.canvas.get_renderer()
-
-    fig.canvas.draw()
-    for t, px, py in zip(texts, xs, ys):
-        tx, ty = t.get_position()
-        if ((tx - px) ** 2 + (ty - py) ** 2) ** 0.5 > leader_thresh:
-            ax.annotate(
-                "", xy=(px, py), xytext=(tx, ty),
-                arrowprops=dict(arrowstyle="-", color="#4D4D4D", linewidth=0.8),
-                zorder=4,
-            )
-
-    return texts
-
-
-def _dual_panel_rra_figure(
-    plot_df: pd.DataFrame,
-    highlighted: pd.DataFrame,
-    threshold_x: float,
-    threshold_y: float,
-    x_lo: float,
-    x_hi: float,
-    y_lo: float,
-    y_hi: float,
-    out_stub: str,
-    output_dir: str,
-    left_title: str,
-    right_title: str,
-):
-    """
-    Three-panel figure matching the reference R/ggplot2 + ggrepel + cowplot
-    script: LEFT = every candidate (grey background) with the highlighted
-    genes as coloured diamonds and a dashed-border shaded rectangle marking
-    the highlighted region; RIGHT = zoomed into that rectangle, every
-    highlighted gene labelled with a white leader-lined box, on a light
-    grey panel background; a third narrow LEGEND panel lists every
-    highlighted gene as a numbered, colour-swatched row ("Gene Ranks"),
-    ordered by RRA_Rank (best first).
-    """
-    in_notebook = _configure_matplotlib_backend()
-    import matplotlib.pyplot as plt
-
-    serif = _resolve_serif_font()
-    plt.rcParams.update({
-        "font.family":      serif,
-        "figure.facecolor": "white",
-        "axes.facecolor":   "white",
-    })
-
-    n_hi = len(highlighted)
-    fig = plt.figure(figsize=(17, 8.2))
-    gs = fig.add_gridspec(1, 3, width_ratios=[1, 1, 0.34], wspace=0.35)
-    ax_l   = fig.add_subplot(gs[0, 0])
-    ax_r   = fig.add_subplot(gs[0, 1])
-    ax_leg = fig.add_subplot(gs[0, 2])
-
-    xs_all = (plot_df["avg_safety"] * 100).to_numpy()
-    ys_all = (plot_df["efficacy"] * 100).to_numpy()
-    xs_hi  = (highlighted["avg_safety"] * 100).to_numpy()
-    ys_hi  = (highlighted["efficacy"] * 100).to_numpy()
-    colors = highlighted["color"].tolist()
-
-    hi_genes = set(highlighted["Gene"])
-    bg_mask  = ~plot_df["Gene"].isin(hi_genes)
-    xs_bg    = (plot_df.loc[bg_mask, "avg_safety"] * 100).to_numpy()
-    ys_bg    = (plot_df.loc[bg_mask, "efficacy"] * 100).to_numpy()
-
-    # ---- left panel: full candidate universe, with highlighted rectangle --
-    ax_l.scatter(xs_bg, ys_bg, s=24, color="#999999", alpha=0.55,
-                 linewidths=0, zorder=2)
-    ax_l.add_patch(plt.Rectangle(
-        (x_lo, y_lo), max(x_hi - x_lo, 0.5), max(y_hi - y_lo, 0.5),
-        fill=True, facecolor="#EDEEF3", alpha=0.9,
-        edgecolor="black", linestyle="--", linewidth=1.2, zorder=1,
-    ))
-    ax_l.axvline(threshold_x, linestyle="--", linewidth=0.9, color="#4D4D4D", zorder=3)
-    ax_l.axhline(threshold_y, linestyle="--", linewidth=0.9, color="#4D4D4D", zorder=3)
-    ax_l.scatter(xs_hi, ys_hi, s=140, marker="D", c=colors,
-                 edgecolor="black", linewidth=0.7, zorder=5)
-
-    # No fixed axis floor here (matches v1) — both axes auto-scale to the
-    # actual candidate spread rather than being pinned to e.g. 90%/70%.
-    ax_l.margins(0.04)
-    ax_l.set_box_aspect(1)
-    _style_scatter_axes(ax_l, left_title, "Safety", "Efficacy")
-
-    # ---- right panel: zoomed, labelled highlighted candidates -------------
-    ax_r.set_facecolor("#EDEEF3")
-    ax_r.axvline(threshold_x, linestyle="--", linewidth=0.9, color="#4D4D4D", zorder=3)
-    ax_r.axhline(threshold_y, linestyle="--", linewidth=0.9, color="#4D4D4D", zorder=3)
-    ax_r.scatter(xs_hi, ys_hi, s=170, marker="D", c=colors,
-                 edgecolor="black", linewidth=0.8, zorder=5)
-
-    pad_x = 0.08 * max(x_hi - x_lo, 1.0)
-    pad_y = 0.08 * max(y_hi - y_lo, 1.0)
-    ax_r.set_xlim(x_lo - pad_x, x_hi + pad_x)
-    ax_r.set_ylim(y_lo - pad_y, y_hi + pad_y)
-    ax_r.set_box_aspect(1)
-
-    _place_labels_with_leaders(ax_r, fig, xs_hi, ys_hi, highlighted["label"].tolist())
-
-    # y-axis ticks every 2 points, matching the reference script's
-    # hard-coded `seq(..., by=2)` breaks, unless the zoomed range is wide
-    # enough that a 2-point step would be unreadably dense.
-    y_step = 2 if (y_hi - y_lo) <= 40 else None
-    _style_scatter_axes(ax_r, right_title, "Safety", "Efficacy", y_step=y_step)
-
-    # ---- legend panel: "Gene Ranks" ---------------------------------------
-    ax_leg.set_xlim(0, 1)
-    ax_leg.set_ylim(-(n_hi + 1), 1)
-    ax_leg.axis("off")
-    ax_leg.set_title("Gene Ranks", fontsize=15, fontweight="bold", loc="left")
-    for _, row in highlighted.iterrows():
-        y_pos = -row["rank"]
-        ax_leg.scatter([0.04], [y_pos], s=120, marker="s", c=[row["color"]],
-                       edgecolor="black", linewidth=0.6, zorder=3)
-        ax_leg.text(0.12, y_pos, f"{int(row['rank'])}.  {row['label']}",
-                    fontsize=10.5, fontweight="bold", color="black",
-                    va="center", ha="left")
-
-    fig.tight_layout()
-
-    pdf_path = os.path.join(output_dir, f"{out_stub}_claude.pdf")
-    png_path = os.path.join(output_dir, f"{out_stub}_claude.png")
-    fig.savefig(pdf_path, dpi=300, bbox_inches="tight")
-    fig.savefig(png_path, dpi=300, bbox_inches="tight")
-    print(f"RRA plot saved to:\n  {pdf_path}\n  {png_path}")
-
-    if in_notebook:
-        plt.show()
-    plt.close(fig)
-
-
-def _plot_top10_rra_genes(df_ranked: pd.DataFrame, output_dir: str, top_n: int = 20):
-    """
-    Highlighted-region RRA plot (see module docstring "Fix applied (RRA
-    plot v2 ...)" for the full design). The top `top_n` genes by RRA_Rank
-    (default 20, matching the reference script's "Top 20") define a
-    safety/efficacy rectangle, but EVERY gene whose point falls inside
-    that rectangle — not just those top `top_n` — is plotted, labelled and
-    ranked in the output. Function name is kept as `_plot_top10_rra_genes`
-    for call-site compatibility even though the default is now 20 and the
-    highlighted count is no longer fixed.
-    """
-    plot_df = _prep_rra_plot_df_single_gene(df_ranked)
-    if plot_df.empty:
-        print("No RRA-ranked genes available — skipping RRA plot.")
-        return
-
-    top_n_df = plot_df.sort_values("RRA_Rank", ascending=True).head(top_n)
-    if top_n_df.empty:
-        print("No RRA-ranked genes available — skipping RRA plot.")
-        return
-
-    safety_pct   = plot_df["avg_safety"] * 100
-    efficacy_pct = plot_df["efficacy"] * 100
-    top_safety_pct   = top_n_df["avg_safety"] * 100
-    top_efficacy_pct = top_n_df["efficacy"] * 100
-
-    # Thresholds / rectangle: min safety and min efficacy among the top
-    # `top_n` genes, floored/ceiled by 1 point — exactly the reference
-    # script's rank20_safety / min_top20_efficacy + zoom_x/y_min/max logic.
-    threshold_x = float(top_safety_pct.min())
-    threshold_y = float(top_efficacy_pct.min())
-    x_lo = max(0.0, np.floor(top_safety_pct.min()) - 1)
-    x_hi = min(100.0, np.ceil(top_safety_pct.max()) + 1)
-    y_lo = max(0.0, np.floor(top_efficacy_pct.min()) - 1)
-    y_hi = min(100.0, np.ceil(top_efficacy_pct.max()) + 1)
-
-    # ALL genes whose point falls inside the rectangle — not just the
-    # top_n used to define it (mirrors the reference script's
-    # "highlighted" step exactly).
-    in_rect = (
-        (safety_pct >= x_lo) & (safety_pct <= x_hi) &
-        (efficacy_pct >= y_lo) & (efficacy_pct <= y_hi)
-    )
-    highlighted = plot_df[in_rect].sort_values("RRA_Rank", ascending=True).reset_index(drop=True)
-
-    if highlighted.empty:
-        print("No genes fall inside the highlighted region — skipping RRA plot.")
-        return
-
-    highlighted["rank"]  = np.arange(1, len(highlighted) + 1)
-    highlighted["label"] = highlighted["candidate"]
-    highlighted["color"] = _rra_highlight_colors(len(highlighted))
-
-    print(f"\nGenes inside highlighted region (rectangle set by top {top_n}): {len(highlighted)}")
-    print(highlighted[["rank", "Gene", "efficacy", "avg_safety"]].to_string(index=False))
-
-    _dual_panel_rra_figure(
-        plot_df, highlighted,
-        threshold_x=threshold_x, threshold_y=threshold_y,
-        x_lo=x_lo, x_hi=x_hi, y_lo=y_lo, y_hi=y_hi,
-        out_stub="Single_Gene_RRA_Highlighted_Region",
-        output_dir=output_dir,
-        left_title="All single-gene candidates",
-        right_title="Candidates in highlighted region",
-    )
-
+    print("  Single-gene RRA plot rendered via R.")
 
 def _robust_rank_aggregation_single_gene(
     df_results_hpa: pd.DataFrame,
@@ -1382,7 +2417,7 @@ def _robust_rank_aggregation_single_gene(
     print("\nTop 10 RRA-ranked genes:")
     print(strict.head(10).to_string(index=False))
 
-    _plot_top10_rra_genes(strict, output_dir)
+    _plot_single_gene_rra_r(out_csv, output_dir)
 
     return strict
 
