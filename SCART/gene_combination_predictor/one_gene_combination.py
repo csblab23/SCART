@@ -135,6 +135,35 @@ accepts is not applied anywhere in that filter, so candidate efficacy has
 no guaranteed floor here. Hard-coding an efficacy axis minimum could clip
 genuine data, so both axes are left to auto-scale to whatever the actual
 candidates span.
+
+Fix applied (RRA plot v2 — three-panel highlighted-region design)
+--------------------------------------------------------------------
+_plot_top10_rra_genes()/_dual_panel_rra_figure() have been redesigned to
+match a reference R/ggplot2 + ggrepel + cowplot script (single-gene
+efficacy-vs-safety figure), replacing the earlier fixed "top 10" dual-panel
+scatter with a three-panel layout:
+
+  LEFT   = every candidate gene as a grey background scatter, with a
+           dashed-border, light-shaded rectangle marking the highlighted
+           region and the highlighted genes drawn as coloured diamonds.
+  RIGHT  = zoomed into that rectangle, on a light-grey panel background,
+           with every highlighted gene labelled via a white, black-bordered
+           box connected back to its point with a thin leader line when the
+           label has been nudged away from it.
+  LEGEND = a third narrow panel listing every highlighted gene as a
+           numbered, colour-swatched row ("Gene Ranks"), best (RRA_Rank 1)
+           first.
+
+Key behavioural change from v1: the highlighted set is no longer a fixed
+top-N. As in the reference script, the top `top_n` genes by RRA_Rank
+(default 20, matching the reference script's "Top 20") are used only to
+define the safety/efficacy rectangle (its bounds are the min/max spanned by
+those genes, floored/ceiled by 1 point); EVERY gene whose point then falls
+inside that rectangle is plotted, labelled and ranked — so the number of
+genes actually shown can be smaller or larger than `top_n`. Genes are
+coloured with an extended Okabe-Ito colourblind-safe palette (matching the
+reference script exactly), smoothly interpolated with extra hues if more
+genes fall inside the rectangle than the base palette has colours for.
 """
 
 import os
@@ -834,26 +863,50 @@ cat("RRA aggregation completed. Rows:", nrow(result), "\\n")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RRA result plot
+# RRA result plot — three-panel "highlighted region" design
 #
-# Replaces the earlier grouped-bar "Top 20 RRA candidates" plot with a
-# single dual-panel scatter plot of the top 10 genes overall by RRA_Rank —
-# same visual style as two_gene_combination.py's RRA plots (see that
-# module's "RRA result plots" section for the full design rationale), just
-# with no gate dimension to plot (single genes have no logic gate), so
-# there is only the one "top 10" plot here, no per-gate top-3 plot.
+# Redesigned to match a reference R/ggplot2 + ggrepel + cowplot script
+# (single-gene efficacy-vs-safety figure) — see module docstring "Fix
+# applied (RRA plot v2 ...)" for the full design rationale.
 #
-# The left panel's axes are intentionally left to auto-scale (no fixed
-# safety>=90%/efficacy>=70% floor) — see module docstring "Fix applied
-# (RRA plot)" for why: this module's strict filter only truly enforces a
-# safety floor, not an efficacy one.
+#   LEFT   = every candidate gene, grey background, with a dashed-border
+#            shaded rectangle marking the highlighted region and the
+#            highlighted genes drawn as coloured diamonds.
+#   RIGHT  = zoomed into that rectangle, light-grey panel background,
+#            every highlighted gene labelled with a white leader-lined box.
+#   LEGEND = a third narrow panel listing every highlighted gene as a
+#            numbered, colour-swatched row ("Gene Ranks"), best first.
+#
+# The rectangle's bounds come from the top `top_n` genes by RRA_Rank
+# (default 20), but every gene whose point falls inside it — not just
+# those top `top_n` — gets plotted, labelled and ranked (mirrors the
+# reference script's "top 20 defines the box, then show everyone inside
+# it" behaviour exactly). As before, axes are left to auto-scale rather
+# than pinned to a fixed floor, since the "strict" filter upstream only
+# truly enforces a safety floor, not an efficacy one.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Rank-ordered palette for the top-10-overall plot (rank 1 first, darkest).
-_RANK_PALETTE = [
-    "#264653", "#2A9D8F", "#8AB17D", "#E9C46A", "#F4A261",
-    "#EE8959", "#E76F51", "#C1121F", "#780000", "#4A0404",
+# Extended Okabe-Ito colourblind-safe palette, matching the reference
+# R/ggplot2 script exactly (7 Okabe-Ito hues + 14 additional vivid hues).
+_HIGHLIGHT_PALETTE = [
+    "#E69F00", "#0072B2", "#009E73", "#CC79A7", "#F0E442", "#56B4E9", "#D55E00",
+    "#7B2CBF", "#B37400", "#00A896", "#E63946", "#3A86FF", "#8C4A6B", "#FFB400",
+    "#1D3557", "#43AA8B", "#9D4EDD", "#F4A261", "#118AB2", "#6A994E", "#FF6B6B",
 ]
+
+
+def _rra_highlight_colors(n: int) -> list:
+    """One colour per highlighted gene, ordered by rank. Uses the extended
+    Okabe-Ito colourblind-safe palette as-is when it's large enough;
+    smoothly interpolates additional hues (matching the reference script's
+    colorRampPalette(base_palette)) when more genes fall inside the
+    highlighted region than the base palette has colours for."""
+    if n <= len(_HIGHLIGHT_PALETTE):
+        return _HIGHLIGHT_PALETTE[:n]
+    import matplotlib.colors as mcolors
+    base_rgb = [mcolors.to_rgb(c) for c in _HIGHLIGHT_PALETTE]
+    cmap = mcolors.LinearSegmentedColormap.from_list("rra_extended", base_rgb)
+    return [mcolors.to_hex(cmap(i / max(n - 1, 1))) for i in range(n)]
 
 
 def _configure_matplotlib_backend() -> bool:
@@ -882,6 +935,20 @@ def _configure_matplotlib_backend() -> bool:
     return in_notebook
 
 
+def _resolve_serif_font() -> str:
+    """Times New Roman, matching the reference R script, when it's actually
+    installed on this machine; falls back to a metrically-similar or
+    generic serif font otherwise (Times New Roman is a Windows/Office font
+    and is often absent on Linux render hosts, e.g. HPC nodes)."""
+    import matplotlib.font_manager as fm
+    preferred = ["Times New Roman", "Liberation Serif", "DejaVu Serif"]
+    available = {f.name for f in fm.fontManager.ttflist}
+    for name in preferred:
+        if name in available:
+            return name
+    return "serif"
+
+
 def _prep_rra_plot_df_single_gene(df_ranked: pd.DataFrame) -> pd.DataFrame:
     """Shared prep for the RRA plot: average safety across atlases and a
     display label (just the gene name) per candidate."""
@@ -895,8 +962,7 @@ def _prep_rra_plot_df_single_gene(df_ranked: pd.DataFrame) -> pd.DataFrame:
 def _nice_step(data_range: float, target_ticks: int = 6) -> float:
     """Pick a 'nice' round tick increment (1/2/2.5/5/10 x 10^n) for an
     axis span of this size, so tick marks land on clean, evenly-spaced
-    values — matching the reference script's explicit `seq(..., by=2)`
-    breaks — instead of matplotlib's default (sometimes irregular)
+    values instead of matplotlib's default (sometimes irregular)
     auto-ticks."""
     import math
 
@@ -918,20 +984,21 @@ def _nice_step(data_range: float, target_ticks: int = 6) -> float:
     return nice * magnitude
 
 
-def _style_scatter_axes(ax, title, xlabel, ylabel):
+def _style_scatter_axes(ax, title, xlabel, ylabel, x_step=None, y_step=None):
     """
-    Shared panel styling matching the reference script's
-    theme_classic() + explicit panel.border/axis.line: a full black box
-    border on all four sides, no panel grid, bold titles, and evenly
-    spaced ('nice') tick marks on both axes. Must be called AFTER the
-    panel's final xlim/ylim are set, since the tick step is computed from
-    the current axis range.
+    Shared panel styling: a full black box border on all four sides, no
+    panel grid, bold titles, and evenly spaced ('nice') tick marks on both
+    axes. Must be called AFTER the panel's final xlim/ylim are set, since
+    the default tick step is computed from the current axis range.
+    x_step/y_step let a caller pin an explicit tick increment (used on the
+    right panel's efficacy axis, matching the reference script's
+    hard-coded `by=2` breaks) instead of the auto "nice" one.
     """
     from matplotlib.ticker import FuncFormatter, MultipleLocator
 
-    ax.set_title(title, fontsize=15, fontweight="bold", pad=12, color="black")
-    ax.set_xlabel(xlabel, fontsize=12.5, fontweight="bold", color="black")
-    ax.set_ylabel(ylabel, fontsize=12.5, fontweight="bold", color="black")
+    ax.set_title(title, fontsize=16, fontweight="bold", pad=12, color="black")
+    ax.set_xlabel(xlabel, fontsize=13, fontweight="bold", color="black")
+    ax.set_ylabel(ylabel, fontsize=13, fontweight="bold", color="black")
     ax.tick_params(labelsize=11, colors="black")
     ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.0f}%"))
     ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.0f}%"))
@@ -943,112 +1010,110 @@ def _style_scatter_axes(ax, title, xlabel, ylabel):
 
     x_lo, x_hi = ax.get_xlim()
     y_lo, y_hi = ax.get_ylim()
-    ax.xaxis.set_major_locator(MultipleLocator(_nice_step(x_hi - x_lo)))
-    ax.yaxis.set_major_locator(MultipleLocator(_nice_step(y_hi - y_lo)))
+    ax.xaxis.set_major_locator(MultipleLocator(x_step or _nice_step(x_hi - x_lo)))
+    ax.yaxis.set_major_locator(MultipleLocator(y_step or _nice_step(y_hi - y_lo)))
 
 
-def _place_labels_near_points(ax, fig, xs, ys, labels, colors, offset_frac: float = 0.02,
-                               max_iter: int = 300):
+def _place_labels_with_leaders(ax, fig, xs, ys, labels, offset_frac: float = 0.035,
+                                max_iter: int = 400):
     """
-    Place each label immediately next to its point — no leader line drawn
-    — matching the reference script's tight ggrepel placement (whose
-    `min.segment.length = 0` in practice renders no visible connector for
-    well-separated points, since the label sits right at the point).
-
-    Prefers the optional `adjustText` package when installed (moved with
-    no arrowprops, so it repels overlaps without ever drawing a line);
-    otherwise falls back to a dependency-free local nudge pass that
-    separates any colliding label boxes (and label-over-point overlaps)
-    using their real rendered extents.
+    White-boxed, black-text, black-bordered labels next to each point,
+    connected back to the point with a thin grey leader line whenever the
+    label ends up more than a small distance away from it — matching
+    ggrepel's geom_label_repel style in the reference R script
+    (label fill="white", color="black", segment.color="grey30",
+    min.segment.length effectively 0). Prefers the optional `adjustText`
+    package (pip install adjustText) for genuine collision-aware
+    repulsion when it's installed; otherwise falls back to a
+    dependency-free local nudge pass that separates overlapping label
+    boxes (and label-over-point overlaps) using their real rendered
+    extents.
     """
     x_lo, x_hi = ax.get_xlim()
     y_lo, y_hi = ax.get_ylim()
     dx0 = offset_frac * (x_hi - x_lo)
     dy0 = offset_frac * (y_hi - y_lo)
+    leader_thresh = 0.6 * min(dx0, dy0)
 
     texts = []
-    for x, y, label, color in zip(xs, ys, labels, colors):
+    for x, y, label in zip(xs, ys, labels):
         t = ax.text(
             x + dx0, y + dy0, label, fontsize=10.5, fontweight="bold",
-            color=color, ha="left", va="bottom", zorder=6,
-            bbox=dict(boxstyle="round,pad=0.28", facecolor="white",
-                      edgecolor=color, linewidth=1.4),
+            color="black", ha="left", va="bottom", zorder=7,
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
+                      edgecolor="black", linewidth=0.9),
         )
         texts.append(t)
 
+    fig.canvas.draw()
+
     try:
         from adjustText import adjust_text
-        fig.canvas.draw()
-        pts_xy = list(zip(xs, ys))
-        adjust_text(texts, x=[p[0] for p in pts_xy], y=[p[1] for p in pts_xy], ax=ax)
-        return texts
+        adjust_text(texts, x=list(xs), y=list(ys), ax=ax)
     except ImportError:
-        pass
+        renderer = fig.canvas.get_renderer()
+        marker_half_px = 9
+
+        def _point_box(px, py):
+            from matplotlib.transforms import Bbox
+            dx_, dy_ = ax.transData.transform((px, py))
+            return Bbox.from_extents(dx_ - marker_half_px, dy_ - marker_half_px,
+                                      dx_ + marker_half_px, dy_ + marker_half_px)
+
+        point_boxes = [_point_box(px, py) for px, py in zip(xs, ys)]
+
+        for _ in range(max_iter):
+            moved = False
+            boxes = [t.get_window_extent(renderer) for t in texts]
+
+            for i in range(len(texts)):
+                for j in range(i + 1, len(texts)):
+                    if boxes[i].overlaps(boxes[j]):
+                        moved = True
+                        cxi = boxes[i].x0 + boxes[i].width / 2
+                        cyi = boxes[i].y0 + boxes[i].height / 2
+                        cxj = boxes[j].x0 + boxes[j].width / 2
+                        cyj = boxes[j].y0 + boxes[j].height / 2
+                        ddx, ddy = cxj - cxi, cyj - cyi
+                        dist = max((ddx ** 2 + ddy ** 2) ** 0.5, 1e-6)
+                        ux, uy = ddx / dist, ddy / dist
+                        for t_, sign in ((texts[i], -1), (texts[j], 1)):
+                            xt, yt = t_.get_position()
+                            disp = ax.transData.transform((xt, yt))
+                            disp = (disp[0] + sign * ux * 2.5, disp[1] + sign * uy * 2.5)
+                            t_.set_position(ax.transData.inverted().transform(disp))
+
+            boxes = [t.get_window_extent(renderer) for t in texts]
+            for i in range(len(texts)):
+                for pbox, (px, py) in zip(point_boxes, zip(xs, ys)):
+                    if boxes[i].overlaps(pbox):
+                        moved = True
+                        cxi = boxes[i].x0 + boxes[i].width / 2
+                        cyi = boxes[i].y0 + boxes[i].height / 2
+                        pdx, pdy = ax.transData.transform((px, py))
+                        ddx, ddy = cxi - pdx, cyi - pdy
+                        dist = max((ddx ** 2 + ddy ** 2) ** 0.5, 1e-6)
+                        ux, uy = ddx / dist, ddy / dist
+                        xt, yt = texts[i].get_position()
+                        disp = ax.transData.transform((xt, yt))
+                        disp = (disp[0] + ux * 2.5, disp[1] + uy * 2.5)
+                        texts[i].set_position(ax.transData.inverted().transform(disp))
+                        boxes[i] = texts[i].get_window_extent(renderer)
+
+            if not moved:
+                break
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
 
     fig.canvas.draw()
-    renderer = fig.canvas.get_renderer()
-
-    # Small display-space box around each point's own marker, so labels
-    # also get nudged off of OTHER points' markers, not just each other.
-    marker_half_px = 9
-
-    def _point_box(px, py):
-        from matplotlib.transforms import Bbox
-        dx_, dy_ = ax.transData.transform((px, py))
-        return Bbox.from_extents(dx_ - marker_half_px, dy_ - marker_half_px,
-                                  dx_ + marker_half_px, dy_ + marker_half_px)
-
-    point_boxes = [_point_box(px, py) for px, py in zip(xs, ys)]
-
-    for _ in range(max_iter):
-        moved = False
-        boxes = [t.get_window_extent(renderer) for t in texts]
-
-        for i in range(len(texts)):
-            for j in range(i + 1, len(texts)):
-                if boxes[i].overlaps(boxes[j]):
-                    moved = True
-                    cxi = boxes[i].x0 + boxes[i].width / 2
-                    cyi = boxes[i].y0 + boxes[i].height / 2
-                    cxj = boxes[j].x0 + boxes[j].width / 2
-                    cyj = boxes[j].y0 + boxes[j].height / 2
-                    ddx, ddy = cxj - cxi, cyj - cyi
-                    dist = max((ddx ** 2 + ddy ** 2) ** 0.5, 1e-6)
-                    ux, uy = ddx / dist, ddy / dist
-                    xi, yi = texts[i].get_position()
-                    xj, yj = texts[j].get_position()
-                    disp_i = ax.transData.transform((xi, yi))
-                    disp_j = ax.transData.transform((xj, yj))
-                    disp_i = (disp_i[0] - ux * 2.5, disp_i[1] - uy * 2.5)
-                    disp_j = (disp_j[0] + ux * 2.5, disp_j[1] + uy * 2.5)
-                    inv = ax.transData.inverted()
-                    texts[i].set_position(inv.transform(disp_i))
-                    texts[j].set_position(inv.transform(disp_j))
-
-        # Nudge any label off of a point marker it now overlaps (its own
-        # or another's), pushing it away from that point's centre.
-        boxes = [t.get_window_extent(renderer) for t in texts]
-        for i in range(len(texts)):
-            for pbox, (px, py) in zip(point_boxes, zip(xs, ys)):
-                if boxes[i].overlaps(pbox):
-                    moved = True
-                    cxi = boxes[i].x0 + boxes[i].width / 2
-                    cyi = boxes[i].y0 + boxes[i].height / 2
-                    pdx, pdy = ax.transData.transform((px, py))
-                    ddx, ddy = cxi - pdx, cyi - pdy
-                    dist = max((ddx ** 2 + ddy ** 2) ** 0.5, 1e-6)
-                    ux, uy = ddx / dist, ddy / dist
-                    xi, yi = texts[i].get_position()
-                    disp_i = ax.transData.transform((xi, yi))
-                    disp_i = (disp_i[0] + ux * 2.5, disp_i[1] + uy * 2.5)
-                    inv = ax.transData.inverted()
-                    texts[i].set_position(inv.transform(disp_i))
-                    boxes[i] = texts[i].get_window_extent(renderer)
-
-        if not moved:
-            break
-        fig.canvas.draw()
-        renderer = fig.canvas.get_renderer()
+    for t, px, py in zip(texts, xs, ys):
+        tx, ty = t.get_position()
+        if ((tx - px) ** 2 + (ty - py) ** 2) ** 0.5 > leader_thresh:
+            ax.annotate(
+                "", xy=(px, py), xytext=(tx, ty),
+                arrowprops=dict(arrowstyle="-", color="#4D4D4D", linewidth=0.8),
+                zorder=4,
+            )
 
     return texts
 
@@ -1056,90 +1121,107 @@ def _place_labels_near_points(ax, fig, xs, ys, labels, colors, offset_frac: floa
 def _dual_panel_rra_figure(
     plot_df: pd.DataFrame,
     highlighted: pd.DataFrame,
-    colors: list,
+    threshold_x: float,
+    threshold_y: float,
+    x_lo: float,
+    x_hi: float,
+    y_lo: float,
+    y_hi: float,
     out_stub: str,
     output_dir: str,
-    suptitle: str,
     left_title: str,
     right_title: str,
 ):
     """
-    Dual-panel figure matching the reference R/ggplot2+ggrepel script:
-    left panel shows every candidate as background, highlighted
-    candidates as colour-coded diamonds, dashed partition lines (lowest
-    safety/efficacy among the highlighted set), and a shaded dashed-border
-    zoom rectangle. Right panel is the same partition zoomed in on just
-    the highlighted candidates, on a light grey background, with labels
-    placed immediately next to each point and no leader lines.
-
-    NOTE: unlike two_gene_combination.py's version of this function, the
-    left panel's axes are NOT pinned to a fixed safety>=90%/efficacy>=70%
-    floor — see module docstring "Fix applied (RRA plot)".
+    Three-panel figure matching the reference R/ggplot2 + ggrepel + cowplot
+    script: LEFT = every candidate (grey background) with the highlighted
+    genes as coloured diamonds and a dashed-border shaded rectangle marking
+    the highlighted region; RIGHT = zoomed into that rectangle, every
+    highlighted gene labelled with a white leader-lined box, on a light
+    grey panel background; a third narrow LEGEND panel lists every
+    highlighted gene as a numbered, colour-swatched row ("Gene Ranks"),
+    ordered by RRA_Rank (best first).
     """
     in_notebook = _configure_matplotlib_backend()
     import matplotlib.pyplot as plt
 
+    serif = _resolve_serif_font()
     plt.rcParams.update({
-        "font.family":       "DejaVu Sans",
-        "figure.facecolor":  "white",
-        "axes.facecolor":    "white",
+        "font.family":      serif,
+        "figure.facecolor": "white",
+        "axes.facecolor":   "white",
     })
 
-    fig, (ax_l, ax_r) = plt.subplots(1, 2, figsize=(17, 8.5))
-    fig.suptitle(suptitle, fontsize=17, fontweight="bold", y=1.03, color="black")
+    n_hi = len(highlighted)
+    fig = plt.figure(figsize=(17, 8.2))
+    gs = fig.add_gridspec(1, 3, width_ratios=[1, 1, 0.34], wspace=0.35)
+    ax_l   = fig.add_subplot(gs[0, 0])
+    ax_r   = fig.add_subplot(gs[0, 1])
+    ax_leg = fig.add_subplot(gs[0, 2])
 
     xs_all = (plot_df["avg_safety"] * 100).to_numpy()
     ys_all = (plot_df["efficacy"] * 100).to_numpy()
     xs_hi  = (highlighted["avg_safety"] * 100).to_numpy()
     ys_hi  = (highlighted["efficacy"] * 100).to_numpy()
+    colors = highlighted["color"].tolist()
 
-    # Partition thresholds — the lowest safety / efficacy among the
-    # highlighted candidates, drawn as full dashed cross-lines on both
-    # panels. The shaded zoom rectangle uses a 1-point floor/ceil margin
-    # around the highlighted candidates.
-    threshold_x = float(xs_hi.min())
-    threshold_y = float(ys_hi.min())
-    x_lo = max(0.0, np.floor(xs_hi.min()) - 1)
-    x_hi = min(100.0, np.ceil(xs_hi.max()) + 1)
-    y_lo = max(0.0, np.floor(ys_hi.min()) - 1)
-    y_hi = min(100.0, np.ceil(ys_hi.max()) + 1)
+    hi_genes = set(highlighted["Gene"])
+    bg_mask  = ~plot_df["Gene"].isin(hi_genes)
+    xs_bg    = (plot_df.loc[bg_mask, "avg_safety"] * 100).to_numpy()
+    ys_bg    = (plot_df.loc[bg_mask, "efficacy"] * 100).to_numpy()
 
-    # ---- left panel: full candidate universe, with partition -------------
-    ax_l.scatter(xs_all, ys_all, s=26, color="#8c8c8c", alpha=0.6,
+    # ---- left panel: full candidate universe, with highlighted rectangle --
+    ax_l.scatter(xs_bg, ys_bg, s=24, color="#999999", alpha=0.55,
                  linewidths=0, zorder=2)
-    ax_l.axvline(threshold_x, linestyle="--", linewidth=1.1, color="#4d4d4d", zorder=3)
-    ax_l.axhline(threshold_y, linestyle="--", linewidth=1.1, color="#4d4d4d", zorder=3)
     ax_l.add_patch(plt.Rectangle(
         (x_lo, y_lo), max(x_hi - x_lo, 0.5), max(y_hi - y_lo, 0.5),
-        fill=True, facecolor="#777777", alpha=0.15,
-        edgecolor="black", linestyle="--", linewidth=1.4, zorder=3,
+        fill=True, facecolor="#EDEEF3", alpha=0.9,
+        edgecolor="black", linestyle="--", linewidth=1.2, zorder=1,
     ))
-    ax_l.scatter(xs_hi, ys_hi, s=170, marker="D", color=colors,
-                 edgecolor="black", linewidth=0.9, zorder=5)
+    ax_l.axvline(threshold_x, linestyle="--", linewidth=0.9, color="#4D4D4D", zorder=3)
+    ax_l.axhline(threshold_y, linestyle="--", linewidth=0.9, color="#4D4D4D", zorder=3)
+    ax_l.scatter(xs_hi, ys_hi, s=140, marker="D", c=colors,
+                 edgecolor="black", linewidth=0.7, zorder=5)
 
-    # No fixed axis floor here (unlike two_gene_combination.py) — see
-    # module docstring "Fix applied (RRA plot)"; both axes auto-scale.
+    # No fixed axis floor here (matches v1) — both axes auto-scale to the
+    # actual candidate spread rather than being pinned to e.g. 90%/70%.
+    ax_l.margins(0.04)
     ax_l.set_box_aspect(1)
-    _style_scatter_axes(ax_l, left_title, "Average safety", "Efficacy")
+    _style_scatter_axes(ax_l, left_title, "Safety", "Efficacy")
 
     # ---- right panel: zoomed, labelled highlighted candidates -------------
-    ax_r.set_facecolor("#F5F5F5")
-    ax_r.axvline(threshold_x, linestyle="--", linewidth=1.1, color="#4d4d4d", zorder=3)
-    ax_r.axhline(threshold_y, linestyle="--", linewidth=1.1, color="#4d4d4d", zorder=3)
-    ax_r.scatter(xs_hi, ys_hi, s=190, marker="D", color=colors,
-                 edgecolor="black", linewidth=0.9, zorder=5)
+    ax_r.set_facecolor("#EDEEF3")
+    ax_r.axvline(threshold_x, linestyle="--", linewidth=0.9, color="#4D4D4D", zorder=3)
+    ax_r.axhline(threshold_y, linestyle="--", linewidth=0.9, color="#4D4D4D", zorder=3)
+    ax_r.scatter(xs_hi, ys_hi, s=170, marker="D", c=colors,
+                 edgecolor="black", linewidth=0.8, zorder=5)
 
-    pad_x = 0.10 * max(x_hi - x_lo, 1.0)
-    pad_y = 0.12 * max(y_hi - y_lo, 1.0)
+    pad_x = 0.08 * max(x_hi - x_lo, 1.0)
+    pad_y = 0.08 * max(y_hi - y_lo, 1.0)
     ax_r.set_xlim(x_lo - pad_x, x_hi + pad_x)
     ax_r.set_ylim(y_lo - pad_y, y_hi + pad_y)
     ax_r.set_box_aspect(1)
 
-    _place_labels_near_points(
-        ax_r, fig, xs_hi, ys_hi, highlighted["candidate"].tolist(), colors,
-    )
+    _place_labels_with_leaders(ax_r, fig, xs_hi, ys_hi, highlighted["label"].tolist())
 
-    _style_scatter_axes(ax_r, right_title, "Average safety", "HPA efficacy")
+    # y-axis ticks every 2 points, matching the reference script's
+    # hard-coded `seq(..., by=2)` breaks, unless the zoomed range is wide
+    # enough that a 2-point step would be unreadably dense.
+    y_step = 2 if (y_hi - y_lo) <= 40 else None
+    _style_scatter_axes(ax_r, right_title, "Safety", "Efficacy", y_step=y_step)
+
+    # ---- legend panel: "Gene Ranks" ---------------------------------------
+    ax_leg.set_xlim(0, 1)
+    ax_leg.set_ylim(-(n_hi + 1), 1)
+    ax_leg.axis("off")
+    ax_leg.set_title("Gene Ranks", fontsize=15, fontweight="bold", loc="left")
+    for _, row in highlighted.iterrows():
+        y_pos = -row["rank"]
+        ax_leg.scatter([0.04], [y_pos], s=120, marker="s", c=[row["color"]],
+                       edgecolor="black", linewidth=0.6, zorder=3)
+        ax_leg.text(0.12, y_pos, f"{int(row['rank'])}.  {row['label']}",
+                    fontsize=10.5, fontweight="bold", color="black",
+                    va="center", ha="left")
 
     fig.tight_layout()
 
@@ -1154,33 +1236,70 @@ def _dual_panel_rra_figure(
     plt.close(fig)
 
 
-def _plot_top10_rra_genes(df_ranked: pd.DataFrame, output_dir: str, top_n: int = 10):
+def _plot_top10_rra_genes(df_ranked: pd.DataFrame, output_dir: str, top_n: int = 20):
     """
-    Top `top_n` (default 10) genes overall by RRA_Rank. Same dual-panel
-    look as two_gene_combination.py's top-10 plot, with points coloured by
-    rank (best = darkest) and rank numbers baked into each label. There is
-    no per-gate variant of this plot — single genes have no logic gate.
+    Highlighted-region RRA plot (see module docstring "Fix applied (RRA
+    plot v2 ...)" for the full design). The top `top_n` genes by RRA_Rank
+    (default 20, matching the reference script's "Top 20") define a
+    safety/efficacy rectangle, but EVERY gene whose point falls inside
+    that rectangle — not just those top `top_n` — is plotted, labelled and
+    ranked in the output. Function name is kept as `_plot_top10_rra_genes`
+    for call-site compatibility even though the default is now 20 and the
+    highlighted count is no longer fixed.
     """
-    plot_df     = _prep_rra_plot_df_single_gene(df_ranked)
-    highlighted = plot_df.sort_values("RRA_Rank").head(top_n).reset_index(drop=True)
-
-    if highlighted.empty:
-        print("No RRA-ranked genes available — skipping top-10 RRA plot.")
+    plot_df = _prep_rra_plot_df_single_gene(df_ranked)
+    if plot_df.empty:
+        print("No RRA-ranked genes available — skipping RRA plot.")
         return
 
-    highlighted = highlighted.copy()
-    highlighted["candidate"] = [
-        f"#{i + 1}  {c}" for i, c in enumerate(highlighted["candidate"])
-    ]
-    colors = _RANK_PALETTE[:len(highlighted)]
+    top_n_df = plot_df.sort_values("RRA_Rank", ascending=True).head(top_n)
+    if top_n_df.empty:
+        print("No RRA-ranked genes available — skipping RRA plot.")
+        return
+
+    safety_pct   = plot_df["avg_safety"] * 100
+    efficacy_pct = plot_df["efficacy"] * 100
+    top_safety_pct   = top_n_df["avg_safety"] * 100
+    top_efficacy_pct = top_n_df["efficacy"] * 100
+
+    # Thresholds / rectangle: min safety and min efficacy among the top
+    # `top_n` genes, floored/ceiled by 1 point — exactly the reference
+    # script's rank20_safety / min_top20_efficacy + zoom_x/y_min/max logic.
+    threshold_x = float(top_safety_pct.min())
+    threshold_y = float(top_efficacy_pct.min())
+    x_lo = max(0.0, np.floor(top_safety_pct.min()) - 1)
+    x_hi = min(100.0, np.ceil(top_safety_pct.max()) + 1)
+    y_lo = max(0.0, np.floor(top_efficacy_pct.min()) - 1)
+    y_hi = min(100.0, np.ceil(top_efficacy_pct.max()) + 1)
+
+    # ALL genes whose point falls inside the rectangle — not just the
+    # top_n used to define it (mirrors the reference script's
+    # "highlighted" step exactly).
+    in_rect = (
+        (safety_pct >= x_lo) & (safety_pct <= x_hi) &
+        (efficacy_pct >= y_lo) & (efficacy_pct <= y_hi)
+    )
+    highlighted = plot_df[in_rect].sort_values("RRA_Rank", ascending=True).reset_index(drop=True)
+
+    if highlighted.empty:
+        print("No genes fall inside the highlighted region — skipping RRA plot.")
+        return
+
+    highlighted["rank"]  = np.arange(1, len(highlighted) + 1)
+    highlighted["label"] = highlighted["candidate"]
+    highlighted["color"] = _rra_highlight_colors(len(highlighted))
+
+    print(f"\nGenes inside highlighted region (rectangle set by top {top_n}): {len(highlighted)}")
+    print(highlighted[["rank", "Gene", "efficacy", "avg_safety"]].to_string(index=False))
 
     _dual_panel_rra_figure(
-        plot_df, highlighted, colors,
-        out_stub="Top10_RRA_Single_Gene_Candidates",
+        plot_df, highlighted,
+        threshold_x=threshold_x, threshold_y=threshold_y,
+        x_lo=x_lo, x_hi=x_hi, y_lo=y_lo, y_hi=y_hi,
+        out_stub="Single_Gene_RRA_Highlighted_Region",
         output_dir=output_dir,
-        suptitle="Top 10 Genes Overall — Robust Rank Aggregation",
-        left_title="All candidate genes",
-        right_title="Top 10 by RRA rank",
+        left_title="All single-gene candidates",
+        right_title="Candidates in highlighted region",
     )
 
 
