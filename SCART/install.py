@@ -36,6 +36,12 @@ CONDA_R_BASE = [
     "r-base", "r-devtools", "r-remotes",
     "r-ggplot2", "r-data.table", "r-igraph",
     "r-gdtools", "r-ragg", "r-dplyr",
+    # NEW: required by one_gene_combination.py's single-gene RRA plot
+    # (plot_single_gene_rra_claude.R), which combines its three panels
+    # with cowplot::plot_grid(). This list is shared by both the
+    # Linux/Mac path (_run_linux_mac, Step 3) and Windows (_run_windows,
+    # Step 8), so adding it here covers both.
+    "r-cowplot",
     "cairo", "freetype", "fontconfig",
     "harfbuzz", "fribidi", "libpng",
     "libtiff", "libjpeg-turbo", "libwebp",
