@@ -1438,22 +1438,27 @@ highlighted <- highlighted %>%
 
 # ============================================================
 # 14b. "NICE" Y-AXIS BREAK STEP (fixes overcrowded right-panel
-# axis when the highlighted set spans a wide efficacy range)
+# axis ONLY when the highlighted set spans an unusually wide
+# efficacy range — otherwise reproduces the reference script's
+# exact `by = 2` step)
 #
-# The right panel's y-axis previously used a hard-coded
-# `by = 2` break step across the FULL zoomed range. That is
-# fine when the highlighted genes are tightly clustered (a
-# ~10-20 point spread), but when they span a much wider range
-# (e.g. one gene at ~80% efficacy and another at ~26%), a fixed
-# 2-point step produces 25+ bold, size-18 tick labels crammed
-# onto one axis — they visibly overlap each other and the axis
-# title. This picks a step from the same "nice round number"
-# family (1/2/2.5/5/10 x 10^n) matplotlib-style tick locators
-# use, targeting ~6 ticks regardless of how wide the range is,
-# so the axis stays readable either way.
+# The right panel's y-axis previously used a hard-coded `by = 2`
+# break step across the FULL zoomed range, unconditionally. For
+# a typical zoomed range (<= 40 points — the normal case, and
+# what the reference sample images show) that 2-point step is
+# exactly right and is reproduced here unchanged. It only causes
+# real overcrowding in the rare case where the highlighted set
+# spans a much wider range (e.g. one gene at ~80% efficacy and
+# another at ~26%, a range of 50+ points) — a fixed 2-point step
+# there produces 25+ bold tick labels crammed onto one axis. So
+# this keeps the exact `by = 2` step for the normal (<= 40 point)
+# case, and only widens the step (via the same "nice round
+# number" family — 1/2/2.5/5/10 x 10^n — matplotlib-style tick
+# locators use, targeting ~6 ticks) when the range is wider than
+# that.
 # ============================================================
 
-nice_breaks <- function(lo, hi, target_n = 6) {
+nice_breaks <- function(lo, hi, target_n = 6, exact_step_max_range = 40) {
 
   data_range <- hi - lo
 
@@ -1461,23 +1466,27 @@ nice_breaks <- function(lo, hi, target_n = 6) {
     return(pretty(c(lo, hi)))
   }
 
-  raw_step  <- data_range / target_n
-  magnitude <- 10 ^ floor(log10(raw_step))
-  residual  <- raw_step / magnitude
-
-  nice <- if (residual <= 1) {
-    1
-  } else if (residual <= 2) {
-    2
-  } else if (residual <= 2.5) {
-    2.5
-  } else if (residual <= 5) {
-    5
+  if (data_range <= exact_step_max_range) {
+    step <- 2
   } else {
-    10
-  }
+    raw_step  <- data_range / target_n
+    magnitude <- 10 ^ floor(log10(raw_step))
+    residual  <- raw_step / magnitude
 
-  step <- nice * magnitude
+    nice <- if (residual <= 1) {
+      1
+    } else if (residual <= 2) {
+      2
+    } else if (residual <= 2.5) {
+      2.5
+    } else if (residual <= 5) {
+      5
+    } else {
+      10
+    }
+
+    step <- nice * magnitude
+  }
 
   seq(
     ceiling(lo / step) * step,
