@@ -866,9 +866,9 @@ def _run_single_atlas(
     patience: int,
     n_runs: int,
     output_dir: str,
-    n_islands: int = 4,
-    migrate_interval: int = 10,
-    migrate_k: int = 10,
+    n_islands: int = 8,
+    migrate_interval: int = 20,
+    migrate_k: int = 5,
     and_quota_frac: float = 0.25,
     nand_quota_frac: float = 0.25,
     gate_min_frac: float = 0.20,
@@ -3386,12 +3386,12 @@ def run(
     pop_size: int  = 1000,
     Gmax: int      = 100,
     Ggap: int      = 10,
-    Rrep: float    = 0.1,
+    Rrep: float    = 0.15,
     patience: int  = 50,
     n_runs: int    = 10,
-    n_islands: int = 4,
-    migrate_interval: int = 10,
-    migrate_k: int = 10,
+    n_islands: int = 8,
+    migrate_interval: int = 20,
+    migrate_k: int = 5,
     and_quota_frac: float = 0.25,
     nand_quota_frac: float = 0.25,
     gate_min_frac: float = 0.20,
@@ -3440,7 +3440,7 @@ def run(
         immigrant steps. Default 10.
     Rrep : float
         Fraction of each island replaced during diversity injection.
-        Default 0.1.
+        Default 0.15.
     patience : int
         Early-stop a seed if its best fitness hasn't improved for this many
         consecutive generations. Default 50.
@@ -3448,11 +3448,11 @@ def run(
         Independent GA runs (one seed each, seeds 42, 43, 44, ...), run in
         parallel via joblib and combined afterward. Default 10.
     n_islands : int
-        Number of islands the population is split across. Default 4.
+        Number of islands the population is split across. Default 8.
     migrate_interval : int
-        Generations between ring-migration events. Default 10.
+        Generations between ring-migration events. Default 20.
     migrate_k : int
-        Individuals migrated per island at each migration event. Default 10.
+        Individuals migrated per island at each migration event. Default 5.
     and_quota_frac, nand_quota_frac : float
         Share of pop_size pre-seeded as "A & B" / "A & !B" individuals at
         initialisation (remainder is open/random-gate). Defaults (0.25 /
