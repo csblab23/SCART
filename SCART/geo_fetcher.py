@@ -155,7 +155,8 @@ def _safe_concat(adatas: list) -> ad.AnnData:
 
 class SampleAnnotator:
     def __init__(self, *inputs, cancer_type: str, min_genes=None,
-                 max_mt=None, manual_annotation_col=None, batch_key=None):
+                 max_mt=None, manual_annotation_col=None, batch_key=None,
+                 exclude_gsm_ids=None):
         self.inputs   = list(inputs)
         self.base_dir = "GSE_data"
         self.min_genes = min_genes
@@ -181,6 +182,18 @@ class SampleAnnotator:
         # obs columns untouched. If not set, 'gsm_id' remains the batch
         # column downstream (Module 2 picks it up automatically).
         self.batch_key = batch_key.strip() if isinstance(batch_key, str) else batch_key
+
+        # EDIT — optional list of GSM IDs to drop entirely (e.g. CAR-T product
+        # samples, or any subtype you do not want). Excluded GSMs are removed
+        # before tumour/normal classification, so they never reach the h5ad,
+        # QC, PopV or any downstream module. A single string is accepted too.
+        if exclude_gsm_ids is None:
+            exclude_gsm_ids = []
+        elif isinstance(exclude_gsm_ids, str):
+            exclude_gsm_ids = [exclude_gsm_ids]
+        self.exclude_gsm_ids = {
+            str(g).strip().upper() for g in exclude_gsm_ids if str(g).strip()
+        }
 
         os.makedirs(self.base_dir, exist_ok=True)
 
@@ -588,6 +601,7 @@ class SampleAnnotator:
         annotation_info = {}
         batch_hint_map = {}
         excluded_non_scrna = []; excluded_non_human = []
+        excluded_by_user = []
 
         _SCRNA_KEYWORDS = ["rna-seq","scrna","single cell","single-cell",
                            "singlenucleus","single nucleus","snrna"]
@@ -600,6 +614,10 @@ class SampleAnnotator:
         ]
 
         for gsm_id, gsm in gse.gsms.items():
+            # EDIT — user-requested exclusion, applied before any other check
+            if gsm_id.upper() in self.exclude_gsm_ids:
+                excluded_by_user.append(gsm_id)
+                continue
             organism = " ".join(gsm.metadata.get("organism_ch1", [])).lower()
             if "homo sapiens" not in organism:
                 excluded_non_human.append(gsm_id)
@@ -633,6 +651,13 @@ class SampleAnnotator:
         print("Unspecified samples:",  ", ".join(unspecified)        or "None")
         print("Excluded (non-human):", ", ".join(excluded_non_human) or "None")
         print("Excluded (non-scRNA):", ", ".join(excluded_non_scrna) or "None")
+        if self.exclude_gsm_ids:
+            print(f"Excluded (user, {len(excluded_by_user)}):",
+                  ", ".join(excluded_by_user) or "None")
+            not_in_gse = sorted(self.exclude_gsm_ids - {g.upper() for g in gse.gsms})
+            if not_in_gse:
+                print(f"  Note: {len(not_in_gse)} requested exclusion ID(s) are not "
+                      f"in {gse_id}: {', '.join(not_in_gse)}")
 
         if self.batch_key:
             found   = [g for g, v in batch_hint_map.items() if v is not None]
