@@ -191,6 +191,21 @@ New R dependency: the R package 'cowplot' (ggplot2, dplyr and ggrepel were
 already required for atlas="both"). See install.py's CONDA_R_BASE list,
 which now includes r-cowplot for both the Linux/Mac and Windows setup
 paths.
+
+Fix applied (tissue-wise safety filter BEFORE RRA)
+---------------------------------------------------
+Added a tissue-wise safety filter (ported from the ovary per-sample
+pipeline's STEP 2) that runs on each atlas's results immediately before
+Robust Rank Aggregation when atlas="both". Each atlas's table is filtered on
+its OWN atlas: a candidate is kept only if safety >= TIER1_MIN (75 %) in EVERY
+Tier 1 tissue and >= TIER2_MIN (60 %) in EVERY Tier 2 tissue (tier tissue
+lists: 8 + 17 = 25 for HPA, 5 + 14 = 19 for Tabula Sapiens; labels are matched
+ignoring case and "_", "-", " "). Tissues outside the tier lists are ignored.
+RRA then ranks the FILTERED tables only; everything else is unchanged.
+Per-atlas filtered tables are also saved as *_tissue_filtered.csv. The
+per-atlas unfiltered results returned by run() and saved earlier are unchanged.
+Requires the atlas .h5ad to carry a tissue label in obs['tissue'] or
+obs['batch_label'] (TISSUE_COLS). See _tissue_filter_* below.
 """
 
 import os
@@ -633,6 +648,160 @@ def _evaluate_single_atlas(
     print(df_top[["Gene", "Efficacy", "Safety"]].to_string(index=False))
 
     return df_results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tissue-wise safety filter — applied to each atlas's results JUST BEFORE
+# Robust Rank Aggregation (atlas="both")
+#
+# Ported from the ovary per-sample pipeline's STEP 2 (tissue-wise safety
+# filter). Each atlas's result table is filtered on its OWN atlas: a candidate
+# is kept only if its safety is >= TIER1_MIN (%) in EVERY Tier 1 tissue and
+# >= TIER2_MIN (%) in EVERY Tier 2 tissue. Safety in a tissue = % of that
+# tissue's cells (count > 0 is "expressed") that do NOT fire the candidate
+# (single gene: gene not expressed; gene pair: logic-gate output is 0).
+# Only the tier tissues present in the atlas are evaluated; all other tissues
+# in the all-tissues atlas are ignored by this filter.
+# The RRA step then runs on the filtered tables only.
+# ─────────────────────────────────────────────────────────────────────────────
+
+import re
+import ast
+import scipy.sparse as sp
+
+TIER1_MIN = 75.0                    # remove if safety < 75 % in ANY Tier 1 tissue
+TIER2_MIN = 60.0                    # remove if safety < 60 % in ANY Tier 2 tissue
+DROP_IF_MISSING = True              # gene absent from the atlas cannot be verified -> removed
+REQUIRE_ALL_TISSUES = True          # stop if the atlas does not hold all 25 (HPA) / 19 (Tabula) tier tissues
+TISSUE_COLS = ["tissue", "batch_label"]   # obs columns tried for the tissue label; the one matching the MOST tier tissues is used
+                                          # (labels compared ignoring case and "_", "-", " ")
+
+TIER1_HPA = ["heart_muscle", "brain_neurons", "brain_non-neurons", "lung",
+             "liver", "kidney", "vasculature", "retina"]
+TIER2_HPA = ["pituitary_gland", "adrenal_gland", "pancreas", "bone_marrow", "blood",
+             "esophagus", "stomach", "small_intestine", "colon", "rectum", "spleen",
+             "thymus", "lymph_node", "skin", "salivary_gland", "tongue", "eye"]
+TIER1_TABULA = ["Heart", "Lung", "Liver", "Kidney", "Vasculature"]
+TIER2_TABULA = ["Blood", "Bone_Marrow", "Pancreas", "Spleen", "Thymus", "Lymph_Node",
+                "Skin", "Salivary_Gland", "Tongue", "Trachea", "Stomach",
+                "Small_Intestine", "Large_Intestine", "Eye"]
+TIERS      = {"hpa": (TIER1_HPA, TIER2_HPA), "tabula": (TIER1_TABULA, TIER2_TABULA)}
+EXPECTED_N = {"hpa": 25, "tabula": 19}
+
+
+def _norm_label(x):
+    return re.sub(r"[\s_\-]+", "_", str(x).strip().lower())
+
+
+def _best_tissue_col(obs, tier_list):
+    """obs column (of TISSUE_COLS) matching the most requested tissues -> (column, n matched)"""
+    req = {_norm_label(t) for t in tier_list}
+    per = {c: len(req & {_norm_label(v) for v in obs[c].astype(str).unique()}) for c in TISSUE_COLS if c in obs.columns}
+    if not per:
+        raise KeyError(f"none of {TISSUE_COLS} found in obs; available: {list(obs.columns)}")
+    c = max(per, key=per.get)
+    return c, per[c]
+
+
+def _tissue_info(adata, tier1, tier2, atlas_key):
+    """ordered [(tier, tissue)] + cell->tissue codes (labels matched ignoring case / '_' '-' ' ')."""
+    col, _ = _best_tissue_col(adata.obs, tier1 + tier2)
+    t = adata.obs[col].astype(str)
+    lut = {}
+    for x in t.unique():
+        lut.setdefault(_norm_label(x), x)
+    t1 = [lut[_norm_label(x)] for x in tier1 if _norm_label(x) in lut]
+    t2 = [lut[_norm_label(x)] for x in tier2 if _norm_label(x) in lut]
+    miss = [x for x in tier1 + tier2 if _norm_label(x) not in lut]
+    if miss:
+        print(f"  [warn] {atlas_key}: tier tissues not found in obs['{col}']: {miss}")
+        print(f"  All labels of '{col}' in the atlas ({t.nunique()}):")
+        for k, n in t.value_counts().items():
+            print(f"      {k:30s} {n:>9,}")
+        if REQUIRE_ALL_TISSUES:
+            raise ValueError(f"{atlas_key}: {len(miss)} requested tissue(s) missing -> {miss}. Fix the tissue names / atlas "
+                             f"(or set REQUIRE_ALL_TISSUES = False).")
+    order = ([("Tier1", x) for x in sorted(t1, key=str.lower)] + [("Tier2", x) for x in sorted(t2, key=str.lower)])
+    pos = {x: i for i, (_, x) in enumerate(order)}
+    codes = t.map(pos).fillna(-1).values.astype(int)
+    keep = codes >= 0
+    return {"codes": codes[keep], "keep": keep, "counts": np.bincount(codes[keep], minlength=len(order)),
+            "cols": [f"{atlas_key}_{tr}_{tis}" for tr, tis in order], "tiers": [tr for tr, _ in order], "col": col}
+
+
+def _load_atlas_expr(atlas_key, atlas_path, genes):
+    """Binary expression (count > 0) of `genes` across every atlas cell, plus the tier-tissue info.
+    Gene symbols are read from var['gene_symbol'] when present (same rule as _load_h5ad_subset),
+    otherwise from var_names."""
+    if not str(atlas_path).endswith(".h5ad"):
+        raise ValueError(f"Tissue-wise safety filter needs an .h5ad healthy atlas with a tissue label in obs "
+                         f"(got {atlas_path}).")
+    ad   = sc.read_h5ad(atlas_path)
+    info = _tissue_info(ad, *TIERS[atlas_key], atlas_key)
+    names = [str(g) for g in ad.var["gene_symbol"]] if "gene_symbol" in ad.var.columns else list(ad.var_names)
+    pos = {}
+    for i, g in enumerate(names):
+        pos.setdefault(g, i)
+    present = [g for g in genes if g in pos]
+    sub = ad.X[:, [pos[g] for g in present]]
+    sub = (sub.toarray() if sp.issparse(sub) else np.asarray(sub)) > 0
+    del ad
+    return {"expr": {g: sub[:, j] for j, g in enumerate(present)}, "info": info}
+
+
+def _tissue_safety_vec(fires, info):
+    safe = (~fires[info["keep"]]).astype(float)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return 100.0 * np.bincount(info["codes"], weights=safe, minlength=len(info["counts"])) / info["counts"]
+
+
+def _tissue_pass_mask(det, info):
+    t1 = [c for c, t in zip(info["cols"], info["tiers"]) if t == "Tier1"]
+    t2 = [c for c, t in zip(info["cols"], info["tiers"]) if t == "Tier2"]
+    ok1, ok2 = det[t1].ge(TIER1_MIN), det[t2].ge(TIER2_MIN)
+    if not DROP_IF_MISSING:
+        ok1, ok2 = ok1 | det[t1].isna(), ok2 | det[t2].isna()
+    return (ok1.all(axis=1) & ok2.all(axis=1)).values
+
+
+def _report_tissue_filter(kind, atlas_label, info, n_in, n_gate, n_kept, unit):
+    tiers = np.array(info["tiers"]); cnt = np.asarray(info["counts"])
+    print(f"  [TISSUE FILTER {kind}] {atlas_label}: {n_in:,} -> {n_gate:,} (overall safety gate) -> "
+          f"{n_kept:,} {unit} after Tier1 >= {TIER1_MIN}% / Tier2 >= {TIER2_MIN}%\n"
+          f"        healthy cells evaluated: Tier1 {int(cnt[tiers == 'Tier1'].sum()):,} "
+          f"({int((tiers == 'Tier1').sum())} tissues) + Tier2 {int(cnt[tiers == 'Tier2'].sum()):,} "
+          f"({int((tiers == 'Tier2').sum())} tissues) = {int(cnt.sum()):,}")
+
+
+def _tissue_filter_single_gene(atlas_label, atlas_path, df_results, safety_threshold, output_dir):
+    """
+    Tissue-wise safety filter for one atlas's single-gene results table
+    (columns Gene, Efficacy, Safety, ObjectiveScore). Genes are kept only if
+    overall Safety >= safety_threshold AND safety >= TIER1_MIN in every Tier 1
+    tissue AND >= TIER2_MIN in every Tier 2 tissue of THIS atlas.
+
+    Saves single_gene_results_<atlas_label>_tissue_filtered.csv (with the
+    per-tissue safety columns) and returns the filtered table with exactly the
+    same columns as df_results, ready for Robust Rank Aggregation.
+    """
+    n_in = len(df_results)
+    df   = df_results[df_results["Safety"] >= safety_threshold - 1e-9].reset_index(drop=True)
+    A    = _load_atlas_expr(atlas_label, atlas_path, list(df["Gene"].astype(str)))
+    info = A["info"]
+
+    rows = []
+    for g in df["Gene"].astype(str):
+        rows.append(_tissue_safety_vec(A["expr"][g], info) if g in A["expr"]
+                    else np.full(len(info["cols"]), np.nan))
+    det  = pd.DataFrame(rows, columns=info["cols"], index=df.index)
+    keep = _tissue_pass_mask(det, info)
+
+    out_csv = os.path.join(output_dir, f"single_gene_results_{atlas_label}_tissue_filtered.csv")
+    pd.concat([df, det], axis=1)[keep].to_csv(out_csv, index=False)
+    print(f"[{atlas_label}] Tissue-filtered single-gene results saved to: {out_csv}")
+    _report_tissue_filter("single gene", atlas_label, info, n_in, len(df), int(keep.sum()), "genes")
+
+    return df[keep].reset_index(drop=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2626,8 +2795,19 @@ def run(
         "tabula", tabula_healthy_path, adata_tumor, tumor_genes, safety_threshold, output_dir
     )
 
+    # Tissue-wise safety filter (each atlas on its own tiers) — runs just before RRA
+    print("\n" + "=" * 70)
+    print(f"  Tissue-wise safety filter (Tier1 >= {TIER1_MIN}%, Tier2 >= {TIER2_MIN}%) — before RRA")
+    print("=" * 70)
+    df_results_hpa_filt = _tissue_filter_single_gene(
+        "hpa", hpa_healthy_path, df_results_hpa, safety_threshold, output_dir
+    )
+    df_results_tabula_filt = _tissue_filter_single_gene(
+        "tabula", tabula_healthy_path, df_results_tabula, safety_threshold, output_dir
+    )
+
     df_rra = _robust_rank_aggregation_single_gene(
-        df_results_hpa, df_results_tabula,
+        df_results_hpa_filt, df_results_tabula_filt,
         efficacy_threshold=rra_efficacy_threshold,
         safety_threshold=rra_safety_threshold,
         output_dir=output_dir,
