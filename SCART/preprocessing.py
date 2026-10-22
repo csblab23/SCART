@@ -1571,6 +1571,10 @@ def run_preprocessing_pipeline(
     # DEG, SCEVAN, or Cancer Composition Score computation.
     cc_tumor_celltype_key=None,
     cc_healthy_celltype_key=None,
+    # Minimum malignant cells a sample must have (after the
+    # scMalignantFinder / SCEVAN call in Step 4c) to be kept. Samples below
+    # this are removed in Step 5b. Set to None or 0 to disable.
+    min_malignant_per_sample=100,
 ):
     print("\n========== START ==========\n")
 
@@ -1935,6 +1939,47 @@ def run_preprocessing_pipeline(
     adata_mal = adata_epi[malignant_mask].copy()
     print(f"Malignant epithelial cells retained: {adata_mal.n_obs}")
     print(f"Non-malignant epithelial cells removed: {(~malignant_mask).sum()}")
+
+    # STEP 5b: drop samples with fewer than
+    # min_malignant_per_sample malignant cells (counted AFTER the Step 4c
+    # malignancy call, i.e. after scMalignantFinder / SCEVAN).
+    if min_malignant_per_sample:
+        print(f"\n--- Step 5b: Remove samples with < {min_malignant_per_sample} "
+              f"malignant cells ---")
+        _samp_key = next(
+            (k for k in _DEFAULT_BATCH_CANDIDATES if k in adata_epi.obs.columns),
+            None,
+        )
+        if _samp_key is None:
+            print(f"  WARNING: no sample column found (checked "
+                  f"{_DEFAULT_BATCH_CANDIDATES}) — per-sample filter SKIPPED.")
+        else:
+            _all_samples = adata_epi.obs[_samp_key].astype(str).unique()
+            _mal_counts = (
+                adata_mal.obs[_samp_key].astype(str).value_counts()
+                .reindex(_all_samples, fill_value=0)
+            )
+            _keep = _mal_counts[_mal_counts >= min_malignant_per_sample].index
+            _drop = _mal_counts[_mal_counts < min_malignant_per_sample]
+            print(f"  Sample column used: '{_samp_key}'")
+            print("  Malignant cells per sample:\n"
+                  + _mal_counts.to_string())
+            if len(_drop) == 0:
+                print("  All samples pass — nothing removed.")
+            else:
+                print(f"  Removing {len(_drop)} sample(s): "
+                      f"{', '.join(f'{s} ({n})' for s, n in _drop.items())}")
+                if len(_keep) == 0:
+                    raise ValueError(
+                        f"All samples have fewer than {min_malignant_per_sample} "
+                        "malignant cells — nothing left to analyse.\n"
+                        "Lower min_malignant_per_sample or set it to None."
+                    )
+                adata_mal = adata_mal[
+                    adata_mal.obs[_samp_key].astype(str).isin(_keep)
+                ].copy()
+                print(f"  Malignant epithelial cells after sample filter: "
+                      f"{adata_mal.n_obs}")
 
     if adata_mal.n_obs == 0:
         raise ValueError(
