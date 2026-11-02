@@ -44,6 +44,11 @@ TABULA_FILES = {
 
 VALID_CANCER_TYPES = sorted(TABULA_FILES.keys())
 
+# Haematological cancer types: malignant cells are looked for among
+# B cell + plasma cell labels (Module 3) instead of epithelial cells.
+HEMATOLOGICAL_CANCER_TYPES = {"blood_cancer", "bone_marrow_cancer"}
+_HEME_TARGET_REGEX = r"(?:^|[^a-z])b[ -]?cell|plasma cell"
+
 DISEASE_TUMOR_KEYWORDS = [
     "tumor","tumour","cancer","carcinoma","adenocarcinoma","malignant","malignancy",
     "metastatic","metastasis","neoplasm","neoplastic","CAR-T","infusion",
@@ -271,19 +276,35 @@ class SampleAnnotator:
         adata.uns["skip_popv"]             = True
 
         unique_labels  = sorted(adata.obs["popv_majority_vote_prediction"].unique())
-        epithelial     = [l for l in unique_labels if "epithelial cell" in l.lower()]
-        non_epithelial = [l for l in unique_labels if "epithelial cell" not in l.lower()]
+        import re as _re
+        _tokens = [t.strip().lower() for t in self._user_cancer_type.split(",") if t.strip()]
+        _heme   = bool(_tokens) and all(t in HEMATOLOGICAL_CANCER_TYPES for t in _tokens)
+        if _heme:
+            epithelial     = [l for l in unique_labels if _re.search(_HEME_TARGET_REGEX, l.lower())]
+            non_epithelial = [l for l in unique_labels if not _re.search(_HEME_TARGET_REGEX, l.lower())]
+            _lbl, _non = "B cell / plasma cell labels found", "Other labels"
+        else:
+            epithelial     = [l for l in unique_labels if "epithelial cell" in l.lower()]
+            non_epithelial = [l for l in unique_labels if "epithelial cell" not in l.lower()]
+            _lbl, _non = "Epithelial labels found", "Non-epithelial labels"
         print(f"\n  Manual annotation column : '{col}'")
         print(f"  Copied to               : 'popv_majority_vote_prediction'")
         print(f"  Total unique labels     : {len(unique_labels)}")
-        print(f"  Epithelial labels found : {epithelial if epithelial else 'NONE'}")
-        print(f"  Non-epithelial labels   : {non_epithelial}")
+        print(f"  {_lbl:<24}: {epithelial if epithelial else 'NONE'}")
+        print(f"  {_non:<24}: {non_epithelial}")
         print( "  PopV will be SKIPPED (adata.uns['skip_popv'] = True)")
         if not epithelial:
-            print(
-                "\n  ⚠ WARNING: No epithelial labels detected.\n"
-                "  Labels must END WITH 'epithelial cell' (case-insensitive)."
-            )
+            if _heme:
+                print(
+                    "\n  ⚠ WARNING: No 'B cell' or 'plasma cell' labels detected.\n"
+                    "  For blood_cancer / bone_marrow_cancer, labels must contain "
+                    "'B cell' or 'plasma cell' (case-insensitive)."
+                )
+            else:
+                print(
+                    "\n  ⚠ WARNING: No epithelial labels detected.\n"
+                    "  Labels must END WITH 'epithelial cell' (case-insensitive)."
+                )
 
     # CLAUDE EDIT — search a GSM's GEO metadata for a field matching
     # self.batch_key (case-insensitive substring on the field's key),
