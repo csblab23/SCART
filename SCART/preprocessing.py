@@ -15,6 +15,23 @@ Step 6  DEG: malignant epithelial vs non-epithelial rest (surfaceome genes).
 Step 7  Binarise ONLY the malignant epithelial AnnData, store DEG, save.
 
 ═══════════════════════════════════════════════════════════════════════════════
+HAEMATOLOGICAL CANCERS (blood_cancer / bone_marrow_cancer)
+═══════════════════════════════════════════════════════════════════════════════
+
+When the cancer type (adata.uns['cancer_type'] from Module 1, or the
+cancer_type= argument below) is blood_cancer or bone_marrow_cancer, every
+"epithelial" step above uses B cell + plasma cell labels instead:
+  Step 2/3  select cells whose label contains "B cell" or "plasma cell"
+  Step 4    scMalignantFinder + SCEVAN on those cells (SCEVAN normal
+            baseline = reference B cell + plasma cell, unless
+            scevan_ref_epithelial_values is supplied)
+  Step 5-6  keep malignant B/plasma cells; rest = all other cell types
+  Step 8    DEG: malignant_b_plasma vs non_b_plasma_rest
+This works the same for PopV output, a user h5ad with
+manual_annotation_col=, and a user-supplied PopV h5ad. All other cancer
+types follow the epithelial route unchanged.
+
+═══════════════════════════════════════════════════════════════════════════════
 RAW COUNT HANDLING
 ═══════════════════════════════════════════════════════════════════════════════
 
@@ -549,6 +566,62 @@ def _build_r_env(r_home):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Haematological-cancer cell selection (B cell + plasma cell)
+# ═══════════════════════════════════════════════════════════════════════════
+# Solid tumours: malignant cells are found among EPITHELIAL cells.
+# Haematological cancers (blood_cancer / bone_marrow_cancer): the malignant
+# compartment is B cell + plasma cell lineage, so those labels are selected
+# instead. Every other cancer type keeps the epithelial route unchanged.
+#
+# Matching is case-insensitive substring/regex on the PopV (or user) label,
+# in the same spirit as the existing "epithelial cell" match, so ontology
+# variants such as "naive B cell", "memory B cell", "IgA plasma cell" are
+# all captured. "plasmacytoid dendritic cell" is NOT matched.
+HEMATOLOGICAL_CANCER_TYPES = {"blood_cancer", "bone_marrow_cancer"}
+_HEME_TARGET_REGEX = r"(?:^|[^a-z])b[ -]?cell|plasma cell"
+
+
+def _resolve_heme_mode(cancer_type=None, adata=None):
+    """
+    True  → haematological route (select B cell + plasma cell).
+    False → solid-tumour route (select epithelial cells, unchanged).
+
+    cancer_type is taken from the explicit argument first, otherwise from
+    adata.uns['cancer_type'] (written by Module 1 / SampleAnnotator).
+    """
+    source = "cancer_type argument"
+    ct = cancer_type
+    if ct is None and adata is not None:
+        ct = adata.uns.get("cancer_type", None)
+        source = "adata.uns['cancer_type']"
+    if ct is None:
+        print("  Cancer type not found (no cancer_type= argument and no "
+              "adata.uns['cancer_type']) — using the default epithelial route.\n"
+              "  For blood_cancer / bone_marrow_cancer pass cancer_type= explicitly.")
+        return False
+
+    tokens = [t.strip().lower() for t in str(ct).split(",") if t.strip()]
+    heme_flags = [t in HEMATOLOGICAL_CANCER_TYPES for t in tokens]
+    if tokens and all(heme_flags):
+        print(f"  Cancer type '{ct}' (from {source}) is haematological → "
+              f"selecting 'B cell' + 'plasma cell' instead of epithelial cells.")
+        return True
+    if any(heme_flags):
+        print(f"  WARNING: cancer type '{ct}' mixes haematological and solid "
+              f"types — the default epithelial route is used.\n"
+              f"  Run haematological and solid datasets separately.")
+    return False
+
+
+def _target_cell_mask(labels, heme_mode):
+    """Boolean mask of the cells that go into malignancy detection."""
+    labels = labels.astype(str)
+    if heme_mode:
+        return labels.str.lower().str.contains(_HEME_TARGET_REGEX, regex=True, na=False)
+    return labels.str.contains("epithelial cell", case=False, na=False)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # SCEVAN reference preparation (mirrors Input_SCEVAN.ipynb exactly)
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -557,6 +630,7 @@ def _prepare_scevan_reference(
     ref_cell_col,
     ref_epithelial_values,
     ref_max_cells,
+    heme_mode=False,
 ):
     if ref_cell_col is None:
         n_before = adata_ref_full.n_obs
@@ -595,18 +669,20 @@ def _prepare_scevan_reference(
         adata_ref_ep = adata_ref_full[ep_mask].copy()
 
     else:
-        ep_mask = adata_ref_full.obs[ref_cell_col].astype(str).str.contains(
-            "epithelial cell", case=False, na=False
-        )
+        # Haematological route: the normal CNV baseline is the reference's
+        # B cell + plasma cell population; all other cancers keep the
+        # epithelial substring match.
+        _ref_target = "'B cell' / 'plasma cell'" if heme_mode else "'epithelial cell'"
+        ep_mask = _target_cell_mask(adata_ref_full.obs[ref_cell_col], heme_mode)
         n_before = ep_mask.sum()
         logger.info(
-            f"SCEVAN reference: substring match (contains 'epithelial cell') "
+            f"SCEVAN reference: substring match (contains {_ref_target}) "
             f"on '{ref_cell_col}' → {n_before} cells."
         )
         if n_before == 0:
             unique_vals = adata_ref_full.obs[ref_cell_col].value_counts().to_string()
             raise ValueError(
-                f"SCEVAN reference: no cells found containing 'epithelial cell' "
+                f"SCEVAN reference: no cells found containing {_ref_target} "
                 f"in column '{ref_cell_col}'.\n"
                 f"Unique values:\n{unique_vals}\n\n"
                 f"Fix: supply scevan_ref_epithelial_values=['YourLabelHere'] and "
@@ -648,6 +724,7 @@ def _run_scevan(
     subclones=False,
     batch_size=3000,
     save_dir=None,
+    heme_mode=False,
 ):
     q_barcodes   = np.array(adata_query.obs_names)
     empty_result = pd.DataFrame({
@@ -693,6 +770,7 @@ def _run_scevan(
             ref_cell_col         = ref_cell_col,
             ref_epithelial_values= ref_epithelial_values,
             ref_max_cells        = ref_max_cells,
+            heme_mode            = heme_mode,
         )
     except ValueError as exc:
         logger.error(f"SCEVAN reference preparation failed:\n{exc}")
@@ -1575,6 +1653,11 @@ def run_preprocessing_pipeline(
     # scMalignantFinder / SCEVAN call in Step 4c) to be kept. Samples below
     # this are removed in Step 5b. Set to None or 0 to disable.
     min_malignant_per_sample=100,
+    # Optional override. Normally read from adata.uns['cancer_type'] (set by
+    # Module 1). 'blood_cancer' / 'bone_marrow_cancer' switch Step 3 from
+    # epithelial cells to B cell + plasma cell. Needed only if the h5ad has
+    # no uns['cancer_type'] (e.g. a hand-supplied PopV h5ad).
+    cancer_type=None,
 ):
     print("\n========== START ==========\n")
 
@@ -1632,6 +1715,15 @@ def run_preprocessing_pipeline(
     adata_full = adata.copy()
     print(f"Full dataset loaded: {adata_full.n_obs} cells × {adata_full.n_vars} genes")
 
+    # Haematological route (blood_cancer / bone_marrow_cancer) → B cell + plasma cell
+    heme_mode = _resolve_heme_mode(cancer_type, adata_full)
+    if heme_mode:
+        _cell_desc, _tgt_grp, _rest_grp = "B/plasma cell", "malignant_b_plasma", "non_b_plasma_rest"
+        _label_phrase = "'B cell' / 'plasma cell'"
+    else:
+        _cell_desc, _tgt_grp, _rest_grp = "epithelial", "malignant_epithelial", "non_epithelial_rest"
+        _label_phrase = "'epithelial cell'"
+
     _skip_popv  = adata_full.uns.get("skip_popv", False)
     _manual_col = adata_full.uns.get("manual_annotation_col", None)
 
@@ -1652,18 +1744,28 @@ def run_preprocessing_pipeline(
                 "the h5ad, or add 'popv_majority_vote_prediction' manually."
             )
         _label_counts = adata_full.obs["popv_majority_vote_prediction"].value_counts()
-        _epi_labels   = [
-            l for l in _label_counts.index
-            if "epithelial cell" in str(l).lower()
-        ]
+        _epi_mask_lbl = _target_cell_mask(
+            pd.Series([str(l) for l in _label_counts.index]), heme_mode
+        ).values
+        _epi_labels   = [l for l, m in zip(_label_counts.index, _epi_mask_lbl) if m]
         print(
             f"  Label summary (popv_majority_vote_prediction):\n"
             + _label_counts.to_string()
-            + f"\n\n  Epithelial labels that will be selected in Step 3:\n"
+            + f"\n\n  {'B cell / plasma cell' if heme_mode else 'Epithelial'} labels that will be selected in Step 3:\n"
             + ("  " + "\n  ".join(_epi_labels) if _epi_labels
                else "  *** NONE FOUND — check your label names! ***")
             + "\n"
         )
+        if not _epi_labels and heme_mode:
+            raise ValueError(
+                "Manual annotation mode (haematological cancer): no 'B cell' or "
+                "'plasma cell' labels found in 'popv_majority_vote_prediction'.\n"
+                f"Unique labels present: {list(_label_counts.index)}\n"
+                "Labels must contain 'B cell' or 'plasma cell' "
+                "(case-insensitive), e.g. 'B cell', 'naive B cell', 'plasma cell'.\n"
+                "Please rename them in the source h5ad column and re-run "
+                "SampleAnnotator."
+            )
         if not _epi_labels:
             raise ValueError(
                 "Manual annotation mode: no labels containing 'epithelial cell' "
@@ -1714,17 +1816,27 @@ def run_preprocessing_pipeline(
     # cells a second time against the same numbers (a "double QC"). The
     # qc_params read above (Step 2) is still carried through to the final
     # output's uns['qc_params'] purely as a record of what Module 1 did.
-    print("\n--- Step 3: Epithelial selection ---")
+    print(f"\n--- Step 3: {'B cell + plasma cell' if heme_mode else 'Epithelial'} selection ---")
 
     labels  = adata_full.obs["popv_majority_vote_prediction"].astype(str)
-    ep_mask = labels.str.contains("epithelial cell", case=False, na=False)
+    ep_mask = _target_cell_mask(labels, heme_mode)
 
-    print(f"Epithelial cells (contains 'epithelial cell'): "
+    if heme_mode and ep_mask.sum() == 0:
+        raise ValueError(
+            "Haematological cancer selected but no 'B cell' / 'plasma cell' "
+            "labels found in 'popv_majority_vote_prediction'.\n"
+            f"Unique labels present: {sorted(labels.unique())}"
+        )
+
+    print(f"{_cell_desc.capitalize()} cells (contains {_label_phrase}): "
           f"{ep_mask.sum()} / {adata_full.n_obs} total")
-    print(f"Non-epithelial cells (will be 'rest' group for DEG): {(~ep_mask).sum()}")
+    print(f"Non-{_cell_desc} cells (will be 'rest' group for DEG): {(~ep_mask).sum()}")
 
     matched_labels = labels[ep_mask].unique()
-    logger.info(f"Epithelial labels matched: {sorted(matched_labels)}")
+    logger.info(f"{_cell_desc} labels matched: {sorted(matched_labels)}")
+    if heme_mode:
+        print("  Labels selected:\n  " + "\n  ".join(
+            f"{l}: {int((labels == l).sum())}" for l in sorted(matched_labels)))
 
     adata_epi = adata_full[ep_mask].copy()
 
@@ -1846,7 +1958,8 @@ def run_preprocessing_pipeline(
                 f"\n--- Step 4b: SCEVAN (subprocess) ---\n"
                 f"  Reference h5ad:           {reference_h5ad}\n"
                 f"  ref_cell_col:             {scevan_ref_cell_col}\n"
-                f"  ref_epithelial_values:    {scevan_ref_epithelial_values}\n"
+                f"  ref_epithelial_values:    {scevan_ref_epithelial_values}"
+                f"{'  (None → B cell / plasma cell substring match)' if heme_mode and scevan_ref_epithelial_values is None else ''}\n"
                 f"  ref_max_cells:            {scevan_ref_max_cells} "
                 f"({'all available' if scevan_ref_max_cells is None else 'max'})\n"
                 f"  sample_name:              {scevan_sample_name}\n"
@@ -1888,6 +2001,7 @@ def run_preprocessing_pipeline(
                     subclones               = scevan_subclones,
                     batch_size              = scevan_batch_size,
                     save_dir                = scevan_work_dir,
+                    heme_mode               = heme_mode,
                 )
 
                 bc_to_pred = dict(zip(
@@ -1931,14 +2045,14 @@ def run_preprocessing_pipeline(
         {True: "malignant", False: "non-malignant"}
     )
     print(f"Strategy: {strategy_label}")
-    print(f"  Malignant epithelial:     {malignant_mask.sum()}")
-    print(f"  Non-malignant epithelial: {(~malignant_mask).sum()}  ← these will be REMOVED")
+    print(f"  Malignant {_cell_desc}:     {malignant_mask.sum()}")
+    print(f"  Non-malignant {_cell_desc}: {(~malignant_mask).sum()}  ← these will be REMOVED")
 
     # STEP 5 — Keep ONLY malignant epithelial cells
-    print("\n--- Step 5: Retain malignant epithelial cells only ---")
+    print(f"\n--- Step 5: Retain malignant {_cell_desc} cells only ---")
     adata_mal = adata_epi[malignant_mask].copy()
-    print(f"Malignant epithelial cells retained: {adata_mal.n_obs}")
-    print(f"Non-malignant epithelial cells removed: {(~malignant_mask).sum()}")
+    print(f"Malignant {_cell_desc} cells retained: {adata_mal.n_obs}")
+    print(f"Non-malignant {_cell_desc} cells removed: {(~malignant_mask).sum()}")
 
     # STEP 5b: drop samples with fewer than
     # min_malignant_per_sample malignant cells (counted AFTER the Step 4c
@@ -1978,7 +2092,7 @@ def run_preprocessing_pipeline(
                 adata_mal = adata_mal[
                     adata_mal.obs[_samp_key].astype(str).isin(_keep)
                 ].copy()
-                print(f"  Malignant epithelial cells after sample filter: "
+                print(f"  Malignant {_cell_desc} cells after sample filter: "
                       f"{adata_mal.n_obs}")
 
     if adata_mal.n_obs == 0:
@@ -1994,10 +2108,10 @@ def run_preprocessing_pipeline(
     adata_mal_fullgene = adata_mal.copy()
 
     # STEP 6 — Non-epithelial "rest" group
-    print("\n--- Step 6: Extract non-epithelial 'rest' group ---")
+    print(f"\n--- Step 6: Extract non-{_cell_desc} 'rest' group ---")
     rest_mask  = ~ep_mask
     adata_rest = adata_full[rest_mask].copy()
-    print(f"Non-epithelial 'rest' cells: {adata_rest.n_obs}")
+    print(f"Non-{_cell_desc} 'rest' cells: {adata_rest.n_obs}")
 
     _raw_rest    = _get_raw_counts_from_adata(adata_rest, "rest-group")
     adata_rest.X = sp.csr_matrix(_raw_rest)
@@ -2025,10 +2139,10 @@ def run_preprocessing_pipeline(
           f"(membership only — NOT filtered here, see Step 9)\n")
 
     # STEP 8 — DEG (now runs on the FULL common gene space, unrestricted)
-    print("--- Step 8: DEG — malignant epithelial vs non-epithelial rest ---")
+    print(f"--- Step 8: DEG — malignant {_cell_desc} vs non-{_cell_desc} rest ---")
 
-    adata_mal.obs["deg_group"]  = "malignant_epithelial"
-    adata_rest.obs["deg_group"] = "non_epithelial_rest"
+    adata_mal.obs["deg_group"]  = _tgt_grp
+    adata_rest.obs["deg_group"] = _rest_grp
 
     # CLAUDE EDIT — capture before freeing adata_rest later; only the cell
     # count is needed downstream (uns['deg_params']), not the object itself.
@@ -2053,20 +2167,20 @@ def run_preprocessing_pipeline(
         )
 
     print(f"DEG AnnData: {adata_deg.n_obs} cells × {adata_deg.n_vars} genes")
-    print(f"  malignant_epithelial: "
-          f"{(adata_deg.obs['deg_group'] == 'malignant_epithelial').sum()}")
-    print(f"  non_epithelial_rest:  "
-          f"{(adata_deg.obs['deg_group'] == 'non_epithelial_rest').sum()}")
+    print(f"  {_tgt_grp}: "
+          f"{(adata_deg.obs['deg_group'] == _tgt_grp).sum()}")
+    print(f"  {_rest_grp}:  "
+          f"{(adata_deg.obs['deg_group'] == _rest_grp).sum()}")
 
     sc.tl.rank_genes_groups(
         adata_deg,
         groupby="deg_group",
-        groups=["malignant_epithelial"],
-        reference="non_epithelial_rest",
+        groups=[_tgt_grp],
+        reference=_rest_grp,
         method="wilcoxon",
         key_added="rank_genes_groups",
     )
-    deg = sc.get.rank_genes_groups_df(adata_deg, group="malignant_epithelial")
+    deg = sc.get.rank_genes_groups_df(adata_deg, group=_tgt_grp)
     print(f"\nTotal DEG candidates: {deg.shape[0]}")
     print(f"Applying filters: log2FC > {log2fc_threshold}, pvals_adj < {pval_adj_threshold}")
 
@@ -2089,7 +2203,7 @@ def run_preprocessing_pipeline(
               "  Try: log2fc_threshold=0.5 or pval_adj_threshold=0.10")
     else:
         print(f"DEGs retained: {filtered_deg.shape[0]}")
-        print("\nTop 10 DEGs (malignant epithelial vs non-epithelial rest):")
+        print(f"\nTop 10 DEGs (malignant {_cell_desc} vs non-{_cell_desc} rest):")
         print(filtered_deg.head(10).to_string(index=False))
 
     # CLAUDE EDIT — STEP 8b: Cancer Composition Score (tumor vs. healthy
@@ -2182,7 +2296,8 @@ def run_preprocessing_pipeline(
     adata_mal.uns["filtered_deg"] = filtered_deg.reset_index(drop=True)
     adata_mal.uns["all_deg"]      = deg.reset_index(drop=True)
     adata_mal.uns["deg_params"]   = {
-        "comparison"         : "malignant_epithelial vs non_epithelial_rest",
+        "comparison"         : f"{_tgt_grp} vs {_rest_grp}",
+        "target_cell_route"  : "B cell + plasma cell" if heme_mode else "epithelial",
         "log2fc_threshold"   : log2fc_threshold,
         "pval_adj_threshold" : pval_adj_threshold,
         "method"             : "wilcoxon",
