@@ -274,7 +274,7 @@
 
     <!-- ══════════════════ BEFORE YOU BEGIN ══════════════════════════════ -->
     <h2 id="before-data">Before You Begin — Data Requirements</h2>
-    <p>SCART is designed to be straightforward to use, even if you are new to computational tools. Before running any code, please read these three important rules. They will save you time and prevent the most common mistakes.</p>
+    <p>SCART is designed to be straightforward to use, even if you are new to computational tools. Before running any code, please read these important rules. They will save you time and prevent the most common mistakes.</p>
 
     <div class="warn-banner">
       <div class="warn-banner-icon">⚠️</div>
@@ -297,6 +297,17 @@
       <div class="warn-banner-body">
         <strong>Rule 3 — Make sure your conda environment is active</strong>
         Every command and script on this page assumes you have activated your <code>scart_env</code> conda environment. If you have not set it up yet, please complete the <a href="install.html">Installation guide</a> first.
+      </div>
+    </div>
+
+    <div class="warn-banner">
+      <div class="warn-banner-icon">⚠️</div>
+      <div class="warn-banner-body">
+        <strong>Rule 4 — Keep reference file names exact, and use a separate folder for every run</strong>
+        <ol style="margin:6px 0 0 18px; padding:0;">
+          <li style="margin-bottom:6px;">SCART expects the safety atlas files (<code>hpa_alltissues_geosketch_10k.h5ad</code> and <code>tabula_sapiens_alltissues_10k.h5ad</code>) and the Tabula Sapiens tissue reference files to keep <b>exactly the same file names</b> as given on this website. Do not rename them.</li>
+          <li>We suggest running each separate analysis (h5ad file, GEO ID, or a combined GEO + h5ad run) in its <b>own, different folder</b>. SCART creates output folders and temporary files with the same names for your data (for example <code>GSE_data/</code>, <code>popv_results/</code>, <code>preprocessing_results/</code> and <code>input_tumor.h5ad</code>), so two runs in one folder will overwrite or mix each other.</li>
+        </ol>
       </div>
     </div>
 
