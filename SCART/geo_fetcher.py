@@ -49,6 +49,29 @@ VALID_CANCER_TYPES = sorted(TABULA_FILES.keys())
 HEMATOLOGICAL_CANCER_TYPES = {"blood_cancer", "bone_marrow_cancer"}
 _HEME_TARGET_REGEX = r"(?:^|[^a-z])b[ -]?cell|plasma cell"
 
+
+def _normalize_target_labels(labels):
+    """
+    User-supplied target labels -> list of unique strings (order kept), or None.
+    A single string is ONE label (never split on commas, because labels such as
+    'CD4-positive, alpha-beta T cell' contain commas).
+    """
+    if labels is None:
+        return None
+    if isinstance(labels, str):
+        items = [labels]
+    else:
+        try:
+            items = list(labels)
+        except TypeError:
+            items = [labels]
+    out = []
+    for x in items:
+        x = str(x)
+        if x != "" and x not in out:
+            out.append(x)
+    return out or None
+
 DISEASE_TUMOR_KEYWORDS = [
     "tumor","tumour","cancer","carcinoma","adenocarcinoma","malignant","malignancy",
     "metastatic","metastasis","neoplasm","neoplastic","CAR-T","infusion",
@@ -161,7 +184,7 @@ def _safe_concat(adatas: list) -> ad.AnnData:
 class SampleAnnotator:
     def __init__(self, *inputs, cancer_type: str, min_genes=None,
                  max_mt=None, manual_annotation_col=None, batch_key=None,
-                 exclude_gsm_ids=None):
+                 exclude_gsm_ids=None, target_cell_labels=None):
         self.inputs   = list(inputs)
         self.base_dir = "GSE_data"
         self.min_genes = min_genes
@@ -179,6 +202,16 @@ class SampleAnnotator:
             self._parse_cancer_type(cancer_type)
         )
         self.manual_annotation_col = manual_annotation_col
+
+        # Optional exact labels for the haematological route (blood_cancer /
+        # bone_marrow_cancer). Stored in adata.uns['target_cell_labels'] so
+        # Module 3 uses the same labels. With manual_annotation_col= they are
+        # checked here against the annotation labels (exact match).
+        self.target_cell_labels = _normalize_target_labels(target_cell_labels)
+        if self.target_cell_labels and not self._is_heme_type():
+            print(f"  NOTE: target_cell_labels apply only to blood_cancer / bone_marrow_cancer; "
+                  f"ignored for '{self._user_cancer_type}'.")
+            self.target_cell_labels = None
 
         # CLAUDE EDIT — optional keyword to search for in GEO sample metadata
         # (e.g. "donor", "patient", "timepoint") to build a batch column for
@@ -262,6 +295,15 @@ class SampleAnnotator:
         print(f"  Cells after QC  : {adata.n_obs}  (removed {n_cells_before - adata.n_obs})")
         return adata
 
+    def _is_heme_type(self):
+        tokens = [t.strip().lower() for t in self._user_cancer_type.split(",") if t.strip()]
+        return bool(tokens) and all(t in HEMATOLOGICAL_CANCER_TYPES for t in tokens)
+
+    def _store_target_labels(self, adata):
+        if self.target_cell_labels:
+            adata.uns["target_cell_labels"] = list(self.target_cell_labels)
+            print(f"  target_cell_labels stored (used by Module 3): {self.target_cell_labels}")
+
     def _store_manual_annotation(self, adata, source_file):
         col = self.manual_annotation_col
         if col not in adata.obs.columns:
@@ -279,7 +321,24 @@ class SampleAnnotator:
         import re as _re
         _tokens = [t.strip().lower() for t in self._user_cancer_type.split(",") if t.strip()]
         _heme   = bool(_tokens) and all(t in HEMATOLOGICAL_CANCER_TYPES for t in _tokens)
-        if _heme:
+        if _heme and self.target_cell_labels:
+            _missing = [l for l in self.target_cell_labels if l not in set(unique_labels)]
+            if _missing:
+                import difflib
+                _hint = "\n".join(
+                    f"  '{m}'" + (f"   <- did you mean: {difflib.get_close_matches(m, unique_labels, n=3, cutoff=0.6)}?"
+                                  if difflib.get_close_matches(m, unique_labels, n=3, cutoff=0.6) else "")
+                    for m in _missing)
+                raise ValueError(
+                    "\ntarget_cell_labels must match the labels of "
+                    f"'{col}' EXACTLY (case, spaces and commas included).\n"
+                    f"Not found:\n{_hint}\n\nLabels available:\n  " + "\n  ".join(unique_labels)
+                )
+            _chosen        = set(self.target_cell_labels)
+            epithelial     = [l for l in unique_labels if l in _chosen]
+            non_epithelial = [l for l in unique_labels if l not in _chosen]
+            _lbl, _non = "Your target labels found", "Other labels"
+        elif _heme:
             epithelial     = [l for l in unique_labels if _re.search(_HEME_TARGET_REGEX, l.lower())]
             non_epithelial = [l for l in unique_labels if not _re.search(_HEME_TARGET_REGEX, l.lower())]
             _lbl, _non = "B cell / plasma cell labels found", "Other labels"
@@ -434,6 +493,7 @@ class SampleAnnotator:
             adata.raw = adata
             adata.uns["cancer_type"] = self._user_cancer_type
             print(f"  cancer_type stored: {self._user_cancer_type}")
+            self._store_target_labels(adata)
             if self.manual_annotation_col is not None:
                 print("\n  Manual annotation mode activated.")
                 self._store_manual_annotation(adata, file)
@@ -475,6 +535,7 @@ class SampleAnnotator:
             combined.raw = combined
             combined.uns["cancer_type"] = self._user_cancer_type
             print(f"\n  cancer_type stored in combined h5ad: {self._user_cancer_type}")
+            self._store_target_labels(combined)
 
             if self.manual_annotation_col is not None:
                 if "popv_majority_vote_prediction" in combined.obs.columns:
@@ -1353,6 +1414,7 @@ class SampleAnnotator:
 
         combined.uns["cancer_type"] = self._user_cancer_type
         print(f"... stored cancer_type in h5ad: {self._user_cancer_type}")
+        self._store_target_labels(combined)
 
         self._store_qc_params(combined)
         combined = self._apply_qc(combined)
