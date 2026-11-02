@@ -31,6 +31,14 @@ This works the same for PopV output, a user h5ad with
 manual_annotation_col=, and a user-supplied PopV h5ad. All other cancer
 types follow the epithelial route unchanged.
 
+Own labels (blood_cancer / bone_marrow_cancer only): pass
+target_cell_labels=[...] (or SampleAnnotator(..., target_cell_labels=[...])
+in Module 1). Only those labels are then selected, in every step above,
+including the SCEVAN normal baseline. Labels are matched EXACTLY against
+'popv_majority_vote_prediction' (case, spaces, commas); a label that is not
+found stops the run with a list of the available labels. Without
+target_cell_labels, the automatic "B cell" / "plasma cell" selection is used.
+
 ═══════════════════════════════════════════════════════════════════════════════
 RAW COUNT HANDLING
 ═══════════════════════════════════════════════════════════════════════════════
@@ -613,9 +621,61 @@ def _resolve_heme_mode(cancer_type=None, adata=None):
     return False
 
 
-def _target_cell_mask(labels, heme_mode):
+def _normalize_target_labels(labels):
+    """
+    User-supplied target labels -> list of unique strings (order kept), or None.
+
+    A list / tuple / set / array is used as given. A single string is ONE label
+    and is never split on commas, because cell-type labels such as
+    'CD4-positive, alpha-beta T cell' contain commas.
+    """
+    if labels is None:
+        return None
+    if isinstance(labels, str):
+        items = [labels]
+    else:
+        try:
+            items = list(labels)
+        except TypeError:
+            items = [labels]
+    out = []
+    for x in items:
+        x = str(x)
+        if x != "" and x not in out:
+            out.append(x)
+    return out or None
+
+
+def _validate_user_target_labels(available, user_labels,
+                                 source="popv_majority_vote_prediction"):
+    """
+    Every user label must EXACTLY match a label in the annotation column
+    (same case, spaces and punctuation). Raises with close-match hints.
+    """
+    import difflib
+    avail     = sorted({str(a) for a in available})
+    avail_set = set(avail)
+    missing   = [l for l in user_labels if l not in avail_set]
+    if not missing:
+        return
+    lines = []
+    for m in missing:
+        close = difflib.get_close_matches(m, avail, n=3, cutoff=0.6)
+        lines.append(f"  '{m}'" + (f"   <- did you mean: {close}?" if close else ""))
+    raise ValueError(
+        "target_cell_labels must match labels in the annotation column EXACTLY "
+        "(case, spaces and commas included).\n"
+        f"Not found in '{source}':\n" + "\n".join(lines)
+        + "\n\nLabels available:\n  " + "\n  ".join(avail)
+    )
+
+
+def _target_cell_mask(labels, heme_mode, target_labels=None):
     """Boolean mask of the cells that go into malignancy detection."""
     labels = labels.astype(str)
+    if heme_mode and target_labels:
+        # User-chosen labels: exact string match only (no substring / regex).
+        return labels.isin(set(target_labels))
     if heme_mode:
         return labels.str.lower().str.contains(_HEME_TARGET_REGEX, regex=True, na=False)
     return labels.str.contains("epithelial cell", case=False, na=False)
@@ -631,6 +691,7 @@ def _prepare_scevan_reference(
     ref_epithelial_values,
     ref_max_cells,
     heme_mode=False,
+    target_labels=None,
 ):
     if ref_cell_col is None:
         n_before = adata_ref_full.n_obs
@@ -672,8 +733,16 @@ def _prepare_scevan_reference(
         # Haematological route: the normal CNV baseline is the reference's
         # B cell + plasma cell population; all other cancers keep the
         # epithelial substring match.
-        _ref_target = "'B cell' / 'plasma cell'" if heme_mode else "'epithelial cell'"
-        ep_mask = _target_cell_mask(adata_ref_full.obs[ref_cell_col], heme_mode)
+        if heme_mode and target_labels:
+            _ref_target = f"your target labels {target_labels} (exact match)"
+            _in_ref = set(adata_ref_full.obs[ref_cell_col].astype(str).unique())
+            _absent = [l for l in target_labels if l not in _in_ref]
+            if _absent:
+                print(f"  WARNING: these target labels are not in the reference column "
+                      f"'{ref_cell_col}' and will not contribute to the SCEVAN baseline: {_absent}")
+        else:
+            _ref_target = "'B cell' / 'plasma cell'" if heme_mode else "'epithelial cell'"
+        ep_mask = _target_cell_mask(adata_ref_full.obs[ref_cell_col], heme_mode, target_labels)
         n_before = ep_mask.sum()
         logger.info(
             f"SCEVAN reference: substring match (contains {_ref_target}) "
@@ -725,6 +794,7 @@ def _run_scevan(
     batch_size=3000,
     save_dir=None,
     heme_mode=False,
+    target_labels=None,
 ):
     q_barcodes   = np.array(adata_query.obs_names)
     empty_result = pd.DataFrame({
@@ -771,6 +841,7 @@ def _run_scevan(
             ref_epithelial_values= ref_epithelial_values,
             ref_max_cells        = ref_max_cells,
             heme_mode            = heme_mode,
+            target_labels        = target_labels,
         )
     except ValueError as exc:
         logger.error(f"SCEVAN reference preparation failed:\n{exc}")
@@ -1658,6 +1729,14 @@ def run_preprocessing_pipeline(
     # epithelial cells to B cell + plasma cell. Needed only if the h5ad has
     # no uns['cancer_type'] (e.g. a hand-supplied PopV h5ad).
     cancer_type=None,
+    # Haematological cancers only (blood_cancer / bone_marrow_cancer).
+    # None (default) -> automatic: every label containing "B cell" or
+    # "plasma cell". A list of labels -> ONLY those labels, matched EXACTLY
+    # against 'popv_majority_vote_prediction', e.g.
+    #   target_cell_labels=["plasma cell", "B cell", "hematopoietic stem cell"]
+    # If None, labels stored in adata.uns['target_cell_labels'] by Module 1
+    # (SampleAnnotator(..., target_cell_labels=[...])) are used when present.
+    target_cell_labels=None,
 ):
     print("\n========== START ==========\n")
 
@@ -1717,7 +1796,27 @@ def run_preprocessing_pipeline(
 
     # Haematological route (blood_cancer / bone_marrow_cancer) → B cell + plasma cell
     heme_mode = _resolve_heme_mode(cancer_type, adata_full)
-    if heme_mode:
+
+    # Optional user-chosen labels (haematological route only; exact match)
+    _labels_src = "target_cell_labels argument"
+    _user_labels = _normalize_target_labels(target_cell_labels)
+    if _user_labels is None:
+        _user_labels = _normalize_target_labels(adata_full.uns.get("target_cell_labels", None))
+        _labels_src  = "adata.uns['target_cell_labels'] (stored by Module 1)"
+    if _user_labels and not heme_mode:
+        print("  NOTE: target_cell_labels were given, but they apply only to blood_cancer / "
+              "bone_marrow_cancer. They are ignored; the epithelial route is used.")
+        _user_labels = None
+    _custom_labels = bool(heme_mode and _user_labels)
+    if _custom_labels:
+        print(f"  Using YOUR target labels (exact match, from {_labels_src}):")
+        for _l in _user_labels:
+            print(f"    - {_l}")
+
+    if _custom_labels:
+        _cell_desc, _tgt_grp, _rest_grp = "target", "malignant_target", "non_target_rest"
+        _label_phrase = f"your labels {_user_labels}"
+    elif heme_mode:
         _cell_desc, _tgt_grp, _rest_grp = "B/plasma cell", "malignant_b_plasma", "non_b_plasma_rest"
         _label_phrase = "'B cell' / 'plasma cell'"
     else:
@@ -1744,14 +1843,17 @@ def run_preprocessing_pipeline(
                 "the h5ad, or add 'popv_majority_vote_prediction' manually."
             )
         _label_counts = adata_full.obs["popv_majority_vote_prediction"].value_counts()
+        if _custom_labels:
+            _validate_user_target_labels(_label_counts.index, _user_labels)
         _epi_mask_lbl = _target_cell_mask(
-            pd.Series([str(l) for l in _label_counts.index]), heme_mode
+            pd.Series([str(l) for l in _label_counts.index]), heme_mode,
+            _user_labels if _custom_labels else None,
         ).values
         _epi_labels   = [l for l, m in zip(_label_counts.index, _epi_mask_lbl) if m]
         print(
             f"  Label summary (popv_majority_vote_prediction):\n"
             + _label_counts.to_string()
-            + f"\n\n  {'B cell / plasma cell' if heme_mode else 'Epithelial'} labels that will be selected in Step 3:\n"
+            + f"\n\n  {'Your target' if _custom_labels else ('B cell / plasma cell' if heme_mode else 'Epithelial')} labels that will be selected in Step 3:\n"
             + ("  " + "\n  ".join(_epi_labels) if _epi_labels
                else "  *** NONE FOUND — check your label names! ***")
             + "\n"
@@ -1816,19 +1918,21 @@ def run_preprocessing_pipeline(
     # cells a second time against the same numbers (a "double QC"). The
     # qc_params read above (Step 2) is still carried through to the final
     # output's uns['qc_params'] purely as a record of what Module 1 did.
-    print(f"\n--- Step 3: {'B cell + plasma cell' if heme_mode else 'Epithelial'} selection ---")
+    print(f"\n--- Step 3: {'user-selected label' if _custom_labels else ('B cell + plasma cell' if heme_mode else 'Epithelial')} selection ---")
 
     labels  = adata_full.obs["popv_majority_vote_prediction"].astype(str)
-    ep_mask = _target_cell_mask(labels, heme_mode)
+    if _custom_labels:
+        _validate_user_target_labels(labels.unique(), _user_labels)
+    ep_mask = _target_cell_mask(labels, heme_mode, _user_labels if _custom_labels else None)
 
     if heme_mode and ep_mask.sum() == 0:
         raise ValueError(
-            "Haematological cancer selected but no 'B cell' / 'plasma cell' "
-            "labels found in 'popv_majority_vote_prediction'.\n"
+            f"Haematological cancer selected but no cells matched {_label_phrase} "
+            "in 'popv_majority_vote_prediction'.\n"
             f"Unique labels present: {sorted(labels.unique())}"
         )
 
-    print(f"{_cell_desc.capitalize()} cells (contains {_label_phrase}): "
+    print(f"{_cell_desc.capitalize()} cells ({'matching' if _custom_labels else 'contains'} {_label_phrase}): "
           f"{ep_mask.sum()} / {adata_full.n_obs} total")
     print(f"Non-{_cell_desc} cells (will be 'rest' group for DEG): {(~ep_mask).sum()}")
 
@@ -1959,7 +2063,7 @@ def run_preprocessing_pipeline(
                 f"  Reference h5ad:           {reference_h5ad}\n"
                 f"  ref_cell_col:             {scevan_ref_cell_col}\n"
                 f"  ref_epithelial_values:    {scevan_ref_epithelial_values}"
-                f"{'  (None → B cell / plasma cell substring match)' if heme_mode and scevan_ref_epithelial_values is None else ''}\n"
+                f"{('  (None → exact match on your target labels)' if _custom_labels else '  (None → B cell / plasma cell substring match)') if heme_mode and scevan_ref_epithelial_values is None else ''}\n"
                 f"  ref_max_cells:            {scevan_ref_max_cells} "
                 f"({'all available' if scevan_ref_max_cells is None else 'max'})\n"
                 f"  sample_name:              {scevan_sample_name}\n"
@@ -2002,6 +2106,7 @@ def run_preprocessing_pipeline(
                     batch_size              = scevan_batch_size,
                     save_dir                = scevan_work_dir,
                     heme_mode               = heme_mode,
+                    target_labels           = _user_labels if _custom_labels else None,
                 )
 
                 bc_to_pred = dict(zip(
@@ -2297,7 +2402,7 @@ def run_preprocessing_pipeline(
     adata_mal.uns["all_deg"]      = deg.reset_index(drop=True)
     adata_mal.uns["deg_params"]   = {
         "comparison"         : f"{_tgt_grp} vs {_rest_grp}",
-        "target_cell_route"  : "B cell + plasma cell" if heme_mode else "epithelial",
+        "target_cell_route"  : ("user-selected labels" if _custom_labels else "B cell + plasma cell") if heme_mode else "epithelial",
         "log2fc_threshold"   : log2fc_threshold,
         "pval_adj_threshold" : pval_adj_threshold,
         "method"             : "wilcoxon",
@@ -2308,6 +2413,8 @@ def run_preprocessing_pipeline(
         "n_surfaceome_genes_in_dataset" : int(len(surf_in_mal)),
         "n_filtered_deg"     : int(filtered_deg.shape[0]),
     }
+    if _custom_labels:
+        adata_mal.uns["deg_params"]["target_cell_labels"] = " | ".join(_user_labels)
     adata_mal.uns["qc_params"] = (
         {"min_genes": min_genes, "max_mt": max_mt} if qc_active else None
     )
