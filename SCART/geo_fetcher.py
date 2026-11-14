@@ -203,15 +203,11 @@ class SampleAnnotator:
         )
         self.manual_annotation_col = manual_annotation_col
 
-        # Optional exact labels for the haematological route (blood_cancer /
-        # bone_marrow_cancer). Stored in adata.uns['target_cell_labels'] so
-        # Module 3 uses the same labels. With manual_annotation_col= they are
-        # checked here against the annotation labels (exact match).
+        # Optional exact labels, valid for ALL cancer types. Stored in
+        # adata.uns['target_cell_labels'] so Module 3 uses the same labels.
+        # With manual_annotation_col= they are checked here against the
+        # annotation labels (exact match).
         self.target_cell_labels = _normalize_target_labels(target_cell_labels)
-        if self.target_cell_labels and not self._is_heme_type():
-            print(f"  NOTE: target_cell_labels apply only to blood_cancer / bone_marrow_cancer; "
-                  f"ignored for '{self._user_cancer_type}'.")
-            self.target_cell_labels = None
 
         # CLAUDE EDIT — optional keyword to search for in GEO sample metadata
         # (e.g. "donor", "patient", "timepoint") to build a batch column for
@@ -321,7 +317,7 @@ class SampleAnnotator:
         import re as _re
         _tokens = [t.strip().lower() for t in self._user_cancer_type.split(",") if t.strip()]
         _heme   = bool(_tokens) and all(t in HEMATOLOGICAL_CANCER_TYPES for t in _tokens)
-        if _heme and self.target_cell_labels:
+        if self.target_cell_labels:
             _missing = [l for l in self.target_cell_labels if l not in set(unique_labels)]
             if _missing:
                 import difflib
