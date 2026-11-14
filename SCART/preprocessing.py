@@ -31,7 +31,7 @@ This works the same for PopV output, a user h5ad with
 manual_annotation_col=, and a user-supplied PopV h5ad. All other cancer
 types follow the epithelial route unchanged.
 
-Own labels (blood_cancer / bone_marrow_cancer only): pass
+Own labels (all cancer types): pass
 target_cell_labels=[...] (or SampleAnnotator(..., target_cell_labels=[...])
 in Module 1). Only those labels are then selected, in every step above,
 including the SCEVAN normal baseline. Labels are matched EXACTLY against
@@ -673,7 +673,7 @@ def _validate_user_target_labels(available, user_labels,
 def _target_cell_mask(labels, heme_mode, target_labels=None):
     """Boolean mask of the cells that go into malignancy detection."""
     labels = labels.astype(str)
-    if heme_mode and target_labels:
+    if target_labels:
         # User-chosen labels: exact string match only (no substring / regex).
         return labels.isin(set(target_labels))
     if heme_mode:
@@ -733,7 +733,7 @@ def _prepare_scevan_reference(
         # Haematological route: the normal CNV baseline is the reference's
         # B cell + plasma cell population; all other cancers keep the
         # epithelial substring match.
-        if heme_mode and target_labels:
+        if target_labels:
             _ref_target = f"your target labels {target_labels} (exact match)"
             _in_ref = set(adata_ref_full.obs[ref_cell_col].astype(str).unique())
             _absent = [l for l in target_labels if l not in _in_ref]
@@ -1729,9 +1729,10 @@ def run_preprocessing_pipeline(
     # epithelial cells to B cell + plasma cell. Needed only if the h5ad has
     # no uns['cancer_type'] (e.g. a hand-supplied PopV h5ad).
     cancer_type=None,
-    # Haematological cancers only (blood_cancer / bone_marrow_cancer).
-    # None (default) -> automatic: every label containing "B cell" or
-    # "plasma cell". A list of labels -> ONLY those labels, matched EXACTLY
+    # ALL cancer types.
+    # None (default) -> automatic: epithelial labels (solid tumours) or every
+    # label containing "B cell" / "plasma cell" (blood_cancer /
+    # bone_marrow_cancer). A list of labels -> ONLY those labels, matched EXACTLY
     # against 'popv_majority_vote_prediction', e.g.
     #   target_cell_labels=["plasma cell", "B cell", "hematopoietic stem cell"]
     # If None, labels stored in adata.uns['target_cell_labels'] by Module 1
@@ -1803,11 +1804,7 @@ def run_preprocessing_pipeline(
     if _user_labels is None:
         _user_labels = _normalize_target_labels(adata_full.uns.get("target_cell_labels", None))
         _labels_src  = "adata.uns['target_cell_labels'] (stored by Module 1)"
-    if _user_labels and not heme_mode:
-        print("  NOTE: target_cell_labels were given, but they apply only to blood_cancer / "
-              "bone_marrow_cancer. They are ignored; the epithelial route is used.")
-        _user_labels = None
-    _custom_labels = bool(heme_mode and _user_labels)
+    _custom_labels = bool(_user_labels)
     if _custom_labels:
         print(f"  Using YOUR target labels (exact match, from {_labels_src}):")
         for _l in _user_labels:
@@ -2402,7 +2399,7 @@ def run_preprocessing_pipeline(
     adata_mal.uns["all_deg"]      = deg.reset_index(drop=True)
     adata_mal.uns["deg_params"]   = {
         "comparison"         : f"{_tgt_grp} vs {_rest_grp}",
-        "target_cell_route"  : ("user-selected labels" if _custom_labels else "B cell + plasma cell") if heme_mode else "epithelial",
+        "target_cell_route"  : "user-selected labels" if _custom_labels else ("B cell + plasma cell" if heme_mode else "epithelial"),
         "log2fc_threshold"   : log2fc_threshold,
         "pval_adj_threshold" : pval_adj_threshold,
         "method"             : "wilcoxon",
