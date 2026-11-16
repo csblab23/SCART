@@ -127,7 +127,7 @@ QC FIX  QC thresholds read from adata.uns['qc_params'] (set by Module 1).
         If absent, QC is SKIPPED ENTIRELY.
 
 ═══════════════════════════════════════════════════════════════════════════════
-CLAUDE EDIT — Step 8b + 3-way final gene intersection
+EDIT — Step 8b + 3-way final gene intersection
 ═══════════════════════════════════════════════════════════════════════════════
 
 FIX 12  New Step 8b (between the existing Step 8 DEG and Step 9 gene
@@ -157,7 +157,7 @@ FIX 13  Step 9's gene subsetting is now a 3-way intersection between THREE
         DEG ∩ surfaceome intersection.
 
 ═══════════════════════════════════════════════════════════════════════════════
-CLAUDE EDIT — Thread-oversubscription segfault fix + uns serialization fix
+EDIT — Thread-oversubscription segfault fix + uns serialization fix
 ═══════════════════════════════════════════════════════════════════════════════
 
 FIX 14  Root cause of the "Command terminated by signal 11" / kernel-dead
@@ -213,7 +213,7 @@ FIX 15  adata.uns['cc_params']['umap_plot_paths'] was stored as a raw
 
 import os
 
-# CLAUDE EDIT — FIX 14(a): set BLAS/OMP thread-limit env vars at import
+# EDIT — FIX 14(a): set BLAS/OMP thread-limit env vars at import
 # time, BEFORE numpy/scipy/scanpy get imported below. This is a
 # belt-and-suspenders default only — os.environ.setdefault() never
 # overrides a value already exported by the calling shell or SLURM script,
@@ -685,6 +685,12 @@ def _target_cell_mask(labels, heme_mode, target_labels=None):
 # SCEVAN reference preparation (mirrors Input_SCEVAN.ipynb exactly)
 # ═══════════════════════════════════════════════════════════════════════════
 
+class _ScevanRefLabelError(ValueError):
+    """Raised when none of the user's target labels can be matched to the
+    SCEVAN reference. Re-raised (not swallowed) so the run stops with a
+    clear message instead of silently producing 'not.defined' for every cell."""
+
+
 def _prepare_scevan_reference(
     adata_ref_full,
     ref_cell_col,
@@ -734,15 +740,55 @@ def _prepare_scevan_reference(
         # B cell + plasma cell population; all other cancers keep the
         # epithelial substring match.
         if target_labels:
-            _ref_target = f"your target labels {target_labels} (exact match)"
-            _in_ref = set(adata_ref_full.obs[ref_cell_col].astype(str).unique())
-            _absent = [l for l in target_labels if l not in _in_ref]
-            if _absent:
-                print(f"  WARNING: these target labels are not in the reference column "
-                      f"'{ref_cell_col}' and will not contribute to the SCEVAN baseline: {_absent}")
+            # Your labels rarely spell the cell type exactly as the reference
+            # does (e.g. 'B cells' vs 'b cell'). Auto-match: exact, then
+            # case/space/plural-insensitive; otherwise the built-in rule.
+            _ref_unique = sorted(adata_ref_full.obs[ref_cell_col].astype(str).unique())
+            _ref_set    = set(_ref_unique)
+
+            def _norm_lbl(s):
+                s = " ".join(str(s).lower().split())
+                return s[:-1] if s.endswith("s") else s
+
+            _norm_map = {}
+            for _r in _ref_unique:
+                _norm_map.setdefault(_norm_lbl(_r), []).append(_r)
+
+            _resolved, _absent = [], []
+            for _l in target_labels:
+                _hits = [_l] if _l in _ref_set else list(_norm_map.get(_norm_lbl(_l), []))
+                if _hits:
+                    print(f"  SCEVAN baseline match: your label '{_l}' -> reference "
+                          f"label(s) {_hits} (column '{ref_cell_col}')")
+                    _resolved.extend(h for h in _hits if h not in _resolved)
+                else:
+                    _absent.append(_l)
+
+            if _resolved:
+                if _absent:
+                    print(f"  WARNING: no reference label matches {_absent}; they will not "
+                          f"contribute to the SCEVAN baseline.")
+                _ref_target = f"reference labels {_resolved} (auto-matched to your target labels)"
+                ep_mask = _target_cell_mask(adata_ref_full.obs[ref_cell_col], heme_mode, _resolved)
+            else:
+                _fb = "'B cell' / 'plasma cell'" if heme_mode else "'epithelial cell'"
+                ep_mask = _target_cell_mask(adata_ref_full.obs[ref_cell_col], heme_mode, None)
+                if ep_mask.sum() == 0:
+                    _vc = adata_ref_full.obs[ref_cell_col].value_counts().to_string()
+                    raise _ScevanRefLabelError(
+                        f"SCEVAN baseline: none of your target labels {target_labels} could be "
+                        f"matched to a label in the reference column '{ref_cell_col}', and the "
+                        f"built-in rule {_fb} found nothing either.\n"
+                        f"Reference labels:\n{_vc}\n\n"
+                        f"Fix: pass scevan_ref_epithelial_values=['<reference label>'] "
+                        f"(the normal counterpart of your target cells, spelled exactly as above)."
+                    )
+                print(f"  No reference label matches your target labels {target_labels}; "
+                      f"using the built-in rule {_fb} for the SCEVAN baseline.")
+                _ref_target = f"built-in rule {_fb}"
         else:
             _ref_target = "'B cell' / 'plasma cell'" if heme_mode else "'epithelial cell'"
-        ep_mask = _target_cell_mask(adata_ref_full.obs[ref_cell_col], heme_mode, target_labels)
+            ep_mask = _target_cell_mask(adata_ref_full.obs[ref_cell_col], heme_mode, None)
         n_before = ep_mask.sum()
         logger.info(
             f"SCEVAN reference: substring match (contains {_ref_target}) "
@@ -843,6 +889,8 @@ def _run_scevan(
             heme_mode            = heme_mode,
             target_labels        = target_labels,
         )
+    except _ScevanRefLabelError:
+        raise
     except ValueError as exc:
         logger.error(f"SCEVAN reference preparation failed:\n{exc}")
         return empty_result
@@ -1080,7 +1128,7 @@ cat("Done!\\n")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# CLAUDE EDIT — Step 8b: Cancer Composition Score (tumor vs. healthy
+# EDIT — Step 8b: Cancer Composition Score (tumor vs. healthy
 # reference), Harmony integration + before/after UMAP QC plot.
 # Merged inline (single-file Module 3) rather than a separate import.
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1094,7 +1142,7 @@ cat("Done!\\n")
 def _get_raw_counts(adata, context=""):
     tag = f"[{context}] " if context else ""
 
-    # CLAUDE EDIT — memory fix: keep sparse input sparse. The old version
+    # EDIT — memory fix: keep sparse input sparse. The old version
     # always called .toarray() here, producing a dense copy even though
     # both call sites (build_tumor_healthy_combined) immediately re-wrap
     # the result in sp.csr_matrix() — a completely wasted dense round-trip.
@@ -1160,7 +1208,7 @@ def _detect_batch_column(adata, user_key=None, candidates=None, context=""):
     return None
 
 
-# CLAUDE EDIT — cell-type column auto-detection, added for the new
+# EDIT — cell-type column auto-detection, added for the new
 # Cell_Type UMAP panel (see plot_umap_before_after). Mirrors
 # _detect_batch_column's pattern exactly, just with a different candidate
 # list per side. This follows Ovarian_adata_prep.ipynb, which sets a single
@@ -1224,7 +1272,7 @@ def build_tumor_healthy_combined(
     merge logic (Data_Type tagging, batch tagging, inner-join on common
     genes, raw counts preserved in layers['counts']).
 
-    CLAUDE EDIT — also tags a unified obs['Cell_Type'] column on both
+    EDIT — also tags a unified obs['Cell_Type'] column on both
     sides before concatenation, mirroring Ovarian_adata_prep.ipynb (which
     unifies "free_annotation" on the healthy side and "popv_prediction" on
     the tumor side into one obs["popv_prediction"] column pre-concat).
@@ -1249,7 +1297,7 @@ def build_tumor_healthy_combined(
     adata_t = adata_tumor_fullgene[:, common_genes].copy()
     adata_h = adata_healthy[:, common_genes].copy()
 
-    # CLAUDE EDIT — memory fix: the full-size healthy reference (all
+    # EDIT — memory fix: the full-size healthy reference (all
     # 61,806 genes in a real run, not just the ~23,539 common ones) is no
     # longer needed once adata_h has been extracted above. Explicitly
     # delete + collect here instead of waiting for adata_healthy to fall
@@ -1271,7 +1319,7 @@ def build_tumor_healthy_combined(
     adata_t.obs["batch"] = (adata_t.obs[t_key].astype(str) if t_key else "tumor_all")
     adata_h.obs["batch"] = (adata_h.obs[h_key].astype(str) if h_key else "healthy_all")
 
-    # CLAUDE EDIT — unified Cell_Type column (see docstring above).
+    # EDIT — unified Cell_Type column (see docstring above).
     t_ct_key = _detect_celltype_column(
         adata_t, tumor_celltype_key,
         candidates=_DEFAULT_CELLTYPE_CANDIDATES_TUMOR, context="tumor",
@@ -1318,7 +1366,7 @@ def build_tumor_healthy_combined(
 # ═══════════════════════════════════════════════════════════════════════════
 
 def prepare_for_harmony(adata_combined, n_top_genes=3000):
-    # CLAUDE EDIT — memory fix: no full-size copy before HVG subsetting.
+    # EDIT — memory fix: no full-size copy before HVG subsetting.
     # The old version did adata_combined.copy() at the FULL common-gene
     # count (e.g. 23,539 in a real run) before ever reducing to HVGs,
     # meaning two full-size objects (the original adata_combined plus this
@@ -1369,7 +1417,7 @@ def run_harmony_integration(
     n_jobs=1,
 ):
     import harmonypy
-    # CLAUDE EDIT — FIX 14(b)+(c): threadpoolctl patches the already-loaded
+    # EDIT — FIX 14(b)+(c): threadpoolctl patches the already-loaded
     # native thread-pool libraries directly (unlike os.environ, which only
     # affects thread pools not yet initialized). NOTE: no user_api="blas"
     # filter here — sklearn's KMeans (harmonypy's centroid init, the
@@ -1385,7 +1433,7 @@ def run_harmony_integration(
     # Requires: pip install threadpoolctl
     from threadpoolctl import threadpool_limits
 
-    # CLAUDE EDIT — memory/thread fix, mirrors popv_annotation.py's Step 14
+    # EDIT — memory/thread fix, mirrors popv_annotation.py's Step 14
     # exactly (same env vars, same pattern). Kept as a first line of
     # defense for any BLAS calls made by libraries that don't go through
     # threadpoolctl's supported APIs; the threadpool_limits() context below
@@ -1436,7 +1484,7 @@ def _scatter(ax, coords, labels, title, legend=True, legend_outside=False):
     ax.set_title(title, fontsize=10)
     ax.set_xticks([])
     ax.set_yticks([])
-    # CLAUDE EDIT — legend_outside: always draw the legend (regardless of
+    # EDIT — legend_outside: always draw the legend (regardless of
     # how many categories there are) in a column outside the axes, so a
     # panel with many labels (e.g. Cell_Type, which can easily exceed the
     # existing 15-category cutoff below) still shows every colour's label
@@ -1452,7 +1500,7 @@ def plot_umap_before_after(adata_hvg, save_dir, sample_name="cancer_composition"
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    # CLAUDE EDIT — FIX 14(b)+(c): same threadpoolctl protection as
+    # EDIT — FIX 14(b)+(c): same threadpoolctl protection as
     # run_harmony_integration(), same no-user_api-filter fix (see the note
     # there). sc.pp.neighbors()/sc.tl.umap() also call into BLAS/sklearn/
     # OpenMP nearest-neighbor code right after Harmony in the same
@@ -1475,14 +1523,14 @@ def plot_umap_before_after(adata_hvg, save_dir, sample_name="cancer_composition"
     adata_hvg.obsm["X_umap_unintegrated"] = umap_unintegrated
     adata_hvg.obsm["X_umap_harmony"]      = umap_harmony
 
-    # CLAUDE EDIT — third row added: Cell_Type UMAP (unintegrated +
+    # EDIT — third row added: Cell_Type UMAP (unintegrated +
     # Harmony-integrated), using the obs['Cell_Type'] column tagged in
     # build_tumor_healthy_combined() (unified across tumor + healthy,
     # mirroring Ovarian_adata_prep.ipynb's common annotation column).
     # 2x2 grid -> 3x2 grid, 4 panels -> 6 panels total in the one figure.
     has_celltype = "Cell_Type" in adata_hvg.obs.columns
     n_rows = 3 if has_celltype else 2
-    # CLAUDE EDIT — figure widened when the Cell_Type row is present, to
+    # EDIT — figure widened when the Cell_Type row is present, to
     # leave room for its always-on outside legend (see legend_outside=True
     # below) without it being cut off or overlapping the scatter points.
     fig_width = 20 if has_celltype else 14
@@ -1492,7 +1540,7 @@ def plot_umap_before_after(adata_hvg, save_dir, sample_name="cancer_composition"
     _scatter(axes[1, 0], umap_harmony,      adata_hvg.obs["Data_Type"], "Harmony-integrated — Data_Type")
     _scatter(axes[1, 1], umap_harmony,      adata_hvg.obs["batch"],     "Harmony-integrated — batch", legend=False)
     if has_celltype:
-        # CLAUDE EDIT — legend_outside=True: cell types routinely number
+        # EDIT — legend_outside=True: cell types routinely number
         # well past the 15-category cutoff _scatter otherwise applies, so
         # without this the Cell_Type panels would render with no legend
         # at all and the colours wouldn't be visually comparable/labelled.
@@ -1503,7 +1551,7 @@ def plot_umap_before_after(adata_hvg, save_dir, sample_name="cancer_composition"
     fig.suptitle("Tumor vs. Healthy Reference — before/after Harmony integration", fontsize=12)
     fig.tight_layout()
 
-    # CLAUDE EDIT — png filename fixed to "harmony_run_umap_before_after.png"
+    # EDIT — png filename fixed to "harmony_run_umap_before_after.png"
     # per request (previously f"{sample_name}_umap_before_after.png"). The
     # pdf keeps the sample_name-based pattern (untouched otherwise).
     # bbox_inches="tight" added so the Cell_Type panels' outside legend is
@@ -1621,7 +1669,7 @@ def run_cancer_composition_step(
         segfault (signal 11) at KMeans initialization.
 
     tumor_celltype_key, healthy_celltype_key : str, optional
-        CLAUDE EDIT — obs column holding per-side cell-type labels, used
+        EDIT — obs column holding per-side cell-type labels, used
         only to populate the unified obs['Cell_Type'] column for the extra
         Cell_Type UMAP panel added to plot_umap_before_after(). Auto-
         detected via _DEFAULT_CELLTYPE_CANDIDATES_TUMOR /
@@ -1637,7 +1685,7 @@ def run_cancer_composition_step(
     print("\n--- Step 8b: Cancer Composition Score (tumor vs. healthy reference) ---")
     os.makedirs(save_dir, exist_ok=True)
 
-    # CLAUDE EDIT — global seed, matching run_harmony_integration.py's
+    # EDIT — global seed, matching run_harmony_integration.py's
     # set_seed() exactly. Previously only harmonypy's own random_state was
     # seeded (inside run_harmony_integration() below); sc.tl.umap() is also
     # stochastic and depends on sc.settings.seed / numpy's global RNG for
@@ -1661,7 +1709,7 @@ def run_cancer_composition_step(
         adata_hvg, batch_key="batch", n_pcs=n_pcs,
         max_iter_harmony=max_iter_harmony, theta=theta, seed=seed, n_jobs=n_jobs,
     )
-    # CLAUDE EDIT — n_jobs threaded through to plot_umap_before_after()
+    # EDIT — n_jobs threaded through to plot_umap_before_after()
     # (FIX 14b) so its threadpoolctl wrap actually enforces the same
     # thread limit as run_harmony_integration(), instead of silently
     # defaulting to n_jobs=1 regardless of what the caller requested.
@@ -1700,7 +1748,7 @@ def run_preprocessing_pipeline(
     scevan_par_cores=1,
     scevan_subclones=False,
     scevan_batch_size=3000,
-    # CLAUDE EDIT — Step 8b (Cancer Composition Score) parameters.
+    # EDIT — Step 8b (Cancer Composition Score) parameters.
     # No separate healthy-reference path here on purpose: reference_h5ad
     # (already required above, for SCEVAN) is the ONE h5ad the user supplies
     # for this whole module — it's reused as the healthy reference here too.
@@ -1714,7 +1762,7 @@ def run_preprocessing_pipeline(
     cc_n_jobs=1,
     cc_tumor_batch_key=None,
     cc_healthy_batch_key=None,
-    # CLAUDE EDIT — cell-type columns for the new Cell_Type UMAP panel
+    # EDIT — cell-type columns for the new Cell_Type UMAP panel
     # (see plot_umap_before_after / build_tumor_healthy_combined). Purely
     # cosmetic/QC — auto-detected if not supplied, does not affect any
     # DEG, SCEVAN, or Cancer Composition Score computation.
@@ -1757,7 +1805,7 @@ def run_preprocessing_pipeline(
     # STEP 1 — Load full PopV h5ad (or, in manual-annotation mode, Module 1's
     # skip_popv=True output).
     #
-    # CLAUDE EDIT — _auto_popv_h5ad() only ever looks for PopV's own output
+    # EDIT — _auto_popv_h5ad() only ever looks for PopV's own output
     # filename (popv_results/final_popv_annotated.h5ad / final_popv_annotated
     # .h5ad). When Module 1 (SampleAnnotator) is run with manual_annotation_col=
     # set, it takes the skip_popv=True branch and PopV never runs at all — it
@@ -1804,6 +1852,28 @@ def run_preprocessing_pipeline(
     if _user_labels is None:
         _user_labels = _normalize_target_labels(adata_full.uns.get("target_cell_labels", None))
         _labels_src  = "adata.uns['target_cell_labels'] (stored by Module 1)"
+    # Manual-annotation mode: the user's labels can have ANY name. If no
+    # target labels were given and none matches the built-in rule, a single
+    # label is used automatically; with several labels the user is asked to
+    # choose (target_cell_labels=[...]) — no renaming of the h5ad needed.
+    if (not _user_labels) and adata_full.uns.get("skip_popv", False) \
+            and "popv_majority_vote_prediction" in adata_full.obs.columns:
+        _all_lbls = pd.Series(
+            adata_full.obs["popv_majority_vote_prediction"].astype(str).unique()
+        )
+        if not _target_cell_mask(_all_lbls, heme_mode, None).any():
+            if len(_all_lbls) == 1:
+                _user_labels = [str(_all_lbls.iloc[0])]
+                _labels_src  = "auto-selected: the only label in the annotation column"
+            else:
+                raise ValueError(
+                    "Manual annotation mode: none of your labels matches the built-in "
+                    "target-cell rule, so the tool cannot tell which cells to analyse.\n"
+                    f"Labels present: {sorted(_all_lbls)}\n"
+                    "No renaming is needed. Pass the label(s) of the cells you want, e.g.\n"
+                    "  target_cell_labels=['<label>']\n"
+                    "to run_preprocessing_pipeline (or to SampleAnnotator in Module 1)."
+                )
     _custom_labels = bool(_user_labels)
     if _custom_labels:
         print(f"  Using YOUR target labels (exact match, from {_labels_src}):")
@@ -1909,7 +1979,7 @@ def run_preprocessing_pipeline(
     min_genes, max_mt, qc_active, qc_source = _read_qc_params(adata_full)
 
     # STEP 3 — Extract epithelial cells
-    # CLAUDE EDIT: QC (min_genes / max_mt) is intentionally NOT re-applied
+    # EDIT: QC (min_genes / max_mt) is intentionally NOT re-applied
     # here. Module 1 already filtered cells against these exact thresholds
     # before this data ever reached Module 2/3 — re-filtering here dropped
     # cells a second time against the same numbers (a "double QC"). The
@@ -1932,6 +2002,15 @@ def run_preprocessing_pipeline(
     print(f"{_cell_desc.capitalize()} cells ({'matching' if _custom_labels else 'contains'} {_label_phrase}): "
           f"{ep_mask.sum()} / {adata_full.n_obs} total")
     print(f"Non-{_cell_desc} cells (will be 'rest' group for DEG): {(~ep_mask).sum()}")
+
+    if (~ep_mask).sum() < 2:
+        raise ValueError(
+            f"The DEG step compares malignant {_cell_desc} cells against all other cells, "
+            f"but this input has only {int((~ep_mask).sum())} non-{_cell_desc} cell(s) "
+            f"(all {int(ep_mask.sum())} cells are target cells).\n"
+            "Provide an input that also contains other cell types (e.g. T cells, "
+            "stromal or normal cells from the same samples) and re-run."
+        )
 
     matched_labels = labels[ep_mask].unique()
     logger.info(f"{_cell_desc} labels matched: {sorted(matched_labels)}")
@@ -2118,6 +2197,8 @@ def run_preprocessing_pipeline(
                 print("  Prediction counts:")
                 print(adata_epi.obs["scevan_prediction"].value_counts().to_string())
 
+            except _ScevanRefLabelError:
+                raise
             except Exception as exc:
                 print(f"\nWarning: SCEVAN failed — {type(exc).__name__}: {exc}\n"
                       "  Falling back to scMalignantFinder only.")
@@ -2203,7 +2284,7 @@ def run_preprocessing_pipeline(
             "Check scMalignantFinder model path and gene overlap."
         )
 
-    # CLAUDE EDIT — full-gene-space snapshot for Step 8b, taken right after
+    # EDIT — full-gene-space snapshot for Step 8b, taken right after
     # Step 5, before Step 9's final gene subsetting touches adata_mal.
     # (Step 7 no longer restricts adata_mal's genes — see FIX 13 above —
     # but this snapshot is kept as a defensive, explicit copy regardless.)
@@ -2221,7 +2302,7 @@ def run_preprocessing_pipeline(
     sc.pp.log1p(adata_rest)
 
     # STEP 7 — Load surfaceome gene list (GESP file)
-    # CLAUDE EDIT: this used to SUBSET adata_mal/adata_rest to surfaceome
+    # EDIT: this used to SUBSET adata_mal/adata_rest to surfaceome
     # genes before DEG ran, so Step 8's Wilcoxon test only ever saw ~3,568
     # surfaceome genes. Per your correction, surfaceome membership is now a
     # separate, independent criterion — not a pre-filter. Step 8 (DEG) and
@@ -2246,7 +2327,7 @@ def run_preprocessing_pipeline(
     adata_mal.obs["deg_group"]  = _tgt_grp
     adata_rest.obs["deg_group"] = _rest_grp
 
-    # CLAUDE EDIT — capture before freeing adata_rest later; only the cell
+    # EDIT — capture before freeing adata_rest later; only the cell
     # count is needed downstream (uns['deg_params']), not the object itself.
     n_rest_cells = adata_rest.n_obs
 
@@ -2254,7 +2335,7 @@ def run_preprocessing_pipeline(
     adata_deg.obs_names_make_unique()
     adata_deg.var = adata_mal.var.copy()
 
-    # CLAUDE EDIT — memory fix: same anti-pattern as _get_raw_counts (now
+    # EDIT — memory fix: same anti-pattern as _get_raw_counts (now
     # fixed above) — densify -> nan_to_num -> resparsify wasted a full
     # dense copy (for 7,528 cells x 23,539 genes here, ~700MB+) purely to
     # sanitize NaNs. scanpy's rank_genes_groups works fine on sparse input;
@@ -2286,7 +2367,7 @@ def run_preprocessing_pipeline(
     print(f"\nTotal DEG candidates: {deg.shape[0]}")
     print(f"Applying filters: log2FC > {log2fc_threshold}, pvals_adj < {pval_adj_threshold}")
 
-    # CLAUDE EDIT — memory fix: adata_deg and adata_rest are not referenced
+    # EDIT — memory fix: adata_deg and adata_rest are not referenced
     # anywhere after this point (deg's stats are already extracted above;
     # n_rest_cells was captured earlier) — free them explicitly now,
     # before Step 8b's much larger Harmony/PCA/KMeans allocations begin,
@@ -2308,7 +2389,7 @@ def run_preprocessing_pipeline(
         print(f"\nTop 10 DEGs (malignant {_cell_desc} vs non-{_cell_desc} rest):")
         print(filtered_deg.head(10).to_string(index=False))
 
-    # CLAUDE EDIT — STEP 8b: Cancer Composition Score (tumor vs. healthy
+    # EDIT — STEP 8b: Cancer Composition Score (tumor vs. healthy
     # reference), Harmony-integrated, with before/after UMAP QC plots.
     # Uses reference_h5ad directly — the same Tabula Sapiens file already
     # required above for SCEVAN. No separate healthy-reference argument.
@@ -2416,7 +2497,7 @@ def run_preprocessing_pipeline(
         {"min_genes": min_genes, "max_mt": max_mt} if qc_active else None
     )
 
-    # CLAUDE EDIT — store Step 8b + final 3-way selection for traceability
+    # EDIT — store Step 8b + final 3-way selection for traceability
     adata_mal.uns["cancer_composition_scores"] = (
         cc_df.reset_index(drop=True) if cc_df is not None else None
     )
@@ -2425,7 +2506,7 @@ def run_preprocessing_pipeline(
         "healthy_reference"   : _cc_healthy_ref,
         "cc_score_threshold"  : cc_score_threshold,
         "n_cc_genes"          : int(len(cc_genes)) if cc_genes is not None else None,
-        # CLAUDE EDIT — FIX 15: cast tuple -> list. anndata's HDF5 writer
+        # EDIT — FIX 15: cast tuple -> list. anndata's HDF5 writer
         # (write_elem) has no registered writer for the built-in `tuple`
         # type, so storing cc_plot_paths (a (pdf_path, png_path) tuple
         # returned by plot_umap_before_after) directly here caused
