@@ -209,7 +209,7 @@ class SampleAnnotator:
         # annotation labels (exact match).
         self.target_cell_labels = _normalize_target_labels(target_cell_labels)
 
-        # CLAUDE EDIT — optional keyword to search for in GEO sample metadata
+        # EDIT — optional keyword to search for in GEO sample metadata
         # (e.g. "donor", "patient", "timepoint") to build a batch column for
         # GSE-derived data. Only meaningful for GEO ID inputs — has no effect
         # on user-supplied h5ad inputs, since those already carry their own
@@ -351,17 +351,18 @@ class SampleAnnotator:
         if not epithelial:
             if _heme:
                 print(
-                    "\n  ⚠ WARNING: No 'B cell' or 'plasma cell' labels detected.\n"
-                    "  For blood_cancer / bone_marrow_cancer, labels must contain "
-                    "'B cell' or 'plasma cell' (case-insensitive)."
+                    "\n  NOTE: No label matches the built-in 'B cell' / 'plasma cell' rule.\n"
+                    "  No renaming is needed: a single label is used automatically in Module 3;\n"
+                    "  with several labels, pass target_cell_labels=[...]."
                 )
             else:
                 print(
-                    "\n  ⚠ WARNING: No epithelial labels detected.\n"
-                    "  Labels must END WITH 'epithelial cell' (case-insensitive)."
+                    "\n  NOTE: No label matches the built-in epithelial rule.\n"
+                    "  No renaming is needed: a single label is used automatically in Module 3;\n"
+                    "  with several labels, pass target_cell_labels=[...]."
                 )
 
-    # CLAUDE EDIT — search a GSM's GEO metadata for a field matching
+    # EDIT — search a GSM's GEO metadata for a field matching
     # self.batch_key (case-insensitive substring on the field's key),
     # GEO characteristics are typically formatted as "key: value" strings
     # (e.g. "donor: P1", "patient id: 3"). Returns the value, or None if
@@ -405,7 +406,7 @@ class SampleAnnotator:
         for ct in self._unknown_types:
             print(f"\n⚠️  '{ct}' not in Tabula Sapiens — supply your own reference.")
 
-    # CLAUDE EDIT — explains what batch key will be used downstream, and
+    # EDIT — explains what batch key will be used downstream, and
     # what to do if the default (GSM ID) isn't right for this dataset.
     def _print_batch_guidance(self):
         print("\n========== BATCH KEY GUIDANCE ==========")
@@ -717,7 +718,7 @@ class SampleAnnotator:
                 unspecified.append(gsm_id)
             annotation_info[gsm_id] = label
 
-            # CLAUDE EDIT — try to extract the requested batch_key
+            # EDIT — try to extract the requested batch_key
             # value from this GSM's own metadata text.
             if self.batch_key:
                 batch_hint_map[gsm_id] = self._extract_batch_hint_value(gsm)
@@ -756,7 +757,7 @@ class SampleAnnotator:
         if any(fl.endswith(e) for e in (".mtx", ".mtx.gz", ".h5", ".hdf5", ".h5.gz")):
             return None
         try:
-            # CLAUDE EDIT — explicit UTF-8 (same fix as popv_annotation.py's
+            # EDIT — explicit UTF-8 (same fix as popv_annotation.py's
             # cl.obo read): without this, text-mode open()/gzip.open("rt")
             # fall back to the OS default encoding — cp1252 on Windows —
             # which can crash or silently mangle non-ASCII bytes in GEO
@@ -1104,7 +1105,7 @@ class SampleAnnotator:
 
         if meta_path:
             try:
-                # CLAUDE EDIT — explicit UTF-8, same fix as _read_generic_matrix
+                # EDIT — explicit UTF-8, same fix as _read_generic_matrix
                 # above and popv_annotation.py's cl.obo read.
                 opener = gzip.open(meta_path, "rt", encoding="utf-8") if meta_path.endswith(".gz") \
                          else open(meta_path, "r", encoding="utf-8")
@@ -1198,7 +1199,7 @@ class SampleAnnotator:
                             except Exception:
                                 pass
 
-                    # CLAUDE EDIT — Tier 0 has no per-GSM GEO metadata text
+                    # EDIT — Tier 0 has no per-GSM GEO metadata text
                     # to scan (that's the per-GSM path's job); instead, look
                     # for a column in the bundled cell-metadata file whose
                     # NAME matches batch_key (case-insensitive
@@ -1375,7 +1376,7 @@ class SampleAnnotator:
 
                 adata.obs["gsm_id"] = gsm_id
                 adata.obs["gse_id"] = gse_id
-                # CLAUDE EDIT — stamp the requested batch_key value
+                # EDIT — stamp the requested batch_key value
                 # (extracted per-GSM in _process_gse) onto every cell from
                 # this sample, same pattern as gsm_id/gse_id above.
                 if self.batch_key:
